@@ -7,13 +7,16 @@
 #pragma once
 
 #include "esp_lcd_panel_ops.h"
+#include "board_config.h"
 #include <stdint.h>
 
 /**
  * @brief Simple GUI drawing library for LCD panels
- * 
+ *
  * This library provides basic drawing functions without LVGL dependency.
  * Supports RGB888 color format.
+ *
+ * Color constants (COLOR_RED, COLOR_WHITE, etc.) are defined in board_config.h.
  */
 
 typedef struct {
@@ -21,18 +24,6 @@ typedef struct {
     uint16_t width;
     uint16_t height;
 } simple_gui_t;
-
-// Color definitions (RGB888)
-#define COLOR_RED       0xFF0000
-#define COLOR_GREEN     0x00FF00
-#define COLOR_BLUE      0x0000FF
-#define COLOR_WHITE     0xFFFFFF
-#define COLOR_BLACK     0x000000
-#define COLOR_YELLOW    0xFFFF00
-#define COLOR_CYAN      0x00FFFF
-#define COLOR_MAGENTA   0xFF00FF
-#define COLOR_ORANGE    0xFF8000
-#define COLOR_GRAY      0x808080
 
 /**
  * @brief Initialize GUI context

@@ -7,36 +7,23 @@
 #pragma once
 
 #include "esp_lcd_st7701.h"
-
-// KD034WXFID001 screen specifications
-#define KD034WXFID001_H_RES     480
-#define KD034WXFID001_V_RES     480
-#define KD034WXFID001_DPI_CLK_MHZ 20
-#define KD034WXFID001_FRAME_RATE 60
-
-// Timing parameters from KD034WXFID001 MIPI.txt
-#define KD034WXFID001_HSA       8
-#define KD034WXFID001_HBP       56
-#define KD034WXFID001_HFP       20
-#define KD034WXFID001_VSA       10
-#define KD034WXFID001_VBP       60
-#define KD034WXFID001_VFP       40
-
-// Hardware configuration
-#define KD034WXFID001_RESET_GPIO    9
-#define KD034WXFID001_BACKLIGHT_GPIO 0
-#define KD034WXFID001_MIPI_DSI_LANE_NUM 2
-#define KD034WXFID001_MIPI_DSI_LANE_BITRATE_MBPS 500
-
-// MIPI DSI PHY power configuration
-#define KD034WXFID001_MIPI_PHY_PWR_LDO_CHAN 3
-#define KD034WXFID001_MIPI_PHY_PWR_LDO_VOLTAGE_MV 2500
+#include "board_config.h"
 
 /**
  * @brief KD034WXFID001 specific initialization commands
- * 
+ *
  * This array contains the initialization sequence from KD034WXFID001 MIPI.txt
  * for ST7701S driver IC with 480x480 resolution.
+ *
+ * Sequence overview:
+ *   1. Bank0/Bank10/Bank11 switching via Command2 BKx SEL (0xFF)
+ *   2. Display Control: resolution, inversion, driving strength
+ *   3. Gamma correction (positive and negative)
+ *   4. Power Control: AVDD, VCOM, charge pump settings
+ *   5. GIP (Gate-in-Panel) timing configuration
+ *   6. Sleep Out (0x11) with 120ms delay
+ *   7. Display On (0x29) with 25ms delay
+ *   8. TE signal configuration
  */
 static const st7701_lcd_init_cmd_t kd034wxfid001_init_cmds[] = {
     // Bank0 setting - Command2 BKx SEL

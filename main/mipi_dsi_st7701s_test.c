@@ -18,6 +18,7 @@
 #include "esp_log.h"
 #include "esp_lcd_st7701.h"
 #include "st7701s_kd034_init.h"
+#include "board_config.h"
 #include "simple_gui.h"
 #include "touch_gui.h"
 #include "gesture_recognition.h"
@@ -29,12 +30,6 @@
 
 static const char *TAG = "st7701s_test";
 
-// Backlight PWM configuration
-#define BACKLIGHT_PWM_FREQ_HZ     5000
-#define BACKLIGHT_PWM_DUTY_RES    LEDC_TIMER_8_BIT
-#define BACKLIGHT_PWM_TIMER       LEDC_TIMER_0
-#define BACKLIGHT_PWM_CHANNEL     LEDC_CHANNEL_0
-
 /**
  * @brief Initialize MIPI DSI PHY power
  */
@@ -42,8 +37,8 @@ static void enable_dsi_phy_power(void)
 {
     esp_ldo_channel_handle_t ldo_mipi_phy = NULL;
     esp_ldo_channel_config_t ldo_mipi_phy_config = {
-        .chan_id = KD034WXFID001_MIPI_PHY_PWR_LDO_CHAN,
-        .voltage_mv = KD034WXFID001_MIPI_PHY_PWR_LDO_VOLTAGE_MV,
+        .chan_id = BOARD_DSI_PHY_LDO_CHAN,
+        .voltage_mv = BOARD_DSI_PHY_LDO_VOLTAGE_MV,
     };
     ESP_ERROR_CHECK(esp_ldo_acquire_channel(&ldo_mipi_phy_config, &ldo_mipi_phy));
     ESP_LOGI(TAG, "MIPI DSI PHY powered on");
@@ -56,10 +51,10 @@ static void init_backlight(void)
 {
     gpio_config_t bk_gpio_config = {
         .mode = GPIO_MODE_OUTPUT,
-        .pin_bit_mask = 1ULL << KD034WXFID001_BACKLIGHT_GPIO,
+        .pin_bit_mask = 1ULL << BOARD_BL_GPIO,
     };
     ESP_ERROR_CHECK(gpio_config(&bk_gpio_config));
-    gpio_set_level(KD034WXFID001_BACKLIGHT_GPIO, 1); // Turn on backlight
+    gpio_set_level(BOARD_BL_GPIO, 1); // Turn on backlight
     ESP_LOGI(TAG, "Backlight initialized and turned on");
 }
 
@@ -72,7 +67,7 @@ static void advanced_gui_test(esp_lcd_panel_handle_t panel)
     
     // Initialize GUI context
     simple_gui_t gui;
-    simple_gui_init(&gui, panel, KD034WXFID001_H_RES, KD034WXFID001_V_RES);
+    simple_gui_init(&gui, panel, BOARD_LCD_H_RES, BOARD_LCD_V_RES);
     
     // Test 1: Clear screen to white
     ESP_LOGI(TAG, "Test 1: Clear screen");
@@ -163,17 +158,17 @@ static void touch_test(esp_lcd_panel_handle_t panel)
     
     // Initialize GUI context
     simple_gui_t gui;
-    simple_gui_init(&gui, panel, KD034WXFID001_H_RES, KD034WXFID001_V_RES);
+    simple_gui_init(&gui, panel, BOARD_LCD_H_RES, BOARD_LCD_V_RES);
     
     // Step 1: Create I2C master bus
     ESP_LOGI(TAG, "Creating I2C master bus...");
     i2c_master_bus_config_t i2c_bus_config = {
-        .i2c_port = I2C_NUM_0,
-        .sda_io_num = GPIO_NUM_7,
-        .scl_io_num = GPIO_NUM_8,
+        .i2c_port = BOARD_TOUCH_I2C_PORT,
+        .sda_io_num = BOARD_TOUCH_I2C_SDA_GPIO,
+        .scl_io_num = BOARD_TOUCH_I2C_SCL_GPIO,
         .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
+        .glitch_ignore_cnt = BOARD_TOUCH_I2C_GLITCH_CNT,
+        .flags.enable_internal_pullup = BOARD_TOUCH_I2C_PULLUP,
     };
     
     i2c_master_bus_handle_t i2c_bus_handle = NULL;
@@ -207,18 +202,18 @@ static void touch_test(esp_lcd_panel_handle_t panel)
     };
     
     esp_lcd_touch_config_t tp_cfg = {
-        .x_max = KD034WXFID001_H_RES,
-        .y_max = KD034WXFID001_V_RES,
-        .rst_gpio_num = GPIO_NUM_34,
-        .int_gpio_num = GPIO_NUM_36,
+        .x_max = BOARD_LCD_H_RES,
+        .y_max = BOARD_LCD_V_RES,
+        .rst_gpio_num = BOARD_TOUCH_RST_GPIO,
+        .int_gpio_num = BOARD_TOUCH_INT_GPIO,
         .levels = {
-            .reset = 0,
-            .interrupt = 0,
+            .reset = BOARD_TOUCH_RST_ACTIVE_LOW,
+            .interrupt = BOARD_TOUCH_INT_ACTIVE_LOW,
         },
         .flags = {
-            .swap_xy = 0,
-            .mirror_x = 0,
-            .mirror_y = 0,
+            .swap_xy = BOARD_TOUCH_SWAP_XY,
+            .mirror_x = BOARD_TOUCH_MIRROR_X,
+            .mirror_y = BOARD_TOUCH_MIRROR_Y,
         },
         .driver_data = &tp_gt911_config,
     };
@@ -281,9 +276,9 @@ void app_main(void)
     esp_lcd_dsi_bus_handle_t mipi_dsi_bus = NULL;
     esp_lcd_dsi_bus_config_t bus_config = {
         .bus_id = 0,
-        .num_data_lanes = KD034WXFID001_MIPI_DSI_LANE_NUM,
+        .num_data_lanes = BOARD_DSI_LANE_NUM,
         .phy_clk_src = MIPI_DSI_PHY_CLK_SRC_DEFAULT,
-        .lane_bit_rate_mbps = KD034WXFID001_MIPI_DSI_LANE_BITRATE_MBPS,
+        .lane_bit_rate_mbps = BOARD_DSI_LANE_BITRATE_MBPS,
     };
     ESP_ERROR_CHECK(esp_lcd_new_dsi_bus(&bus_config, &mipi_dsi_bus));
     
@@ -291,9 +286,9 @@ void app_main(void)
     ESP_LOGI(TAG, "Creating DBI panel IO...");
     esp_lcd_panel_io_handle_t mipi_dbi_io = NULL;
     esp_lcd_dbi_io_config_t dbi_config = {
-        .virtual_channel = 0,
-        .lcd_cmd_bits = 8,
-        .lcd_param_bits = 8,
+        .virtual_channel = BOARD_DSI_VIRTUAL_CHANNEL,
+        .lcd_cmd_bits = BOARD_DSI_CMD_BITS,
+        .lcd_param_bits = BOARD_DSI_PARAM_BITS,
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_dbi(mipi_dsi_bus, &dbi_config, &mipi_dbi_io));
     
@@ -301,19 +296,19 @@ void app_main(void)
     ESP_LOGI(TAG, "Configuring DPI panel timing...");
     esp_lcd_dpi_panel_config_t dpi_config = {
         .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,
-        .dpi_clock_freq_mhz = KD034WXFID001_DPI_CLK_MHZ,
+        .dpi_clock_freq_mhz = BOARD_LCD_DPI_CLK_MHZ,
         .virtual_channel = 0,
         .in_color_format = LCD_COLOR_FMT_RGB888,
         .num_fbs = 1,
         .video_timing = {
-            .h_size = KD034WXFID001_H_RES,
-            .v_size = KD034WXFID001_V_RES,
-            .hsync_pulse_width = KD034WXFID001_HSA,
-            .hsync_back_porch = KD034WXFID001_HBP,
-            .hsync_front_porch = KD034WXFID001_HFP,
-            .vsync_pulse_width = KD034WXFID001_VSA,
-            .vsync_back_porch = KD034WXFID001_VBP,
-            .vsync_front_porch = KD034WXFID001_VFP,
+            .h_size = BOARD_LCD_H_RES,
+            .v_size = BOARD_LCD_V_RES,
+            .hsync_pulse_width = BOARD_LCD_HSA,
+            .hsync_back_porch = BOARD_LCD_HBP,
+            .hsync_front_porch = BOARD_LCD_HFP,
+            .vsync_pulse_width = BOARD_LCD_VSA,
+            .vsync_back_porch = BOARD_LCD_VBP,
+            .vsync_front_porch = BOARD_LCD_VFP,
         },
     };
     
@@ -329,7 +324,7 @@ void app_main(void)
     };
     
     esp_lcd_panel_dev_config_t panel_config = {
-        .reset_gpio_num = KD034WXFID001_RESET_GPIO,
+        .reset_gpio_num = BOARD_LCD_RESET_GPIO,
         .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
         .bits_per_pixel = 24,
         .vendor_config = &vendor_config,

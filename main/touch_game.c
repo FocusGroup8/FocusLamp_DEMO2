@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include <math.h>
+#include "board_config.h"
 
 static const char *TAG = "TOUCH_GAME";
 
@@ -55,48 +56,48 @@ static void game_gesture_callback(gesture_type_t gesture, void *user_data)
     
     switch (gesture) {
         case GESTURE_SWIPE_LEFT:
-            game_ball->velocity_x = -8;
+            game_ball->velocity_x = -APP_GAME_BALL_VELOCITY;
             game_ball->velocity_y = 0;
             game_ball->color = COLOR_RED;
             break;
-            
+
         case GESTURE_SWIPE_RIGHT:
-            game_ball->velocity_x = 8;
+            game_ball->velocity_x = APP_GAME_BALL_VELOCITY;
             game_ball->velocity_y = 0;
             game_ball->color = COLOR_GREEN;
             break;
-            
+
         case GESTURE_SWIPE_UP:
             game_ball->velocity_x = 0;
-            game_ball->velocity_y = -8;
+            game_ball->velocity_y = -APP_GAME_BALL_VELOCITY;
             game_ball->color = COLOR_BLUE;
             break;
-            
+
         case GESTURE_SWIPE_DOWN:
             game_ball->velocity_x = 0;
-            game_ball->velocity_y = 8;
+            game_ball->velocity_y = APP_GAME_BALL_VELOCITY;
             game_ball->color = COLOR_YELLOW;
             break;
-            
+
         case GESTURE_PINCH_IN:
-            if (game_ball->radius > 10) {
-                game_ball->radius -= 5;
-                game_ball->score += 1;
+            if (game_ball->radius > APP_GAME_BALL_MIN_RADIUS) {
+                game_ball->radius -= APP_GAME_BALL_RADIUS_STEP;
+                game_ball->score += APP_GAME_SCORE_PINCH;
                 ESP_LOGI(TAG, "Ball size decreased: radius=%d, score=%d", game_ball->radius, game_ball->score);
             }
             break;
-            
+
         case GESTURE_PINCH_OUT:
-            if (game_ball->radius < 50) {
-                game_ball->radius += 5;
-                game_ball->score += 1;
+            if (game_ball->radius < APP_GAME_BALL_MAX_RADIUS) {
+                game_ball->radius += APP_GAME_BALL_RADIUS_STEP;
+                game_ball->score += APP_GAME_SCORE_PINCH;
                 ESP_LOGI(TAG, "Ball size increased: radius=%d, score=%d", game_ball->radius, game_ball->score);
             }
             break;
-            
+
         case GESTURE_ROTATION:
-            game_ball->rotation += M_PI / 6; // Rotate 30 degrees
-            game_ball->score += 2;
+            game_ball->rotation += APP_GAME_BALL_ROTATION_STEP_RAD;
+            game_ball->score += APP_GAME_SCORE_ROTATION;
             ESP_LOGI(TAG, "Ball rotated: angle=%.1f, score=%d", game_ball->rotation * 180 / M_PI, game_ball->score);
             break;
             
@@ -116,13 +117,13 @@ void touch_game_demo(simple_gui_t *gui, esp_lcd_touch_handle_t tp)
     
     // Initialize ball state
     ball_state_t ball = {
-        .x = 240,          // Center of screen (480x480)
-        .y = 240,
-        .radius = 25,      // Initial radius
-        .rotation = 0,     // Initial rotation angle
-        .velocity_x = 0,   // No initial movement
+        .x = APP_GAME_BALL_INIT_X,
+        .y = APP_GAME_BALL_INIT_Y,
+        .radius = APP_GAME_BALL_INIT_RADIUS,
+        .rotation = 0,
+        .velocity_x = 0,
         .velocity_y = 0,
-        .color = COLOR_MAGENTA,
+        .color = APP_GAME_BALL_INIT_COLOR,
         .paused = false,
         .score = 0
     };
@@ -146,13 +147,14 @@ void touch_game_demo(simple_gui_t *gui, esp_lcd_touch_handle_t tp)
     gui_draw_string(gui, 10, 140, "Long press: Pause", COLOR_CYAN, COLOR_BLACK, 1);
     
     // Draw game area
-    gui_draw_rect_outline(gui, 10, 170, 470, 400, COLOR_GREEN, 2);
+    gui_draw_rect_outline(gui, APP_GAME_AREA_OUTLINE_X1, APP_GAME_AREA_OUTLINE_Y1,
+                          APP_GAME_AREA_OUTLINE_X2, APP_GAME_AREA_OUTLINE_Y2, COLOR_GREEN, 2);
     gui_draw_string(gui, 10, 175, "Game Area", COLOR_GREEN, COLOR_BLACK, 1);
-    
+
     // Game loop
     int frame_count = 0;
-    
-    while (frame_count < 1000) { // Run for ~20 seconds (50 FPS)
+
+    while (frame_count < APP_GAME_MAX_FRAMES) {
         
         // Update gesture recognition
         gesture_recognition_update(&gesture_ctx, tp);
@@ -163,33 +165,33 @@ void touch_game_demo(simple_gui_t *gui, esp_lcd_touch_handle_t tp)
             ball.y += ball.velocity_y;
             
             // Boundary checking (keep ball in game area)
-            if (ball.x < 30) {
-                ball.x = 30;
+            if (ball.x < APP_GAME_AREA_X_MIN) {
+                ball.x = APP_GAME_AREA_X_MIN;
                 ball.velocity_x = 0;
-                ball.score += 5;
+                ball.score += APP_GAME_SCORE_BOUNDARY;
                 ESP_LOGI(TAG, "Boundary hit LEFT: score=%d", ball.score);
             }
-            if (ball.x > 450) {
-                ball.x = 450;
+            if (ball.x > APP_GAME_AREA_X_MAX) {
+                ball.x = APP_GAME_AREA_X_MAX;
                 ball.velocity_x = 0;
-                ball.score += 5;
+                ball.score += APP_GAME_SCORE_BOUNDARY;
                 ESP_LOGI(TAG, "Boundary hit RIGHT: score=%d", ball.score);
             }
-            if (ball.y < 190) {
-                ball.y = 190;
+            if (ball.y < APP_GAME_AREA_Y_MIN) {
+                ball.y = APP_GAME_AREA_Y_MIN;
                 ball.velocity_y = 0;
-                ball.score += 5;
+                ball.score += APP_GAME_SCORE_BOUNDARY;
                 ESP_LOGI(TAG, "Boundary hit TOP: score=%d", ball.score);
             }
-            if (ball.y > 380) {
-                ball.y = 380;
+            if (ball.y > APP_GAME_AREA_Y_MAX) {
+                ball.y = APP_GAME_AREA_Y_MAX;
                 ball.velocity_y = 0;
-                ball.score += 5;
+                ball.score += APP_GAME_SCORE_BOUNDARY;
                 ESP_LOGI(TAG, "Boundary hit BOTTOM: score=%d", ball.score);
             }
-            
+
             // Update rotation animation (continuous rotation effect)
-            ball.rotation += 0.05f;
+            ball.rotation += APP_GAME_BALL_ROTATION_SPEED;
             if (ball.rotation >= 2 * M_PI) {
                 ball.rotation -= 2 * M_PI;
             }
@@ -218,8 +220,8 @@ void touch_game_demo(simple_gui_t *gui, esp_lcd_touch_handle_t tp)
             gui_draw_string(gui, 10, 460, vel_str, ball.color, COLOR_BLACK, 1);
         }
         
-        // Frame timing (50 FPS = 20ms per frame)
-        vTaskDelay(pdMS_TO_TICKS(20));
+        // Frame timing
+        vTaskDelay(pdMS_TO_TICKS(APP_GAME_FRAME_DELAY_MS));
         frame_count++;
     }
     

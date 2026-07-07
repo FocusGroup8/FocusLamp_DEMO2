@@ -8,11 +8,12 @@
 
 #include "esp_lcd_touch.h"
 #include "simple_gui.h"
+#include "board_config.h"
 #include <stdint.h>
 
 /**
  * @brief Gesture recognition library for multi-touch interactions
- * 
+ *
  * This library provides gesture detection capabilities including:
  * - Swipe (left/right/up/down)
  * - Pinch/Zoom (two-finger scaling)
@@ -60,8 +61,8 @@ typedef struct {
     float rotation_threshold;       // Minimum angle change for rotation detection (degrees)
     
     // Touch point history (for tracking gesture trajectory)
-    touch_point_history_t history[5][20]; // 5 touch points, 20 history records each
-    uint8_t history_count[5];                // History count for each touch point
+    touch_point_history_t history[APP_GESTURE_HISTORY_MAX_POINTS][APP_GESTURE_HISTORY_MAX_LEN];
+    uint8_t history_count[APP_GESTURE_HISTORY_MAX_POINTS];                // History count for each touch point
     
     // Current gesture detection state
     gesture_type_t current_gesture;          // Currently detected gesture

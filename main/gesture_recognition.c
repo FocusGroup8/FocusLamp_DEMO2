@@ -9,6 +9,7 @@
 #include "esp_timer.h"
 #include <math.h>
 #include <stdlib.h>
+#include "board_config.h"
 
 static const char *TAG = "GESTURE";
 
@@ -40,16 +41,16 @@ void gesture_recognition_init(gesture_recognition_t *gesture,
                               void (*callback)(gesture_type_t, void*),
                               void *user_data)
 {
-    // Set default detection thresholds (optimized based on best practices)
-    gesture->swipe_threshold = 30;         // 30 pixels minimum swipe distance (reduced for easier triggering)
-    gesture->long_press_threshold = 500;   // 500ms minimum long press duration
-    gesture->pinch_threshold = 0.2f;       // 20% scale change for pinch detection
-    gesture->rotation_threshold = 20.0f;   // 20 degrees minimum rotation
-    
+    // Set default detection thresholds (from board_config.h)
+    gesture->swipe_threshold = APP_GESTURE_SWIPE_THRESHOLD_PX;
+    gesture->long_press_threshold = APP_GESTURE_LONG_PRESS_THRESHOLD_MS;
+    gesture->pinch_threshold = APP_GESTURE_PINCH_THRESHOLD;
+    gesture->rotation_threshold = APP_GESTURE_ROTATION_THRESHOLD_DEG;
+
     // Initialize history
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < APP_GESTURE_HISTORY_MAX_POINTS; i++) {
         gesture->history_count[i] = 0;
-        for (int j = 0; j < 20; j++) {
+        for (int j = 0; j < APP_GESTURE_HISTORY_MAX_LEN; j++) {
             gesture->history[i][j].x = 0;
             gesture->history[i][j].y = 0;
             gesture->history[i][j].timestamp = 0;

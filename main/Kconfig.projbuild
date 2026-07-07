@@ -43,4 +43,22 @@ menu "Example Configuration"
         help
             Enable verbose per-frame logging in gesture recognition.
             Disable for production to improve performance.
+
+    choice EXAMPLE_DEMO
+        prompt "Select demo to run"
+        default EXAMPLE_DEMO_TOUCH_GAME
+        help
+            Choose which demo to run at startup. Only one demo runs at a time.
+
+        config EXAMPLE_DEMO_TOUCH_GAME
+            bool "Touch Game (gesture-controlled ball)"
+            select EXAMPLE_ENABLE_TOUCH_GAME
+        config EXAMPLE_DEMO_GESTURE_RECOGNITION
+            bool "Gesture Recognition Demo"
+            select EXAMPLE_ENABLE_GESTURE_RECOGNITION
+        config EXAMPLE_DEMO_TOUCH_GUI
+            bool "Touch GUI Demo (button test)"
+        config EXAMPLE_DEMO_DATA_COLLECTOR
+            bool "Gesture Data Collector (calibration)"
+    endchoice
 endmenu

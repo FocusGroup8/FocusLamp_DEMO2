@@ -7,13 +7,13 @@
 #ifndef TOUCH_GAME_H
 #define TOUCH_GAME_H
 
-#include "simple_gui.h"
 #include "esp_lcd_touch.h"
 #include "gesture_recognition.h"
+#include "simple_gui.h"
 
 /**
  * @brief Touch game demonstration using gesture recognition
- * 
+ *
  * Game features:
  * - Swipe: Control ball movement
  * - Pinch: Adjust ball size

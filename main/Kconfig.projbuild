@@ -1,0 +1,46 @@
+menu "Example Configuration"
+    config EXAMPLE_USE_DMA2D_COPY_FRAME
+        bool "Use DMA2D to copy draw buffer to frame buffer"
+        default y
+        help
+            Enable this option, DMA2D will be used to copy the LVGL draw buffer to the target frame buffer.
+            This can save some CPU time and improve the performance.
+
+    config EXAMPLE_MONITOR_REFRESH_BY_GPIO
+        bool "Monitor Refresh Rate by GPIO"
+        default y
+        help
+            Enable this option, you can visualize the refresh rate by attaching a logic analyzer to a specific GPIO.
+            The GPIO will output a square wave with the frequency equals to half of the refresh rate.
+
+    config EXAMPLE_LCD_USE_ST7701S
+        bool "Use ST7701S LCD controller"
+        default y
+        help
+            ST7701S driver IC for KD034WXFID001 3.4 inch 480x480 MIPI DSI panel.
+
+    config EXAMPLE_TOUCH_USE_GT911
+        bool "Use GT911 touch controller"
+        default y
+        help
+            GT911 capacitive touch controller connected via I2C.
+
+    config EXAMPLE_ENABLE_GESTURE_RECOGNITION
+        bool "Enable gesture recognition library"
+        default y
+        help
+            Compile gesture recognition module (swipe, pinch, rotation, long press).
+
+    config EXAMPLE_ENABLE_TOUCH_GAME
+        bool "Enable touch game demo"
+        default y
+        help
+            Compile gesture-controlled ball game demo.
+
+    config EXAMPLE_GESTURE_DEBUG_LOG
+        bool "Enable gesture recognition debug logging"
+        default n
+        help
+            Enable verbose per-frame logging in gesture recognition.
+            Disable for production to improve performance.
+endmenu

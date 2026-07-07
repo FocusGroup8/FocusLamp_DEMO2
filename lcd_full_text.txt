@@ -1,0 +1,1581 @@
+=== KD034WXFID001 SPEC V1.1.pdf 全文本提取 ===
+
+
+================================================================================
+第 1 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 1 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+SPECIFICATION
+FOR
+LCM Module
+MODULE No:
+KD034WXFID001
+CUSTOMER:
+STARTEK
+INITIAL
+DATE
+PREPARED BY
+CHECKED BY
+APPROVED BY
+CUSTOMER
+INITIAL
+DATE
+APPROVED BY
+
+
+================================================================================
+第 2 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 2 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+Revision History
+Date
+Rev. No.
+Page
+Summary
+2022.01.22
+V1.0
+ALL
+FIRST ISSUE
+2022.11.03
+V1.1
+12
+Update LED Backlight Characteristics
+
+
+================================================================================
+第 3 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 3 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+Contents
+1. Block Diagram.................................................................................................................................... 5
+2. Outline dimension.............................................................................................................................. 6
+3. Input terminal Pin Assignment.......................................................................................................7
+4. LCD Optical Characteristics............................................................................................................8
+4.1 Optical specification............................................................................................................................................8
+5. Electrical Characteristics................................................................................................................11
+5.1 Absolute Maximum Rating..............................................................................................................................11
+5.2 DC Electrical Characteristics..........................................................................................................................11
+5.3 LED Backlight Characteristics....................................................................................................................... 12
+6. AC Characteristics...........................................................................................................................13
+6.1 MIPI Interface Characteristics:.......................................................................................................................14
+6.1.1 High Speed Mode.........................................................................................................................................15
+6.1.2 Lowe Power Mode........................................................................................................................................18
+6.1.3 DSI Bursts Mode...........................................................................................................................................15
+6.2 Reset input timing............................................................................................................................................18
+7. LCD Module Out-Going Quality Level.......................................................................................19
+7.1 VISUAL & FUNCTION INSPECTION STANDARD.................................................................................. 20
+7.1.1 Inspection conditions..............................................................................................................................20
+7.1.2 Definition Zone D....................................................................................................................................20
+7.1.3 Sampling Plan......................................................................................................................................... 21
+7.1.4 Criteria (Visual)....................................................................................................................................... 22
+8. Reliability Test Result.....................................................................................................................25
+9. Cautions and Handling Precautions........................................................................................... 26
+9.1 Handling and Operating the Module........................................................................................................... 27
+9.2 Storage and Transportation............................................................................................................................27
+10. Packing.............................................................................................................................................27
+
+
+================================================================================
+第 4 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 4 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+* Description
+This is a color active matrix TFT (Thin Film Transistor) LCD (liquid crystal display) that uses amorpho
+us silicon TFT as a switching device. This module is composed of a Transmissive type TFT-LCD Pan
+el, driver circuit,back-light unit. The resolution of a 3.4＂TFT-LCD contains 480x480 pixels, and can di
+splay up to 16.7M colors.
+* Features
+General Information
+Items
+Specification
+Unit
+Note
+Main Panel
+Display area(AA)
+60.48(H)*60.48V)
+(3.4 inch)
+mm
+Driver element
+TFT active matrix
+-
+Display colors
+16.7M
+colors
+Number of pixels
+480(RGB)*480
+dots
+Pixel arrangement
+RGB vertical stripe
+-
+Pixel pitch
+0.042(H)*0.126(V)
+mm
+Viewing angle
+ALL
+o'clock
+Controller
+IC
+ST7701S
+-
+LCM Interface
+2-lane MIPI
+-
+Display mode
+Transmissive /Normally Black
+-
+Operating temperature
+-20～+70
+℃
+Storage temperature
+-30～+80
+℃
+* Mechanical Information
+Item
+Min.
+Typ.
+Max.
+Unit
+Note
+Module
+size
+Horizontal(H)
+-
+65.72
+-
+mm
+Vertical(V)
+-
+69.64
+-
+mm
+Depth(D)
+-
+2.45
+-
+mm
+Weight
+-
+TBD
+-
+g
+
+
+================================================================================
+第 5 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 5 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+1. Block Diagram
+Input
+Signal
+LEDA
+LEDK
+LCM FPC
+LCD
+CONTROLLER
+LED
+TFT LCD PANEL
+BACKLIGHT UNIT
+SOURCE DRIVER
+GATE DRIVER
+
+
+================================================================================
+第 6 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 6 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+2. Outline dimension
+1
+2
+3
+4
+5
+6
+7
+A
+A
+7
+G
+F
+E
+D
+C
+B
+6
+5
+1
+2
+3
+4
+G
+F
+E
+D
+C
+B
+Revision content description
+ReV.
+Date
+1/1
+Page
+1:1
+mm
+Scale
+Unit
+Approve
+Checked
+Drawn
+X.XX±0.2
+X.X±0.3
+SPECIFIED
+UNLESS
+OTHERWISE
+TOLERANCE
+TOLERANCE(公差)
+DRAWING  NAME
+PARTS NO.
+深圳市柯达科电子科技有限公司
+SHENZHEN STARTEK ELECTRONICS CO.,LTD
+V0
+FIRST
+2021.11.02
+NOTES:
+1. DISPLAY TYPE:3.4",TFT-LCD,16.7M COLORS.
+2. DISPLAY MODE: IPS NORMALLY BLACK.
+3. VIEWING DIRECTION: ALL
+4. TFT DRIVER IC: ST7701S(COG)
+    CTP DRIVER IC: NA
+5.  TOUCH Type:NA
+6.  TFT Interface: MIPI
+7.  CTP Interface: NA
+8.   Touch and LCM Bonding technology: NA
+9.   VDD/VCI:3.3V; IOVCC:1.8V~3.3V
+10.  OPERATING TEMP:-20°C TO 70°C
+          STORAGE TEMP:-30°C TO 80°C
+11.   BACK LIGHT: LED WHITE,12LED,40mA,19.2±0.3V
+12.   RoHS and  COMPLIANT
+PIN
+1
+NAME
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+NC
+LEDK
+NC
+LEDA
+GND
+GND
+GND
+KD034WXFID001
+99034001A
+NC
+VDD/VCI
+IOVCC
+TE
+RESET
+GND
+MIPI_D1P
+MIPI_CLP
+MIPI_CLN
+GND
+TOP VIEW
+SIDE VIEW
+BACK VIEW
+A K
+65.72±0.2 BL OD
+60.48 LCD AA
+60.48 LCD AA
+MIPI_D1N
+MIPI_D0P
+MIPI_D0N
+TFT LCD
+3.4" Z6
+480(RGB)*480
+Pin1
+Pin197
+AG Dotting
+AG Dotting
+ID
+1
+20
+W=0.30
+P0.5*19=9.50±0.05
+10.50±0.1
+3.5±0.3
+Yellow tape
+R0.30
+0.3±0.03
+0.13±0.03(FPC)
+CONTACT SIDE
+PI 
+A K
+0.50
+5±0.3
+3.5±0.3 (Mark line)
+EMI
+2.45±0.1 LCM
+1.2±0.05
+63.72 UP POL
+64.32 CF/TFT
+69.64±0.2 BL OD
+63.72 UP POL
+64.42 CF
+67.84 TFT
+2.62
+1
+0.7
+0.7
+1
+2.62
+45.6±0.3
+27.61±0.3
+20
+1
+Single zone
+Single zone
+10
+33.5
+43
+BL0341201
+PULL
+Line of engraving
+
+
+================================================================================
+第 7 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 7 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+3. Input terminal Pin Assignment
+NO.
+SYMBOL
+DISCRIPTION
+I/O
+1
+NC
+--
+--
+2
+LEDK
+Cathode pin of backlight.
+P
+3
+NC
+--
+--
+4
+LEDA
+Anode pin of backlight.
+P
+5
+NC
+--
+--
+6
+VDD/VCI
+Supply Voltage (3.3V).
+P
+7
+IOVCC
+I/O power supply voltage.
+P
+8
+TE
+-Tearing effect output
+Leave the pin to open when not in use.
+O
+9
+RESET
+- The external reset input.
+Initializes the chip with a low input. Be sure to execute a power-on r
+eset after supplying power.
+I
+10
+GND
+Ground.
+P
+11
+MIPI_D1P
+MIPI DSI differential data pair (DSI-Dn+/-).
+If MIPI are not used, they should be connected to DGND
+I/O
+12
+MIPI_D1N
+I/O
+13
+GND
+Ground.
+P
+14
+MIPI_CLP
+MIPI DSI differential clock pair (DSI-CLK+/-).
+If MIPI are not used, they should be connected to DGND.
+I
+15
+MIPI_CLN
+I
+16
+GND
+Ground.
+P
+17
+MIPI_D0P
+MIPI DSI differential data pair (DSI-Dn+/-).
+If MIPI are not used, they should be connected to DGND
+I/O
+18
+MIPI_D0N
+I/O
+19
+GND
+Ground.
+P
+20
+GND
+Ground.
+P
+
+
+================================================================================
+第 8 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 8 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+4. LCD Optical Characteristics
+4.1 Optical specification
+Item
+Symbol
+Condition
+Min.
+Typ.
+Max.
+Unit.
+Note
+Contrast Ratio
+CR
+Θ=0
+Normal viewing
+angle
+640
+800
+--
+(1)(2)
+Response time
+Rising
+TR+TF
+--
+30
+35
+msec
+(1)(3)
+Falling
+Color Gamut
+S(%)
+55
+60
+--
+%
+C-light
+Color Filter
+Chromacicity
+White
+WX
+-0.04
+0.309
++0.04
+(1)(4)
+CF
+glass
+WY
+0.350
+Red
+RX
+0.611
+RY
+0.363
+Green
+GX
+0.317
+GY
+0.570
+Blue
+BX
+0.150
+BY
+0.100
+Viewing angle
+Hor.
+ΘL
+CR>10
+75
+85
+--
+(1)(4)
+ΘR
+75
+85
+--
+Ver.
+ΘU
+75
+85
+--
+ΘD
+75
+85
+--
+Option View Direction
+ALL
+*The data comes from the LCD specification.
+Measuring Condition
+Measuring surrounding : dark room
+Ambient temperature : 25±2oC
+15min. warm-up time.
+Measuring Equipment
+FPM520 of Westar Display technologies, INC., which utilized SR-3 for Chromaticity and BM-5A for other optical
+characteristics.
+Note (1): Definition of Viewing Angle :
+
+
+================================================================================
+第 9 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 9 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+Note (2): Definition of Contrast Ratio(CR) :measured at the center point of panel
+Note (3): Response Time
+Note (4): Definition of optical measurement setup
+
+
+================================================================================
+第 10 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 10 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+
+
+================================================================================
+第 11 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 11 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+5. Electrical Characteristics
+5.1 Absolute Maximum Rating
+Characteristics
+Symbol
+Min.
+Max.
+Unit
+Note
+Digital Supply Voltage
+VCI
+-0.3
+4.6
+V
+Note1
+Digital Interface Supply Voltage
+IOVCC
+-0.3
+4.6
+V
+Operating temperature
+TOP
+-20
++70
+℃
+Storage temperature
+TST
+-30
++80
+℃
+NOTE1: If the absolute maximum rating of even is one of the above parameters is exceeded even momentarily,
+the quality of the product may be degraded. Absolute maximum ratings, therefore, specify the values
+exceeding which the product may be physically damaged. Be sure to use the product within the range
+of the absolute maximum ratings.
+5.2 DC Electrical Characteristics
+Characteristics
+Symbol
+Min.
+Typ.
+Max.
+Unit
+Note
+Digital Supply Voltage
+VCI
+2.5
+3.3
+3.6
+V
+Digital interface supple Voltage
+IOVCC
+1.65
+1.8
+3.3
+Normal mode Current
+ICC
+--
+30
+--
+mA
+Level input voltage
+VIH
+0.7* Iovcc
+--
+Iovcc
+V
+VIL
+GND
+--
+0.3* Iovcc
+V
+Level output voltage
+VOH
+0.8*Iovcc
+--
+Iovcc
+V
+VOL
+GND
+--
+0.2*Iovcc
+V
+
+
+================================================================================
+第 12 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 12 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+5.3 LED Backlight Characteristics
+The back-light system is edge-lighting type with 12 chips LED
+Item
+Symbol
+Min.
+Typ.
+Max.
+Unit
+Note
+Forward Current
+IF
+35
+40
+--
+mA
+Forward Voltage
+VF
+--
+19.2
+--
+V
+LCM Luminance
+(IF =40mA)
+LV
+800
+900
+--
+cd/m2
+Note3
+LED life time
+Hr
+--
+50000
+--
+Hour
+Note1,2
+Uniformity
+Avg
+80
+--
+--
+﹪
+Note3
+Note1: LED life time (Hr) can be defined as the time in which it continues to operate under the condition:
+Ta=25±3 ℃, typical IL value indicated in the above table until the brightness becomes less than 50%.
+Note 2: The “LED life time” is defined as the module brightness decrease to 50% original brightness at
+Ta=25℃and IL=40mA. The LED lifetime could be decreased if operating IL is larger than 40mA. The
+constant current driving method is suggested.
+Note (3)
+Luminance Uniformity of these 9 points is defined as below:
+
+
+================================================================================
+第 13 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 13 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+Luminance=
+9
+points
+ 
+9
+ 
+of
+ 
+Luminance
+ 
+Total
+6. AC Characteristics
+
+
+================================================================================
+第 14 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 14 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+6.1 MIPI Interface Characteristics:
+6.1.1 High Speed Mode
+*DSI clock channel timing
+* Mipi Interface-High SpeedMode Timing Characteristics
+6.1.2 Lowe Power Mode
+
+
+================================================================================
+第 15 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 15 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+* Bus Turnaround (BTA) from display module to MPU Timing
+*Bus Turnaround (BTA) from MPU to display module Timing
+*Mipi Interface Low Power Mode Timing Characteristics
+6.1.3 DSI Bursts Mode
+
+
+================================================================================
+第 16 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 16 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+*Data lanes-Low Power Mode to/from High Speed Mode Timing
+*Clock lanes- High Speed Mode to/from Low Power Mode Timing
+
+
+================================================================================
+第 17 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 17 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+
+
+================================================================================
+第 18 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 18 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+6.2 Reset input timing：
+Reset Timing
+Reset Timing
+
+
+================================================================================
+第 19 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 19 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+7. LCD Module Out-Going Quality Level
+
+
+================================================================================
+第 20 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 20 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+7.1 VISUAL & FUNCTION INSPECTION STANDARD
+7.1.1 Inspection conditions
+Inspection performed under the following conditions is recommended.
+Temperature : 25±5℃
+Humidity :
+65%±10%RH
+Viewing Angle : Normal viewing Angle.
+Illumination: Single fluorescent lamp (300 to 700Lux)
+Viewing distance:30-50cm
+7.1.2 Definition
+Zone D
+Zone A : Effective Viewing
+Area(Character or Digit can be seen)
+Zone B : Viewing Area except Zone A
+Zone C : Outside (Zone A+Zone B) which can not be seen after assembly by customer .)
+Zone D : IC Bonding Area
+Note:As a general rule ,visual defects in Zone C can be ignored when it doesn’t effect product function
+or appearance after assembly by customer
+Upper Glas
+Upper
+Polarizer
+Bottom glass
+Bottom Polarizer
+Light Source
+Zone A
+Zone B
+Zone C
+
+
+================================================================================
+第 21 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 21 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+7.1.3 Sampling Plan
+According to GB/T 2828-2003 ; , normal inspection, Class Ⅱ
+AQL:
+Major defect
+Minor defect
+0.65
+1.5
+LCD: Liquid Crystal Display , LCM: Liquid Crystal Module,
+No
+Items to be inspected
+Criteria
+Classification of defect
+s
+1
+Functional defects
+1) No display, Open or miss line
+2) Display abnormally, Short
+3) Backlight no lighting, abnormal lighting.
+etc…
+Major
+2
+Missing
+Missing components and etc…
+3
+Outline dimension
+Overall outline dimension beyond the drawi
+ng is not allowed,deformation and etc…
+4
+Color tone
+Color unevenness, refer to limited sample
+Minor
+5
+Spot/Line defect
+Light dot,Dim spot,(Note1)
+Polarizer Air Bubble,
+Polarizer accidented spot and etc.
+6
+Soldering appearance
+Good soldering , Peeling off is not allowed
+and etc.
+7
+LCD/Polarizer
+Black/White spot/line, scratch, crack, etc.
+Note1: a) Light dot：Dots appear bright and unchanged in size in which LCD panel is displaying under
+black pattern.
+b) Dim dot: Dots appear dark and unchanged in size in which LCD panel is displaying under pure red, green,
+blue picture.
+
+
+================================================================================
+第 22 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 22 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+7.1.4 Criteria (Visual)
+Number
+Items
+Criteria(mm)
+1.0
+LCD
+Crack/Broken
+NOTE:
+X: Length
+Y: Width
+Z: Height
+L: Length of IT
+O,
+T: Height of LCD
+(1) The edge of LCD
+broken
+X
+Y
+Z
+≤3.0mm
+<Inner border line of t
+he seal
+≤T
+(2)LCD corner broken
+X
+Y
+Z
+≤3.0mm
+≤L
+≤T
+(3) LCD crack
+Crack
+Not
+allowed
+
+
+================================================================================
+第 23 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 23 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+2.0
+Spot defect
+Y
+X
+Φ=(X+Y)/2
+1
+light dot（black/white spot , pinhole, stain，etc.）
+Zone
+Size (mm)
+Acceptable Qty
+A
+B
+C
+Φ≤0.15
+Ignore
+Ignore
+0.15<Φ≤0.25
+3(distance≧10mm)
+0.25<Φ≤0.4
+2(distance≧10mm)
+Φ>0.4
+0
+2 Dim spot（light leakage、dent、dark spot，etc）
+Zone
+Size (mm)
+Acceptable Qty
+A
+B
+C
+Φ≤0.15
+Ignore
+Ignore
+0.15<Φ≤0.25
+3( distance≧10mm)
+0.25<Φ≤0.4
+2( distance≧10mm)
+Φ>0.4
+0
+③Polarizer accidented spot
+Zone
+Size (mm)
+Acceptable Qty
+A
+B
+C
+Φ≤0.2
+Ignore
+Ignore
+0.2<Φ≤0.5
+2( distance≧10mm)
+Φ>0.5
+0
+④Polarizer Bubble
+Zone
+Size (mm)
+Acceptable Qty
+A
+B
+C
+Φ≤0.2
+Ignore
+Ignore
+0.2<Φ≤0.4
+3(distance≧10mm)
+Φ>0.4
+0
+
+
+================================================================================
+第 24 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 24 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+3.0
+LCD Pixel defect
+Pixel bad points
+Item
+Zone
+A
+Acceptable Qt
+Bright dot
+Random
+N≤2
+2 dots adjacent
+N≤0
+3 dots adjacent
+N≤0
+Dark dot
+Random
+N≤2
+2 dots adjacent
+N≤0
+3 dots adjacent
+N≤0
+Distance
+1. Minimum Distance Between
+Bright dots.
+2. Minimum Distance Between
+dark dots
+3. Minimum Distance Between
+dark and bright dot.
+5mm
+Total bright and dark dot
+N≤4
+Note:
+A) Bright dot：Dots appear bright and unchanged in size in which
+LCD panel is displaying under black pattern.
+B) Dark dot: Dots appear dark and unchanged in size in which LCD
+panel is displaying under pure red, green, blue picture.
+C) 2 dot adjacent = 1 pair = 2 dots
+Picture:
+2 dot adjacent
+2 dot adjacent
+2 dot adjacent (vertical)
+2 dot adjacent (slant)
+
+
+================================================================================
+第 25 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 25 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+4.0
+Line defect (LCD
+/Polarizer backlight bl
+ack/white line, scratc
+h, stain)
+N：Count
+Width(mm)
+Length(m
+m)
+Acceptable Qty
+A
+B
+C
+Φ≤0.05
+Ignore
+Ignore
+Ignore
+0.05<W≤0.06
+L≤4.0
+N≤3
+0.06<W≤0.08
+L≤3.0
+N≤2
+W>0.08
+Define as spot defect
+5.0
+Electronic Compone
+nts SMT.
+Not allow missing parts，solderless connection，cold solder joint，mis
+match，The positive and negative polarity opposite
+6.0
+Display color& Brigh
+tness.
+1.
+Color：Measuring the color coordinates, The measurement standar
+d according to the datasheet or samples.
+2.
+Brightness：Measuring the brightness of White screen, The measu
+rement standard according to the datasheet or Samples.
+7.0
+LCD Mura/Waving/
+Hot spot
+Not visible through 5% ND filter in 50% gray or judge by limit sampl
+e if necessary.
+Criteria ( functional items)
+Number
+1
+2
+3
+4
+Items
+No display
+Missing segment
+Short
+Backlight no lighting
+Criteria (mm)
+Not allowed
+Not allowed
+Not allowed
+Not allowed
+8. Reliability Test Result
+
+
+================================================================================
+第 26 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 26 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+Item
+Condition
+Inspection after test
+High Temperature Operating
+75℃,96H
+Inspection after 2~4hours
+storage at room temperature,
+the sample shall be free from
+defects:
+1.Air bubble in the LCD;
+2.Non-display;
+3.Missing segments/line;
+4.Glass crack;
+5.Current IDD is twice higher
+than initial value.
+Low Temperature Operating
+-20℃, 96HR
+High Temperature Storage
+80℃, 96HR
+Low Temperature Storage
+-30℃, 96HR
+High Temperature & High
+Humidity Operating
++60℃, 90% RH ,96 hours.
+Thermal Shock (Non-operation)
+-30℃,30 min ↔+80℃,30 min,
+Change time:5min 20CYC.
+ESD test
+C=150pF, R=330,5points/panel
+Air:±8KV, 5times; Contact:±6KV, 5 times;
+(Environment: 15℃~35℃, 30%~60%).
+Vibration (Non-operation)
+Frequency range:10~55Hz, Stroke:1.5mm
+Sweep:10Hz~55Hz~10Hz 2 hours for each direction of
+X.Y.Z. (6 hours for total) (Package condition).
+Box Drop Test
+1 Corner 3 Edges 6 faces,80㎝(MEDIUM BOX)
+Remark:
+1.The test samples should be applied to only one test item.
+2.Sample size for each test item is 5~10pcs.
+3.For Damp Proof Test, Pure water(Resistance＞10MΩ) should be used.
+4.In case of malfunction defect caused by ESD damage, if it would be recovered to normal state after resetting, it would be
+judged as a good part.
+5.Failure Judgment Criterion: Basic Specification, Electrical Characteristic, Mechanical Characteristic, Optical Characteristic.
+6. The color fading mura of polarizing filter should not care.
+9. Cautions and Handling Precautions
+
+
+================================================================================
+第 27 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 27 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+9.1 Handling and Operating the Module
+(1) When the module is assembled, it should be attached to the system firmly.
+Do not warp or twist the module during assembly work.
+(2) Protect the module from physical shock or any force. In addition to damage, this may cause improper operation or damage to
+the module and back-light unit.
+(3) Note that polarizer is very fragile and could be easily damaged. Do not press or scratch the surface.
+(4) Do not allow drops of water or chemicals to remain on the display surface.
+If you have the droplets for a long time, staining and discoloration may occur.
+(5) If the surface of the polarizer is dirty, clean it using some absorbent cotton or soft cloth.
+(6) The desirable cleaners are water, IPA (Isopropyl Alcohol) or Hexane.
+Do not use ketene type materials (ex. Acetone), Ethyl alcohol, Toluene, Ethyl acid or Methyl chloride. It might permanent damage
+to the polarizer due to chemical reaction.
+(7) If the liquid crystal material leaks from the panel, it should be kept away from the eyes or mouth. In case of contact with hands,
+legs, or clothes, it must be washed away thoroughly with soap.
+(8) Protect the module from static; it may cause damage to the CMOS ICs.
+(9) Use finger-stalls with soft gloves in order to keep display clean during the incoming inspection and assembly process.
+(10) Do not disassemble the module.
+(11) Protection film for polarizer on the module shall be slowly peeled off just before use so that the electrostatic charge can be
+minimized.
+(12) Pins of I/F connector shall not be touched directly with bare hands.
+(13) Do not connect, disconnect the module in the “Power ON” condition.
+9.2 Storage and Transportation.
+(1) Do not leave the panel in high temperature, and high humidity for a long time.
+It is highly recommended to store the module with temperature from 0 to 35 ℃and relative humidity of less than 70%
+(2) Do not store the TFT-LCD module in direct sunlight.
+(3) The module shall be stored in a dark place. When storing the modules for a long time, be sure to adopt effective measures for
+protecting the modules from strong ultraviolet radiation, sunlight, or fluorescent light.
+(4) It is recommended that the modules should be stored under a condition where no condensation is allowed. Formation of
+dewdrops may cause an abnormal operation or a failure of the module.
+In particular, the greatest possible care should be taken to prevent any module from being operated where condensation has
+occurred inside.
+(5) This panel has its circuitry FPC on the bottom side and should be handled carefully in order not to be stressed.
+10. Packing
+
+
+================================================================================
+第 28 页
+================================================================================
+
+SHENZHEN STARTEK ELECTRONIC TECHNOLOGY CO.,LTD
+Part. No
+KD034WXFID001
+REV
+V1.1
+Page 28 of 28
+常备库存
+长期供货
+支持小量
+品种齐全
+Stock For Sale
+Long Time supply
+NO MOQ
+In Full Range
+----TBD--------------
+

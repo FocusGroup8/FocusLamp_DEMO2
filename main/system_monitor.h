@@ -17,6 +17,10 @@
 extern "C" {
 #endif
 
+// Forward declaration for FreeRTOS types
+struct xTASK_STATUS;
+typedef struct xTASK_STATUS TaskStatus_t;
+
 /**
  * @brief System monitor configuration
  */
@@ -51,7 +55,33 @@ typedef struct {
     size_t psram_free;  /*!< PSRAM free size (bytes) */
 #endif
     float heap_usage_pct; /*!< Heap usage percentage */
+
+#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+    float cpu_usage_pct; /*!< Overall CPU usage percentage */
+#endif
 } sysmon_report_t;
+
+/**
+ * @brief Task-specific metrics structure
+ */
+typedef struct {
+    char task_name[16];  /*!< Task name */
+    uint32_t stack_hwm;  /*!< Stack high water mark (bytes) */
+    float cpu_usage_pct; /*!< Task CPU usage percentage */
+    uint8_t priority;    /*!< Task priority */
+    int state;           /*!< Task state (eTaskState enum value) */
+} sysmon_task_metrics_t;
+
+/**
+ * @brief Get task-specific metrics
+ *
+ * Retrieves statistics for specific tasks (audio-related).
+ *
+ * @param[out] metrics  Task metrics array
+ * @param[in]  max_tasks Maximum number of tasks to retrieve
+ * @return Number of tasks retrieved
+ */
+int sysmon_get_task_metrics(sysmon_task_metrics_t *metrics, int max_tasks);
 
 /**
  * @brief Initialize system monitoring module

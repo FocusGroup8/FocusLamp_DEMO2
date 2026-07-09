@@ -15,6 +15,7 @@
 #include "gesture_data_collector.h"
 #include "gesture_recognition.h"
 #include "simple_gui.h"
+#include "system_monitor.h"
 #include "touch_game.h"
 #include "touch_gui.h"
 
@@ -95,6 +96,22 @@ esp_err_t display_system_init(const display_config_t *config, display_handles_t 
     ESP_LOGI(TAG, "Display system initialized successfully");
     ESP_LOGI(TAG, "Mode: %d, Double-buffer: %d, Touch: %d, PPA: %d", s_config.mode, s_config.enable_double_buffer,
              s_config.enable_touch, s_config.enable_ppa_accel);
+
+    // Initialize system monitor (use default config)
+    esp_err_t sysmon_ret = sysmon_init(NULL);
+    if (sysmon_ret == ESP_OK) {
+        ESP_LOGI(TAG, "System monitor initialized");
+        sysmon_ret = sysmon_start();
+        if (sysmon_ret == ESP_OK) {
+            ESP_LOGI(TAG, "System monitor started");
+        } else {
+            ESP_LOGW(TAG, "Failed to start system monitor: %s", esp_err_to_name(sysmon_ret));
+        }
+    } else if (sysmon_ret == ESP_ERR_NOT_SUPPORTED) {
+        ESP_LOGW(TAG, "System monitor not enabled in menuconfig");
+    } else {
+        ESP_LOGW(TAG, "Failed to initialize system monitor: %s", esp_err_to_name(sysmon_ret));
+    }
 
     // Return handles to caller (if requested)
     if (handles != NULL) {
@@ -218,6 +235,11 @@ void display_system_deinit(display_handles_t *handles)
         handles->gui_handle   = NULL;
         handles->touch_handle = NULL;
     }
+
+    // Step 5: Deinitialize system monitor
+    ESP_LOGI(TAG, "Deinitializing system monitor...");
+    sysmon_deinit();
+    ESP_LOGI(TAG, "System monitor deinitialized");
 
     s_state = DISPLAY_STATE_IDLE;
     ESP_LOGI(TAG, "Display system deinitialized");

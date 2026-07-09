@@ -12,6 +12,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "stdio.h"
+#include "system_monitor.h"
 
 #include <string.h>
 
@@ -155,6 +156,10 @@ static void recorder_task(void *arg)
 
     ESP_LOGI(TAG, "Recording stopped: %u samples (%u seconds), file size %u bytes", (unsigned)s_recorded_samples,
              elapsed_ms / 1000, (unsigned)(pcm_data_size + sizeof(wav_header_t)));
+
+    // Update system monitor with recording duration
+    sysmon_update_rec_duration(elapsed_ms);
+    ESP_LOGI(TAG, "Updated recording duration: %lu ms", (unsigned long)elapsed_ms);
 
     // Update state
     s_state       = RECORDER_IDLE;

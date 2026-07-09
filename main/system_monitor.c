@@ -274,30 +274,36 @@ void sysmon_check_thresholds(void)
     sysmon_report_t report;
     sysmon_get_report(&report);
 
-    // Heap usage warning
+    // Heap usage warning (85% threshold)
     if (report.heap_usage_pct >= WARN_THRESHOLD_HEAP_USAGE_PCT) {
         ESP_LOGW(TAG, "[WARN] Heap usage %.1f%% exceeds threshold %d%%!", report.heap_usage_pct,
                  WARN_THRESHOLD_HEAP_USAGE_PCT);
     }
 
-    // Free heap too low
-    if (report.free_heap < 32 * 1024) { // Less than 32KB
-        ESP_LOGW(TAG, "[WARN] Free heap critically low: %zu bytes", report.free_heap);
+    // Free heap critically low (32KB threshold)
+    if (report.free_heap < 32 * 1024) {
+        ESP_LOGW(TAG, "[WARN] Free heap critically low: %zu bytes (< 32KB)", report.free_heap);
+    }
+
+    // Free heap warning (64KB threshold)
+    if (report.free_heap < 64 * 1024) {
+        ESP_LOGW(TAG, "[WARN] Free heap low: %zu bytes (< 64KB)", report.free_heap);
     }
 
 #if CONFIG_SPIRAM
-    // PSRAM low warning
-    if (report.psram_free < 512 * 1024) { // Less than 512KB
-        ESP_LOGW(TAG, "[WARN] PSRAM free low: %zu bytes", report.psram_free);
+    // PSRAM critically low (256KB threshold)
+    if (report.psram_free < 256 * 1024) {
+        ESP_LOGW(TAG, "[WARN] PSRAM critically low: %zu bytes (< 256KB)", report.psram_free);
+    }
+
+    // PSRAM warning (1MB threshold)
+    if (report.psram_free < 1024 * 1024) {
+        ESP_LOGW(TAG, "[WARN] PSRAM free low: %zu bytes (< 1MB)", report.psram_free);
     }
 #endif
 
-    // Task stack high water mark check
-#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS && CONFIG_EXAMPLE_SYSMON_PRINT_TASK_LIST
-    // This would require parsing vTaskList() output
-    // Simplified: just warn about potential issues
-    ESP_LOGD(TAG, "Task stack thresholds checked");
-#endif
+    // Note: Task stack watermarks require task handles which are not stored globally
+    // Would need audio manager to expose task handles for monitoring
 }
 
 esp_err_t sysmon_get_status_string(char *buf, size_t buf_len)
@@ -330,4 +336,23 @@ esp_err_t sysmon_get_status_string(char *buf, size_t buf_len)
 #endif
 
     return ESP_OK;
+}
+
+int sysmon_get_task_metrics(sysmon_task_metrics_t *metrics, int max_tasks)
+{
+    if (metrics == NULL || max_tasks <= 0) {
+        return 0;
+    }
+
+    int count = 0;
+
+#if CONFIG_EXAMPLE_ENABLE_AUDIO && 0 // Disabled due to API availability issues
+    // Simplified: use direct task handle query instead of system state enumeration
+    // This avoids dependency on uxTaskGetSystemState() which requires FreeRTOS configuration
+
+    // Would need task handles stored during creation to query stack HWM
+    // For now, return 0 to avoid linking issues
+#endif
+
+    return count;
 }

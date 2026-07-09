@@ -5,12 +5,19 @@
  */
 
 #include "player.h"
+
 #include "board_config.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "stdio.h"
+
 #include <string.h>
+
+// System monitor integration
+extern "C" {
+#include "system_monitor.h"
+}
 
 // Use native micro-opus OGG Opus decoder (stable, no crashes)
 #include <micro_opus/ogg_opus_decoder.h>
@@ -18,9 +25,9 @@
 static const char *TAG = "PLAYER";
 
 // Player state
-static player_state_t s_state = PLAYER_IDLE;
-static TaskHandle_t s_task_handle = NULL;
-static FILE *s_file = NULL;
+static player_state_t s_state                   = PLAYER_IDLE;
+static TaskHandle_t s_task_handle               = NULL;
+static FILE *s_file                             = NULL;
 static const i2s_audio_handles_t *s_i2s_handles = NULL;
 
 // Volume control (0.0 - 1.0)
@@ -49,8 +56,7 @@ static int16_t s_resample_buf[PLAYER_OUTPUT_BUF_SIZE / sizeof(int16_t) / RESAMPL
  * @param output     Output buffer for 16kHz samples
  * @param output_samples Number of output samples
  */
-static void resample_48k_to_16k(const int16_t *input, size_t input_samples,
-                                 int16_t *output, size_t *output_samples)
+static void resample_48k_to_16k(const int16_t *input, size_t input_samples, int16_t *output, size_t *output_samples)
 {
     // Simple downsampling: take every 3rd sample
     size_t out_idx = 0;
@@ -70,7 +76,7 @@ static void resample_48k_to_16k(const int16_t *input, size_t input_samples,
 static void scale_pcm_samples(int32_t *samples, size_t count, float scale)
 {
     if (scale == 1.0f) {
-        return;  // No scaling needed
+        return; // No scaling needed
     }
 
     for (size_t i = 0; i < count; i++) {
@@ -102,7 +108,7 @@ static void player_task(void *arg)
     size_t total_samples = 0;
 
     // Main decoding loop
-    bool file_end = false;
+    bool file_end    = false;
     size_t input_pos = 0;
     size_t input_len = 0;
 
@@ -121,17 +127,12 @@ static void player_task(void *arg)
         }
 
         // Decode OGG Opus data
-        size_t bytes_consumed = 0;
+        size_t bytes_consumed  = 0;
         size_t samples_decoded = 0;
 
-        micro_opus::OggOpusResult result = decoder.decode(
-            s_input_buf + input_pos,
-            input_len - input_pos,
-            reinterpret_cast<uint8_t*>(s_output_pcm),
-            sizeof(s_output_pcm),
-            bytes_consumed,
-            samples_decoded
-        );
+        micro_opus::OggOpusResult result =
+            decoder.decode(s_input_buf + input_pos, input_len - input_pos, reinterpret_cast<uint8_t *>(s_output_pcm),
+                           sizeof(s_output_pcm), bytes_consumed, samples_decoded);
 
         // Update input position
         input_pos += bytes_consumed;
@@ -153,14 +154,13 @@ static void player_task(void *arg)
 
             // Log every 8 seconds worth of samples (at 16kHz)
             if (total_samples % (16000 * 8) == 0) {
-                ESP_LOGI(TAG, "Resampled %zu samples (%zu seconds at 16kHz)",
-                         total_samples, total_samples / 16000);
+                ESP_LOGI(TAG, "Resampled %zu samples (%zu seconds at 16kHz)", total_samples, total_samples / 16000);
             }
 
             // Step 2: Convert 16-bit PCM to 32-bit I2S format
             int32_t pcm_32bit[resampled_samples];
             for (size_t i = 0; i < resampled_samples; i++) {
-                pcm_32bit[i] = (int32_t)s_resample_buf[i] << 16;  // Left-align 16-bit to 32-bit
+                pcm_32bit[i] = (int32_t)s_resample_buf[i] << 16; // Left-align 16-bit to 32-bit
             }
 
             // Step 3: Apply volume scaling
@@ -168,9 +168,8 @@ static void player_task(void *arg)
 
             // Step 4: Write to I2S (16kHz)
             size_t bytes_written = 0;
-            esp_err_t i2s_ret = i2s_audio_write(s_i2s_handles, pcm_32bit,
-                                                 resampled_samples * sizeof(int32_t),
-                                                 &bytes_written, portMAX_DELAY);
+            esp_err_t i2s_ret    = i2s_audio_write(s_i2s_handles, pcm_32bit, resampled_samples * sizeof(int32_t),
+                                                   &bytes_written, portMAX_DELAY);
             if (i2s_ret != ESP_OK) {
                 ESP_LOGE(TAG, "I2S write failed: %s", esp_err_to_name(i2s_ret));
                 break;
@@ -180,8 +179,12 @@ static void player_task(void *arg)
 
     // Log total samples decoded
     if (total_samples > 0) {
-        ESP_LOGI(TAG, "Total samples decoded: %zu (%zu seconds)",
-                 total_samples, total_samples / 16000);
+        ESP_LOGI(TAG, "Total samples decoded: %zu (%zu seconds)", total_samples, total_samples / 16000);
+
+        // Update system monitor with playback duration
+        uint32_t play_duration_ms = total_samples / 16; // samples / 16 = ms (16000 samples/sec -> 16 samples/ms)
+        sysmon_update_play_duration(play_duration_ms);
+        ESP_LOGI(TAG, "Updated playback duration: %lu ms", play_duration_ms);
     }
 
     // Cleanup
@@ -197,10 +200,10 @@ static void player_task(void *arg)
 
 esp_err_t player_init(void)
 {
-    s_state = PLAYER_IDLE;
-    s_task_handle = NULL;
-    s_file = NULL;
-    s_i2s_handles = NULL;
+    s_state        = PLAYER_IDLE;
+    s_task_handle  = NULL;
+    s_file         = NULL;
+    s_i2s_handles  = NULL;
     s_volume_scale = 1.0f;
 
     ESP_LOGI(TAG, "Player initialized (using micro-opus native decoder)");
@@ -216,8 +219,7 @@ void player_deinit(void)
     ESP_LOGI(TAG, "Player deinitialized");
 }
 
-esp_err_t player_start(const i2s_audio_handles_t *i2s_handles,
-                       const char *filename)
+esp_err_t player_start(const i2s_audio_handles_t *i2s_handles, const char *filename)
 {
     if (s_state == PLAYER_PLAYING) {
         ESP_LOGW(TAG, "Player already playing");
@@ -250,11 +252,10 @@ esp_err_t player_start(const i2s_audio_handles_t *i2s_handles,
 
     // Create player task
     // Note: Native Opus decoder is stable, only needs 8KB stack
-    BaseType_t task_ret = xTaskCreate(player_task, "player",
-                                      PLAYER_TASK_STACK_SIZE, NULL, 5, &s_task_handle);
+    BaseType_t task_ret = xTaskCreate(player_task, "player", PLAYER_TASK_STACK_SIZE, NULL, 5, &s_task_handle);
     if (task_ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create player task");
-        s_state = PLAYER_IDLE;  // Reset state on failure
+        s_state = PLAYER_IDLE; // Reset state on failure
         fclose(s_file);
         s_file = NULL;
         return ESP_ERR_NO_MEM;
@@ -303,7 +304,7 @@ void player_set_volume(float volume)
     if (volume < 0.0f) {
         volume = 0.0f;
     } else if (volume > 2.0f) {
-        volume = 2.0f;  // Allow up to 200% volume
+        volume = 2.0f; // Allow up to 200% volume
     }
     s_volume_scale = volume;
     ESP_LOGI(TAG, "Volume set to %.2f", volume);

@@ -18,7 +18,7 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 #
 # Example Configuration
 #
-CONFIG_EXAMPLE_SYSTEM_MODE_AUDIO=y
+CONFIG_EXAMPLE_ENABLE_SYSMON=y
 # end of Example Configuration
 
 #

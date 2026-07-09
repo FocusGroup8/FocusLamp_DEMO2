@@ -16,6 +16,14 @@ static const char *TAG = "main";
 
 void app_main(void)
 {
+#if CONFIG_EXAMPLE_RUN_I2S_TEST
+    // Skip LCD initialization for audio-only testing
+    ESP_LOGI(TAG, "Skipping LCD initialization for audio test mode");
+
+    // Run demo directly without GUI (audio test will run in app_run_demo)
+    app_run_demo(NULL, NULL);
+
+#else
     // Step 1: Initialize LCD hardware (DSI PHY, backlight, DSI bus, ST7701S)
     esp_lcd_panel_handle_t panel_handle = NULL;
     board_init_lcd(&panel_handle);
@@ -36,6 +44,7 @@ void app_main(void)
 
     // Step 5: Cleanup
     touch_deinit(tp_handle);
+#endif
 
     ESP_LOGI(TAG, "Demo completed");
 

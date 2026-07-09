@@ -24,6 +24,8 @@
  *   - st7701s_full_text.txt (driver IC datasheet)
  */
 
+#include "driver/i2s_std.h"
+
 #include <stdint.h>
 
 /*===========================================================================*/
@@ -285,4 +287,83 @@
 #define COLOR_MAGENTA 0xFF00FF /*!< Pure magenta (red + blue) */
 #define COLOR_ORANGE 0xFF8000  /*!< Orange */
 #define COLOR_GRAY 0x808080    /*!< Medium gray (50% brightness) */
+/** @} */
+
+/*===========================================================================*/
+/* Section 8: I2S Audio Configuration (INMP441 + MAX98357A)                  */
+/*===========================================================================*/
+
+/**
+ * @name I2S Bus Configuration
+ * @brief Full-duplex I2S bus shared by microphone and amplifier
+ * @{
+ */
+#define BOARD_I2S_PORT I2S_NUM_0       /*!< I2S controller port */
+#define BOARD_I2S_ROLE I2S_ROLE_MASTER /*!< ESP32-P4 as I2S master */
+#define BOARD_I2S_SAMPLE_RATE 16000    /*!< Default sample rate in Hz (matches ESP-IDF official i2s_std example) */
+#define BOARD_I2S_MCLK_MULTIPLE I2S_MCLK_MULTIPLE_256 /*!< MCLK = 256 * sample_rate */
+#define BOARD_I2S_DATA_BIT_WIDTH \
+    I2S_DATA_BIT_WIDTH_32BIT /*!< 32-bit required for INMP441 (24-bit data in 32-bit frame) */
+/** @} */
+
+/**
+ * @name I2S GPIO Pins
+ * @brief Pin assignments for I2S audio bus
+ * @note BCLK and WS are shared between mic and amplifier
+ * @{
+ */
+#define BOARD_I2S_BCLK_GPIO                                                                  \
+    GPIO_NUM_32 /*!< Bit clock (shared) - actual hardware: MAX98357A BCLK=32, INMP441 SCK=32 \
+                 */
+#define BOARD_I2S_WS_GPIO \
+    GPIO_NUM_33 /*!< Word select / LRC (shared) - actual hardware: MAX98357A LRC=33, INMP441 WS=33 */
+#define BOARD_I2S_DOUT_GPIO GPIO_NUM_31 /*!< Data out → MAX98357A DIN - actual hardware: MAX98357A DIN=31 */
+#define BOARD_I2S_DIN_GPIO GPIO_NUM_30  /*!< Data in ← INMP441 SD - actual hardware: INMP441 SD=30 */
+/** @} */
+
+/**
+ * @name I2S Slot Configuration (shared by TX and RX in full-duplex)
+ * @brief In full-duplex mode, TX and RX must use the same slot configuration.
+ * Both channels share BCLK/WS, so slot_mode and slot_mask must be identical.
+ * Using PHILIPS format + MONO + LEFT to match radar_test working configuration.
+ * @{
+ */
+#define BOARD_I2S_SLOT_MODE I2S_SLOT_MODE_MONO /*!< Mono mode: matches radar_test working config */
+#define BOARD_I2S_SLOT_MASK I2S_STD_SLOT_LEFT  /*!< Left slot only: matches radar_test working config */
+/** @} */
+
+/**
+ * @name INMP441 Microphone Configuration
+ * @{
+ */
+#define BOARD_MIC_CHANNEL BOARD_I2S_SLOT_MODE   /*!< Uses shared slot mode */
+#define BOARD_MIC_SLOT_MASK BOARD_I2S_SLOT_MASK /*!< INMP441 L/R=GND outputs on left slot */
+/** @} */
+
+/**
+ * @name MAX98357A Amplifier Configuration
+ * @note SD pin is floating (default) → mixed mode: outputs (Left/2 + Right/2)
+ *       To output only left channel, connect SD to VDD through 100K resistor (>1.4V)
+ *       To shut down, connect SD to GND (<0.16V)
+ * @{
+ */
+#define BOARD_AMP_CHANNEL BOARD_I2S_SLOT_MODE   /*!< Uses shared slot mode */
+#define BOARD_AMP_SLOT_MASK BOARD_I2S_SLOT_MASK /*!< Use left slot for TX data */
+/** @} */
+
+/**
+ * @name Audio DMA Configuration
+ * @brief Matches radar_test working configuration
+ * @{
+ */
+#define BOARD_AUDIO_DMA_BUF_COUNT 16 /*!< Number of DMA buffers (matches radar_test) */
+#define BOARD_AUDIO_DMA_BUF_LEN 960  /*!< Samples per DMA buffer (matches radar_test) */
+/** @} */
+
+/**
+ * @name LittleFS Storage Configuration
+ * @{
+ */
+#define BOARD_AUDIO_PARTITION_LABEL "littlefs" /*!< Partition label in partitions.csv */
+#define BOARD_AUDIO_MOUNT_POINT "/audio"       /*!< File system mount point */
 /** @} */

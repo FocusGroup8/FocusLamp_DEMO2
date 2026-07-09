@@ -244,3 +244,28 @@ void touch_deinit(esp_lcd_touch_handle_t tp)
     }
     ESP_LOGI(TAG, "Touch deinitialized");
 }
+
+/* ----------------------------------------------------------------------- */
+/* Audio initialization                                                     */
+/* ----------------------------------------------------------------------- */
+
+#if CONFIG_EXAMPLE_ENABLE_AUDIO
+esp_err_t board_init_audio(i2s_audio_handles_t *handles)
+{
+    ESP_LOGI(TAG, "Initializing I2S audio (INMP441 + MAX98357A)...");
+    esp_err_t ret = i2s_audio_init(handles);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "I2S audio init failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    ESP_LOGI(TAG, "I2S audio initialized");
+    return ESP_OK;
+}
+
+void board_deinit_audio(i2s_audio_handles_t *handles)
+{
+    ESP_LOGI(TAG, "Deinitializing I2S audio...");
+    i2s_audio_deinit(handles);
+    ESP_LOGI(TAG, "I2S audio deinitialized");
+}
+#endif

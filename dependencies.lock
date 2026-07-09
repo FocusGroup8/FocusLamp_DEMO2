@@ -1,4 +1,14 @@
 dependencies:
+  esphome/micro-opus:
+    component_hash: c4cec51b6e45b9b660bf8725a10c65f46485ff8b37ff664e4da3fd738301c71e
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.4.1
   espressif/cmake_utilities:
     component_hash: 351350613ceafba240b761b4ea991e0f231ac7a9f59a9ee901f751bddc0bb18f
     dependencies:
@@ -9,6 +19,16 @@ dependencies:
       registry_url: https://components.espressif.com
       type: service
     version: 0.5.3
+  espressif/esp_audio_codec:
+    component_hash: ef72edb6b70f593fb18ec6621dfbd5356abcaf6703cec75602d8b39e534c0382
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 2.6.0
   espressif/esp_lcd_st7701:
     component_hash: 924f346e36da39aaa38177e21bd360b5442abc792338fb64ad1e644481255898
     dependencies:
@@ -55,9 +75,22 @@ dependencies:
     source:
       type: idf
     version: 5.5.4
+  joltwallet/littlefs:
+    component_hash: fab83a8a57de01b05441557d78e9d10c755413a1836af4b2762b539add0c14b1
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.22.2
 direct_dependencies:
+- esphome/micro-opus
+- espressif/esp_audio_codec
 - espressif/esp_lcd_st7701
 - espressif/esp_lcd_touch_gt911
-manifest_hash: 84a23a0560a1900a0d727a15ddbcb3bd1a694e6dfe58229d2e6608803d0e054b
+- joltwallet/littlefs
+manifest_hash: 4c0cccf8a205bbfe08eb141d0ea49b00fe2ad5d89df0b3a13fc27d71baca6307
 target: esp32p4
 version: 2.0.0

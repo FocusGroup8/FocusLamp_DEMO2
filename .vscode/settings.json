@@ -4,7 +4,7 @@
   "idf.openOcdConfigs": [
     "board/esp32p4-bridge.cfg"
   ],
-  "idf.portWin": "detect",
+  "idf.portWin": "COM18",
   "idf.currentSetup": "C:\\Software\\Espressif\\.espressif\\v5.5.4\\esp-idf",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32p4"

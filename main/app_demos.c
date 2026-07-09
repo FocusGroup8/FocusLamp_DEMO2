@@ -20,10 +20,42 @@
 #include "gesture_data_collector.h"
 #include "touch_gui.h"
 
+#if CONFIG_EXAMPLE_ENABLE_AUDIO
+#include "audio/audio_test.h"
+#include "audio/i2s_test.h"
+#endif
+
 static const char *TAG = "DEMOS";
+
+#if CONFIG_EXAMPLE_RUN_I2S_TEST
+static void audio_rec_test_task(void *arg)
+{
+    ESP_LOGI(TAG, "Starting Audio Recording-to-Playback test...");
+    esp_err_t ret = audio_test_rec_to_play();
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Audio test completed successfully");
+    } else {
+        ESP_LOGE(TAG, "Audio test failed: %s", esp_err_to_name(ret));
+    }
+    vTaskDelete(NULL);
+}
+#endif
 
 void app_run_demo(simple_gui_t *gui, esp_lcd_touch_handle_t tp)
 {
+#if CONFIG_EXAMPLE_RUN_I2S_TEST
+    // Run Audio Recording-to-Playback test
+    ESP_LOGI(TAG, "Launching Audio Recording-to-Playback test task...");
+    xTaskCreate(audio_rec_test_task, "audio_rec_test", 16384, NULL, 5, NULL); // Increased stack for recorder + player
+    vTaskDelay(pdMS_TO_TICKS(35000)); // Wait for tests to complete (30s recording + 30s playback + 5s overhead)
+#endif
+
+    // Skip GUI demos when running in I2S test mode (gui == NULL)
+    if (gui == NULL) {
+        ESP_LOGI(TAG, "No GUI handle available, skipping GUI demos");
+        return;
+    }
+
 #if CONFIG_EXAMPLE_DEMO_TOUCH_GAME
     ESP_LOGI(TAG, "Running Touch Game Demo...");
     touch_game_demo(gui, tp);

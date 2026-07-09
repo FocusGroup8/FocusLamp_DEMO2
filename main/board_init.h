@@ -10,6 +10,10 @@
 #include "esp_lcd_touch.h"
 #include "simple_gui.h"
 
+#if CONFIG_EXAMPLE_ENABLE_AUDIO
+#include "audio/i2s_driver.h"
+#endif
+
 /**
  * @brief Initialize all LCD hardware: DSI PHY power, backlight, DSI bus,
  *        DBI panel IO, DPI panel timing, and ST7701S driver.
@@ -33,3 +37,20 @@ esp_err_t touch_init(simple_gui_t *gui, esp_lcd_touch_handle_t *out_tp);
  * @param tp  Touch handle from touch_init()
  */
 void touch_deinit(esp_lcd_touch_handle_t tp);
+
+#if CONFIG_EXAMPLE_ENABLE_AUDIO
+/**
+ * @brief Initialize I2S audio subsystem (microphone + amplifier)
+ *
+ * @param[out] handles  I2S channel handles (TX + RX)
+ * @return ESP_OK on success
+ */
+esp_err_t board_init_audio(i2s_audio_handles_t *handles);
+
+/**
+ * @brief Deinitialize I2S audio subsystem
+ *
+ * @param handles  I2S channel handles to release
+ */
+void board_deinit_audio(i2s_audio_handles_t *handles);
+#endif

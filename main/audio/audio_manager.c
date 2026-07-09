@@ -14,6 +14,10 @@
 #include "player.h"
 #include "recorder.h"
 
+#if CONFIG_EXAMPLE_ENABLE_SYSMON
+#include "system_monitor.h"
+#endif
+
 static const char *TAG = "AUDIO_MANAGER";
 
 // Audio manager state
@@ -23,6 +27,11 @@ static i2s_audio_handles_t s_i2s_handles = {0};
 esp_err_t audio_manager_init(i2s_audio_handles_t *i2s_handles)
 {
     ESP_LOGI(TAG, "Initializing audio manager...");
+
+#if CONFIG_EXAMPLE_ENABLE_SYSMON
+    // Record heap before audio initialization (baseline)
+    sysmon_record_heap_before_audio();
+#endif
 
     // Initialize I2S driver
     esp_err_t ret = i2s_audio_init(&s_i2s_handles);
@@ -79,6 +88,25 @@ esp_err_t audio_manager_init(i2s_audio_handles_t *i2s_handles)
         *i2s_handles = s_i2s_handles;
     }
 
+#if CONFIG_EXAMPLE_ENABLE_SYSMON
+    // Record heap after audio initialization (calculate footprint)
+    sysmon_record_heap_after_audio();
+
+    // Initialize and start system monitor
+    sysmon_config_t mon_config = {
+        .interval_sec         = CONFIG_EXAMPLE_SYSMON_INTERVAL_SEC,
+        .print_task_list      = CONFIG_EXAMPLE_SYSMON_INTERVAL_SEC,
+        .enable_audio_metrics = true,
+    };
+    ret = sysmon_init(&mon_config);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to init system monitor: %s", esp_err_to_name(ret));
+    } else {
+        sysmon_start();
+        ESP_LOGI(TAG, "System monitor started");
+    }
+#endif
+
     s_state = AUDIO_MANAGER_IDLE;
     ESP_LOGI(TAG, "Audio manager initialized successfully");
     return ESP_OK;
@@ -95,6 +123,12 @@ void audio_manager_deinit(void)
     if (s_state == AUDIO_MANAGER_PLAYING || s_state == AUDIO_MANAGER_PAUSED) {
         audio_manager_stop_play();
     }
+
+#if CONFIG_EXAMPLE_ENABLE_SYSMON
+    // Deinitialize system monitor
+    sysmon_deinit();
+    ESP_LOGI(TAG, "System monitor deinitialized");
+#endif
 
     // Deinitialize subsystems
     player_deinit();

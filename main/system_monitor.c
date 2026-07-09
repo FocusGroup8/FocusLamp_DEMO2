@@ -39,7 +39,7 @@ static const sysmon_config_t s_default_config = {
 #if CONFIG_EXAMPLE_ENABLE_SYSMON
     .interval_sec         = CONFIG_EXAMPLE_SYSMON_INTERVAL_SEC,
     .print_task_list      = CONFIG_EXAMPLE_SYSMON_INTERVAL_SEC,
-    .enable_audio_metrics = CONFIG_EXAMPLE_ENABLE_AUDIO,
+    .enable_audio_metrics = CONFIG_EXAMPLE_ENABLE_SYSMON,
 #else
     .interval_sec         = 10, // Fallback default
     .print_task_list      = false,

@@ -187,10 +187,10 @@ menu "Example Configuration"
     config EXAMPLE_ENABLE_SYSMON
         bool "Enable system resource monitor"
         default n
-        depends on EXAMPLE_ENABLE_AUDIO
         help
-            Enable real-time system resource monitoring during audio operations.
-            Logs heap usage, task stack watermarks, and CPU utilization.
+            Enable real-time system resource monitoring during system operation.
+            Logs heap usage, PSRAM usage, and task statistics.
+            Works in both AUDIO and DISPLAY modes.
 
     config EXAMPLE_SYSMON_INTERVAL_SEC
         int "Monitor log interval (seconds)"

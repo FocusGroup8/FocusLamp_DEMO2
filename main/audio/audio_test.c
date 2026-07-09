@@ -21,7 +21,7 @@
 static const char *TAG = "AUDIO_TEST";
 
 // Test file path (LittleFS)
-#define TEST_WAV_FILE "/audio/audio/music01.wav"
+#define TEST_WAV_FILE "/storage/audio/music01.wav"
 
 // WAV playback buffer
 #define WAV_BUF_SAMPLES 1024
@@ -210,7 +210,7 @@ esp_err_t audio_test_rec_to_play(void)
 
     // Step 2: Play Ogg Opus file from LittleFS (skip WAV for now)
     ESP_LOGI(TAG, "Step 2: Playing Ogg Opus file (music01.ogg)...");
-    ret = audio_test_play_ogg("/audio/audio/music01.ogg");
+    ret = audio_test_play_ogg("/storage/audio/music01.ogg");
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Ogg playback failed");
         audio_manager_deinit();

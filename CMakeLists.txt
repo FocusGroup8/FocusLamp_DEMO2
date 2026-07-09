@@ -6,4 +6,4 @@ idf_build_set_property(MINIMAL_BUILD ON)
 project(mipi_dsi)
 
 # Create and flash LittleFS partition image from littlefs_data directory
-littlefs_create_partition_image(littlefs littlefs_data FLASH_IN_PROJECT)
+littlefs_create_partition_image(storage littlefs_data FLASH_IN_PROJECT)

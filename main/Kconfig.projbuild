@@ -1,7 +1,36 @@
 menu "Example Configuration"
+
+    #===========================================================================#
+    # System Operation Mode (Mutually Exclusive Audio/Display)                 #
+    #===========================================================================#
+
+    choice EXAMPLE_SYSTEM_MODE
+        prompt "System Operation Mode (Mutually Exclusive)"
+        default EXAMPLE_SYSTEM_MODE_DISPLAY
+        help
+            Select the system operation mode. Audio and display subsystems
+            cannot run simultaneously to avoid resource conflicts.
+            
+            - AUDIO mode: Only audio subsystem (no LCD display)
+              Use this for audio recording/playback testing without display overhead.
+            - DISPLAY mode: Only display subsystem (no audio hardware)
+              Use this for LCD/touch demos without audio hardware requirements.
+
+        config EXAMPLE_SYSTEM_MODE_AUDIO
+            bool "Audio Only (No Display)"
+            select EXAMPLE_ENABLE_AUDIO
+        config EXAMPLE_SYSTEM_MODE_DISPLAY
+            bool "Display Only (No Audio)"
+    endchoice
+
+    #===========================================================================#
+    # Display System Configuration                                              #
+    #===========================================================================#
+
     config EXAMPLE_USE_DMA2D_COPY_FRAME
         bool "Use DMA2D to copy draw buffer to frame buffer"
         default y
+        depends on EXAMPLE_SYSTEM_MODE_DISPLAY
         help
             Enable this option, DMA2D will be used to copy the LVGL draw buffer to the target frame buffer.
             This can save some CPU time and improve the performance.
@@ -9,6 +38,7 @@ menu "Example Configuration"
     config EXAMPLE_MONITOR_REFRESH_BY_GPIO
         bool "Monitor Refresh Rate by GPIO"
         default y
+        depends on EXAMPLE_SYSTEM_MODE_DISPLAY
         help
             Enable this option, you can visualize the refresh rate by attaching a logic analyzer to a specific GPIO.
             The GPIO will output a square wave with the frequency equals to half of the refresh rate.
@@ -16,30 +46,35 @@ menu "Example Configuration"
     config EXAMPLE_LCD_USE_ST7701S
         bool "Use ST7701S LCD controller"
         default y
+        depends on EXAMPLE_SYSTEM_MODE_DISPLAY
         help
             ST7701S driver IC for KD034WXFID001 3.4 inch 480x480 MIPI DSI panel.
 
     config EXAMPLE_TOUCH_USE_GT911
         bool "Use GT911 touch controller"
         default y
+        depends on EXAMPLE_SYSTEM_MODE_DISPLAY
         help
             GT911 capacitive touch controller connected via I2C.
 
     config EXAMPLE_ENABLE_GESTURE_RECOGNITION
         bool "Enable gesture recognition library"
         default y
+        depends on EXAMPLE_SYSTEM_MODE_DISPLAY
         help
             Compile gesture recognition module (swipe, pinch, rotation, long press).
 
     config EXAMPLE_ENABLE_TOUCH_GAME
         bool "Enable touch game demo"
         default y
+        depends on EXAMPLE_SYSTEM_MODE_DISPLAY
         help
             Compile gesture-controlled ball game demo.
 
     config EXAMPLE_GESTURE_DEBUG_LOG
         bool "Enable gesture recognition debug logging"
         default n
+        depends on EXAMPLE_SYSTEM_MODE_DISPLAY
         help
             Enable verbose per-frame logging in gesture recognition.
             Disable for production to improve performance.
@@ -47,6 +82,7 @@ menu "Example Configuration"
     choice EXAMPLE_DEMO
         prompt "Select demo to run"
         default EXAMPLE_DEMO_TOUCH_GAME
+        depends on EXAMPLE_SYSTEM_MODE_DISPLAY
         help
             Choose which demo to run at startup. Only one demo runs at a time.
 
@@ -62,12 +98,18 @@ menu "Example Configuration"
             bool "Gesture Data Collector (calibration)"
     endchoice
 
+    #===========================================================================#
+    # Audio System Configuration                                                #
+    #===========================================================================#
+
     config EXAMPLE_ENABLE_AUDIO
         bool "Enable audio system (I2S microphone + speaker)"
         default n
+        depends on EXAMPLE_SYSTEM_MODE_AUDIO
         help
             Enable I2S audio subsystem with INMP441 microphone and MAX98357A amplifier.
             This adds I2S driver, LittleFS storage, and audio codec dependencies.
+            Note: This is automatically selected when SYSTEM_MODE_AUDIO is chosen.
 
     config EXAMPLE_RUN_I2S_TEST
         bool "Run I2S driver verification test on startup"
@@ -81,13 +123,13 @@ menu "Example Configuration"
 
     config EXAMPLE_AUDIO_SAMPLE_RATE
         int "Audio sample rate (Hz)"
-        default 48000
+        default 16000
         range 8000 48000
         depends on EXAMPLE_ENABLE_AUDIO
         help
             I2S audio sample rate in Hz. Common values: 8000, 16000, 22050, 44100, 48000.
-            48000 is used for unified high-quality recording and playback.
-            Note: 48kHz WAV recordings consume ~2.8MB per 30 seconds.
+            16000 is the default used in the current implementation.
+            Note: 16kHz WAV recordings consume ~0.9MB per 30 seconds.
 
     config EXAMPLE_AUDIO_I2S_NUM
         int "I2S port number"
@@ -144,7 +186,7 @@ menu "Example Configuration"
 
     config EXAMPLE_ENABLE_SYSMON
         bool "Enable system resource monitor"
-        default y
+        default n
         depends on EXAMPLE_ENABLE_AUDIO
         help
             Enable real-time system resource monitoring during audio operations.
@@ -161,7 +203,7 @@ menu "Example Configuration"
 
     config EXAMPLE_SYSMON_PRINT_TASK_LIST
         bool "Print task list in monitor report"
-        default y
+        default n
         depends on EXAMPLE_ENABLE_SYSMON
         help
             Include FreeRTOS task list with stack high water marks.

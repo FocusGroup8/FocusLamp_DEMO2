@@ -67,17 +67,54 @@ esp_err_t audio_storage_list_files(int *count)
 
     *count = 0;
 
-    DIR *dir = opendir(BOARD_AUDIO_MOUNT_POINT);
+    // Try to list files in /storage/audio subdirectory first
+    char audio_dir_path[128];
+    snprintf(audio_dir_path, sizeof(audio_dir_path), "%s/audio", BOARD_AUDIO_MOUNT_POINT);
+
+    DIR *dir = opendir(audio_dir_path);
+    if (dir != NULL) {
+        ESP_LOGI(TAG, "Listing files in '%s':", audio_dir_path);
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL) {
+            if (entry->d_type == DT_REG) {
+                ESP_LOGI(TAG, "  Found file: %s", entry->d_name);
+                (*count)++;
+            }
+        }
+        closedir(dir);
+        ESP_LOGI(TAG, "Total files found in audio subdirectory: %d", *count);
+        return ESP_OK;
+    }
+
+    // If audio subdirectory doesn't exist, try root mount point
+    dir = opendir(BOARD_AUDIO_MOUNT_POINT);
     if (dir == NULL) {
         ESP_LOGE(TAG, "Failed to open directory '%s'", BOARD_AUDIO_MOUNT_POINT);
         return ESP_FAIL;
     }
 
+    ESP_LOGI(TAG, "Listing files in '%s':", BOARD_AUDIO_MOUNT_POINT);
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
         if (entry->d_type == DT_REG) {
             ESP_LOGI(TAG, "  Found file: %s", entry->d_name);
             (*count)++;
+        } else if (entry->d_type == DT_DIR) {
+            // Recursively check subdirectories
+            char subdir_path[512];
+            snprintf(subdir_path, sizeof(subdir_path), "%s/%s", BOARD_AUDIO_MOUNT_POINT, entry->d_name);
+            DIR *subdir = opendir(subdir_path);
+            if (subdir != NULL) {
+                ESP_LOGI(TAG, "  Checking subdirectory: %s", entry->d_name);
+                struct dirent *subentry;
+                while ((subentry = readdir(subdir)) != NULL) {
+                    if (subentry->d_type == DT_REG) {
+                        ESP_LOGI(TAG, "    Found file: %s/%s", entry->d_name, subentry->d_name);
+                        (*count)++;
+                    }
+                }
+                closedir(subdir);
+            }
         }
     }
 

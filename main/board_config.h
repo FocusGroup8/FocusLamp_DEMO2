@@ -364,6 +364,6 @@
  * @name LittleFS Storage Configuration
  * @{
  */
-#define BOARD_AUDIO_PARTITION_LABEL "littlefs" /*!< Partition label in partitions.csv */
-#define BOARD_AUDIO_MOUNT_POINT "/audio"       /*!< File system mount point */
+#define BOARD_AUDIO_PARTITION_LABEL "storage" /*!< Partition label in partitions.csv */
+#define BOARD_AUDIO_MOUNT_POINT "/storage"    /*!< File system mount point */
 /** @} */

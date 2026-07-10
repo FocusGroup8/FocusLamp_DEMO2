@@ -4,6 +4,13 @@
 CONFIG_IDF_TARGET="esp32p4"
 
 #
+# WiFi Remote Configuration
+#
+CONFIG_ESP_WIFI_SSID="RT3"
+CONFIG_ESP_WIFI_PASSWORD="10101010"
+# end of WiFi Remote Configuration
+
+#
 # Component config
 #
 
@@ -19,8 +26,22 @@ CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
 # end of Hardware Settings
 
 #
+# Wi-Fi
+#
+CONFIG_ESP_HOST_WIFI_ENABLED=y
+CONFIG_ESP_WIFI_EXTRA_IRAM_OPT=y
+# end of Wi-Fi
+
+#
+# ESP-Hosted config
+#
+CONFIG_ESP_HOSTED_ENABLE_ITWT=n
+# end of ESP-Hosted config
+
+#
 # Wi-Fi Remote
 #
+CONFIG_ESP_WIFI_REMOTE_ENABLED=y
 CONFIG_SLAVE_IDF_TARGET_ESP32C5=y
 # end of Wi-Fi Remote
 # end of Component config

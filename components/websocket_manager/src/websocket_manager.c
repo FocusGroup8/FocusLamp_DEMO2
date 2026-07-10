@@ -1,0 +1,507 @@
+/*
+ * WebSocket Manager - Modular WebSocket management for ESP32
+ *
+ * Client: Based on espressif/esp_websocket_client component
+ * Server: Based on esp_http_server WebSocket support
+ */
+
+#include "websocket_manager.h"
+
+#if (WS_MANAGER_ENABLE == 1)
+
+#include <string.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+
+/* Callback storage */
+static ws_manager_cb_t s_callbacks[WS_MANAGER_EVENT_SERVER_DISCONNECT + 1] = { NULL };
+
+static void dispatch_event(ws_manager_event_t event, void *data)
+{
+    if (event <= WS_MANAGER_EVENT_SERVER_DISCONNECT && s_callbacks[event]) {
+        s_callbacks[event](event, data);
+    }
+}
+
+/* ======================== Client Implementation ======================== */
+
+#if (WS_MANAGER_CLIENT_ENABLE == 1)
+
+#include "esp_websocket_client.h"
+
+static const char *TAG = "ws_mgr";
+
+static esp_websocket_client_handle_t s_ws_client = NULL;
+static bool s_client_connected = false;
+static SemaphoreHandle_t s_client_sem = NULL;
+
+/* Exponential backoff reconnect state */
+static int s_reconnect_delay_ms = 0;
+static const int s_reconnect_min_ms = WS_MANAGER_RECONNECT_MS;
+
+static void websocket_event_handler(void *arg, esp_event_base_t event_base,
+                                    int32_t event_id, void *event_data)
+{
+    esp_websocket_event_data_t *ws_data = (esp_websocket_event_data_t *)event_data;
+
+    switch (event_id) {
+    case WEBSOCKET_EVENT_CONNECTED:
+        ESP_LOGI(TAG, "WebSocket client connected");
+        s_client_connected = true;
+        s_reconnect_delay_ms = s_reconnect_min_ms;
+        dispatch_event(WS_MANAGER_EVENT_CONNECTED, NULL);
+        if (s_client_sem) {
+            xSemaphoreGive(s_client_sem);
+        }
+        break;
+
+    case WEBSOCKET_EVENT_DISCONNECTED:
+        ESP_LOGW(TAG, "WebSocket client disconnected");
+        s_client_connected = false;
+        dispatch_event(WS_MANAGER_EVENT_DISCONNECTED, NULL);
+        break;
+
+    case WEBSOCKET_EVENT_DATA:
+        if (ws_data->op_code == 0x01 || ws_data->op_code == 0x02) {
+            ws_manager_data_t msg = {
+                .type = (ws_data->op_code == 0x01) ? WS_DATA_TYPE_TEXT : WS_DATA_TYPE_BINARY,
+                .data = ws_data->data_ptr,
+                .data_len = ws_data->data_len,
+                .client_fd = -1,
+            };
+            dispatch_event(WS_MANAGER_EVENT_DATA, &msg);
+        }
+        break;
+
+    case WEBSOCKET_EVENT_ERROR:
+        ESP_LOGE(TAG, "WebSocket client error");
+        dispatch_event(WS_MANAGER_EVENT_ERROR, NULL);
+        break;
+
+    default:
+        break;
+    }
+}
+
+esp_err_t ws_manager_client_start(const ws_manager_client_config_t *config)
+{
+    if (config == NULL || config->uri == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (s_ws_client != NULL) {
+        ESP_LOGW(TAG, "Client already started");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    s_client_sem = xSemaphoreCreateBinary();
+    if (s_client_sem == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    /* Configure WebSocket client */
+    esp_websocket_client_config_t ws_cfg = {
+        .uri = config->uri,
+        .buffer_size = WS_MANAGER_BUFFER_SIZE,
+        .ping_interval_sec = WS_MANAGER_PING_INTERVAL,
+        .reconnect_timeout_ms = WS_MANAGER_RECONNECT_MS,
+        .disable_auto_reconnect = false,
+    };
+
+    if (config->subprotocol) {
+        ws_cfg.subprotocol = config->subprotocol;
+    }
+    if (config->user_agent) {
+        ws_cfg.user_agent = config->user_agent;
+    }
+    if (config->headers) {
+        ws_cfg.headers = config->headers;
+    }
+#if (WS_MANAGER_TLS_ENABLE == 1)
+    if (config->cert_pem) {
+        ws_cfg.cert_pem = config->cert_pem;
+    }
+#else
+    ws_cfg.transport = WEBSOCKET_TRANSPORT_OVER_TCP;
+#endif
+
+    ESP_LOGI(TAG, "Starting WebSocket client, URI: %s", config->uri);
+
+    s_ws_client = esp_websocket_client_init(&ws_cfg);
+    if (s_ws_client == NULL) {
+        ESP_LOGE(TAG, "Failed to init WebSocket client");
+        vSemaphoreDelete(s_client_sem);
+        s_client_sem = NULL;
+        return ESP_FAIL;
+    }
+
+    esp_websocket_register_events(s_ws_client, WEBSOCKET_EVENT_ANY,
+                                  websocket_event_handler, NULL);
+
+    esp_err_t err = esp_websocket_client_start(s_ws_client);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start WebSocket client: %s", esp_err_to_name(err));
+        esp_websocket_client_destroy(s_ws_client);
+        s_ws_client = NULL;
+        vSemaphoreDelete(s_client_sem);
+        s_client_sem = NULL;
+        return err;
+    }
+
+    /* Wait for connection with timeout */
+    if (xSemaphoreTake(s_client_sem, pdMS_TO_TICKS(30000)) != pdTRUE) {
+        ESP_LOGW(TAG, "Timeout waiting for WebSocket connection");
+        /* Don't return error - client is started, will auto-reconnect */
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t ws_manager_client_stop(void)
+{
+    if (s_ws_client == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(TAG, "Stopping WebSocket client");
+    esp_err_t err = esp_websocket_client_close(s_ws_client, portMAX_DELAY);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Close failed: %s, destroying anyway", esp_err_to_name(err));
+    }
+
+    esp_websocket_client_destroy(s_ws_client);
+    s_ws_client = NULL;
+    s_client_connected = false;
+
+    if (s_client_sem) {
+        vSemaphoreDelete(s_client_sem);
+        s_client_sem = NULL;
+    }
+
+    return ESP_OK;
+}
+
+bool ws_manager_client_is_connected(void)
+{
+    return s_ws_client != NULL && s_client_connected;
+}
+
+int ws_manager_client_send_text(const char *data, int len, int timeout_ms)
+{
+    if (s_ws_client == NULL || !s_client_connected) {
+        return -1;
+    }
+    return esp_websocket_client_send_text(s_ws_client, data, len, timeout_ms);
+}
+
+int ws_manager_client_send_binary(const char *data, int len, int timeout_ms)
+{
+    if (s_ws_client == NULL || !s_client_connected) {
+        return -1;
+    }
+    return esp_websocket_client_send_bin(s_ws_client, data, len, timeout_ms);
+}
+
+esp_err_t ws_manager_client_get_info(ws_manager_conn_info_t *info)
+{
+    if (info == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(info, 0, sizeof(*info));
+    info->is_connected = s_client_connected;
+    info->fd = -1;
+    return ESP_OK;
+}
+
+#endif /* WS_MANAGER_CLIENT_ENABLE */
+
+/* ======================== Server Implementation ======================== */
+
+#if (WS_MANAGER_SERVER_ENABLE == 1)
+
+#include "esp_http_server.h"
+
+static httpd_handle_t s_server = NULL;
+static bool s_server_running = false;
+
+/* Connected client tracking */
+static int s_client_fds[WS_MANAGER_SERVER_MAX_CONN];
+static int s_client_count = 0;
+static SemaphoreHandle_t s_server_mutex = NULL;
+
+static void track_client_add(int fd)
+{
+    if (s_server_mutex) {
+        xSemaphoreTake(s_server_mutex, portMAX_DELAY);
+    }
+    if (s_client_count < WS_MANAGER_SERVER_MAX_CONN) {
+        s_client_fds[s_client_count++] = fd;
+    }
+    if (s_server_mutex) {
+        xSemaphoreGive(s_server_mutex);
+    }
+}
+
+static void __attribute__((unused)) track_client_remove(int fd)
+{
+    if (s_server_mutex) {
+        xSemaphoreTake(s_server_mutex, portMAX_DELAY);
+    }
+    for (int i = 0; i < s_client_count; i++) {
+        if (s_client_fds[i] == fd) {
+            s_client_fds[i] = s_client_fds[s_client_count - 1];
+            s_client_count--;
+            dispatch_event(WS_MANAGER_EVENT_SERVER_DISCONNECT, NULL);
+            break;
+        }
+    }
+    if (s_server_mutex) {
+        xSemaphoreGive(s_server_mutex);
+    }
+}
+
+static esp_err_t ws_server_handler(httpd_req_t *req)
+{
+    if (req->method == HTTP_GET) {
+        /* Handshake complete - new client connected */
+        int fd = httpd_req_to_sockfd(req);
+        ESP_LOGI(TAG, "Server: new client connected, fd=%d", fd);
+        track_client_add(fd);
+        dispatch_event(WS_MANAGER_EVENT_SERVER_CONNECT, NULL);
+        return ESP_OK;
+    }
+
+    /* Receive WebSocket frame */
+    httpd_ws_frame_t ws_pkt;
+    uint8_t *buf = NULL;
+    memset(&ws_pkt, 0, sizeof(httpd_ws_frame_t));
+    ws_pkt.type = HTTPD_WS_TYPE_TEXT;
+
+    /* First call to get frame length */
+    esp_err_t ret = httpd_ws_recv_frame(req, &ws_pkt, 0);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Server: recv frame len failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    if (ws_pkt.len) {
+        buf = calloc(1, ws_pkt.len + 1);
+        if (buf == NULL) {
+            ESP_LOGE(TAG, "Server: no memory for recv buffer");
+            return ESP_ERR_NO_MEM;
+        }
+        ws_pkt.payload = buf;
+        ret = httpd_ws_recv_frame(req, &ws_pkt, ws_pkt.len);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Server: recv frame data failed: %s", esp_err_to_name(ret));
+            free(buf);
+            return ret;
+        }
+    }
+
+    /* Dispatch data event */
+    ws_manager_data_t msg = {
+        .type = (ws_pkt.type == HTTPD_WS_TYPE_TEXT) ? WS_DATA_TYPE_TEXT : WS_DATA_TYPE_BINARY,
+        .data = (const char *)ws_pkt.payload,
+        .data_len = ws_pkt.len,
+        .client_fd = httpd_req_to_sockfd(req),
+    };
+    dispatch_event(WS_MANAGER_EVENT_DATA, &msg);
+
+    free(buf);
+    return ESP_OK;
+}
+
+static httpd_uri_t ws_uri = {
+    .uri        = "/ws",
+    .method     = HTTP_GET,
+    .handler    = ws_server_handler,
+    .user_ctx   = NULL,
+    .is_websocket = true,
+};
+
+esp_err_t ws_manager_server_start(void)
+{
+    if (s_server_running) {
+        ESP_LOGW(TAG, "Server already running");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    s_server_mutex = xSemaphoreCreateMutex();
+    if (s_server_mutex == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.server_port = WS_MANAGER_SERVER_PORT;
+    config.max_open_sockets = WS_MANAGER_SERVER_MAX_CONN + 2; /* Reserve for HTTP + control */
+
+    ESP_LOGI(TAG, "Starting WebSocket server on port %d", config.server_port);
+
+    esp_err_t err = httpd_start(&s_server, &config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start server: %s", esp_err_to_name(err));
+        vSemaphoreDelete(s_server_mutex);
+        s_server_mutex = NULL;
+        return err;
+    }
+
+    httpd_register_uri_handler(s_server, &ws_uri);
+    s_server_running = true;
+    s_client_count = 0;
+    memset(s_client_fds, 0, sizeof(s_client_fds));
+
+    ESP_LOGI(TAG, "WebSocket server started");
+    return ESP_OK;
+}
+
+esp_err_t ws_manager_server_stop(void)
+{
+    if (!s_server_running || s_server == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(TAG, "Stopping WebSocket server");
+    esp_err_t err = httpd_stop(s_server);
+    s_server = NULL;
+    s_server_running = false;
+    s_client_count = 0;
+
+    if (s_server_mutex) {
+        vSemaphoreDelete(s_server_mutex);
+        s_server_mutex = NULL;
+    }
+
+    return err;
+}
+
+bool ws_manager_server_is_running(void)
+{
+    return s_server_running;
+}
+
+esp_err_t ws_manager_server_send_text(int client_fd, const char *data, int len)
+{
+    if (!s_server_running || s_server == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    httpd_ws_frame_t ws_pkt = {
+        .payload = (uint8_t *)data,
+        .len = len,
+        .type = HTTPD_WS_TYPE_TEXT,
+        .final = true,
+    };
+    return httpd_ws_send_frame_async(s_server, client_fd, &ws_pkt);
+}
+
+esp_err_t ws_manager_server_send_binary(int client_fd, const char *data, int len)
+{
+    if (!s_server_running || s_server == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    httpd_ws_frame_t ws_pkt = {
+        .payload = (uint8_t *)data,
+        .len = len,
+        .type = HTTPD_WS_TYPE_BINARY,
+        .final = true,
+    };
+    return httpd_ws_send_frame_async(s_server, client_fd, &ws_pkt);
+}
+
+esp_err_t ws_manager_server_broadcast_text(const char *data, int len)
+{
+    if (!s_server_running || s_server == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t ret = ESP_OK;
+    if (s_server_mutex) {
+        xSemaphoreTake(s_server_mutex, portMAX_DELAY);
+    }
+    for (int i = 0; i < s_client_count; i++) {
+        esp_err_t err = ws_manager_server_send_text(s_client_fds[i], data, len);
+        if (err != ESP_OK) {
+            ret = err;
+        }
+    }
+    if (s_server_mutex) {
+        xSemaphoreGive(s_server_mutex);
+    }
+    return ret;
+}
+
+esp_err_t ws_manager_server_broadcast_binary(const char *data, int len)
+{
+    if (!s_server_running || s_server == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t ret = ESP_OK;
+    if (s_server_mutex) {
+        xSemaphoreTake(s_server_mutex, portMAX_DELAY);
+    }
+    for (int i = 0; i < s_client_count; i++) {
+        esp_err_t err = ws_manager_server_send_binary(s_client_fds[i], data, len);
+        if (err != ESP_OK) {
+            ret = err;
+        }
+    }
+    if (s_server_mutex) {
+        xSemaphoreGive(s_server_mutex);
+    }
+    return ret;
+}
+
+int ws_manager_server_get_client_count(void)
+{
+    return s_client_count;
+}
+
+#endif /* WS_MANAGER_SERVER_ENABLE */
+
+/* ======================== Common API Implementation ======================== */
+
+esp_err_t ws_manager_init(void)
+{
+    ESP_LOGI(TAG, "WebSocket Manager initialized");
+    return ESP_OK;
+}
+
+esp_err_t ws_manager_deinit(void)
+{
+#if (WS_MANAGER_CLIENT_ENABLE == 1)
+    if (s_ws_client) {
+        ws_manager_client_stop();
+    }
+#endif
+
+#if (WS_MANAGER_SERVER_ENABLE == 1)
+    if (s_server_running) {
+        ws_manager_server_stop();
+    }
+#endif
+
+    memset(s_callbacks, 0, sizeof(s_callbacks));
+    ESP_LOGI(TAG, "WebSocket Manager deinitialized");
+    return ESP_OK;
+}
+
+esp_err_t ws_manager_register_handler(ws_manager_event_t event, ws_manager_cb_t cb)
+{
+    if (event > WS_MANAGER_EVENT_SERVER_DISCONNECT) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (cb == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    s_callbacks[event] = cb;
+    return ESP_OK;
+}
+
+#endif /* WS_MANAGER_ENABLE */

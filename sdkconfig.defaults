@@ -4,11 +4,11 @@
 CONFIG_IDF_TARGET="esp32p4"
 
 #
-# WiFi Remote Configuration
+# WiFi Manager Configuration
 #
-CONFIG_ESP_WIFI_SSID="RT3"
-CONFIG_ESP_WIFI_PASSWORD="10101010"
-# end of WiFi Remote Configuration
+CONFIG_WIFI_MANAGER_SSID="RT3"
+CONFIG_WIFI_MANAGER_PASSWORD="10101010"
+# end of WiFi Manager Configuration
 
 #
 # Component config

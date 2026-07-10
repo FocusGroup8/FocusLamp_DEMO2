@@ -1,5 +1,4 @@
-## IDF Component Manager Manifest File
-## Reference: C:/Software/Espressif/.espressif/v5.5.4/esp-idf/examples/wifi/getting_started/station/main/idf_component.yml
+## WiFi Manager component dependencies
 dependencies:
   espressif/esp_wifi_remote:
     version: ">=0.10,<2.0"

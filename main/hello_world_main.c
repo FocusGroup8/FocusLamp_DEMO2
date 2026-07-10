@@ -95,6 +95,7 @@ void app_main(void)
     ws_manager_register_handler(WS_MANAGER_EVENT_DATA, ws_data_callback);
     ws_manager_register_handler(WS_MANAGER_EVENT_ERROR, ws_data_callback);
     ws_manager_register_handler(WS_MANAGER_EVENT_SERVER_CONNECT, ws_data_callback);
+    ws_manager_register_handler(WS_MANAGER_EVENT_SERVER_DISCONNECT, ws_data_callback);
 
     err = ws_manager_init();
     if (err != ESP_OK) {
@@ -115,9 +116,19 @@ void app_main(void)
 #endif
 
 #if (WS_MANAGER_CLIENT_ENABLE == 1)
-    /* Step 4: Start WebSocket Client (configure URI via menuconfig or code) */
-    ESP_LOGI(TAG, "WebSocket client ready. Call ws_manager_client_start() with a URI to connect.");
-    ESP_LOGI(TAG, "Example: ws://echo.websocket.org");
+    /* Step 4: Start WebSocket Client (if URI configured via menuconfig) */
+    if (strlen(WS_MANAGER_CLIENT_URI) > 0) {
+        ws_manager_client_config_t client_cfg = {
+            .uri = WS_MANAGER_CLIENT_URI,
+        };
+        ESP_LOGI(TAG, "Starting WebSocket client, URI: %s", WS_MANAGER_CLIENT_URI);
+        err = ws_manager_client_start(&client_cfg);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "WebSocket client start failed: %s", esp_err_to_name(err));
+        }
+    } else {
+        ESP_LOGI(TAG, "WebSocket client ready. Configure URI via menuconfig or call ws_manager_client_start().");
+    }
 #endif
 
     ESP_LOGI(TAG, "=== Setup complete ===");

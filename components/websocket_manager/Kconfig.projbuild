@@ -38,6 +38,14 @@ menu "WebSocket Manager Configuration"
             help
                 Size of the WebSocket send/receive buffer.
 
+        config WS_MANAGER_CLIENT_URI
+            string "Default client URI"
+            default ""
+            depends on WS_MANAGER_CLIENT_ENABLE
+            help
+                Default WebSocket server URI for the client to connect to on startup.
+                Leave empty to skip auto-connect. Example: ws://echo.websocket.org
+
     endmenu
 
     menu "Server Configuration"

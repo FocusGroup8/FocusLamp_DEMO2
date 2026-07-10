@@ -12,6 +12,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <unistd.h>
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -246,7 +247,7 @@ static void track_client_add(int fd)
     }
 }
 
-static void __attribute__((unused)) track_client_remove(int fd)
+static void track_client_remove(int fd)
 {
     if (s_server_mutex) {
         xSemaphoreTake(s_server_mutex, portMAX_DELAY);
@@ -262,6 +263,14 @@ static void __attribute__((unused)) track_client_remove(int fd)
     if (s_server_mutex) {
         xSemaphoreGive(s_server_mutex);
     }
+}
+
+/* Session close callback: detect client disconnection */
+static void ws_session_close_cb(httpd_handle_t hd, int sockfd)
+{
+    ESP_LOGI(TAG, "Server: client disconnected, fd=%d", sockfd);
+    track_client_remove(sockfd);
+    close(sockfd);
 }
 
 static esp_err_t ws_server_handler(httpd_req_t *req)
@@ -324,6 +333,24 @@ static httpd_uri_t ws_uri = {
     .is_websocket = true,
 };
 
+/* Root page handler: show device info and WebSocket endpoint */
+static esp_err_t root_handler(httpd_req_t *req)
+{
+    const char *html = "<!DOCTYPE html><html><head><title>ESP32 WebSocket</title></head>"
+        "<body><h1>ESP32 WebSocket Server</h1>"
+        "<p>WebSocket endpoint: <code>ws://[device-ip]/ws</code></p>"
+        "</body></html>";
+    httpd_resp_set_type(req, "text/html");
+    return httpd_resp_sendstr(req, html);
+}
+
+static httpd_uri_t root_uri = {
+    .uri        = "/",
+    .method     = HTTP_GET,
+    .handler    = root_handler,
+    .user_ctx   = NULL,
+};
+
 esp_err_t ws_manager_server_start(void)
 {
     if (s_server_running) {
@@ -339,6 +366,7 @@ esp_err_t ws_manager_server_start(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = WS_MANAGER_SERVER_PORT;
     config.max_open_sockets = WS_MANAGER_SERVER_MAX_CONN + 2; /* Reserve for HTTP + control */
+    config.close_fn = ws_session_close_cb;
 
     ESP_LOGI(TAG, "Starting WebSocket server on port %d", config.server_port);
 
@@ -351,6 +379,7 @@ esp_err_t ws_manager_server_start(void)
     }
 
     httpd_register_uri_handler(s_server, &ws_uri);
+    httpd_register_uri_handler(s_server, &root_uri);
     s_server_running = true;
     s_client_count = 0;
     memset(s_client_fds, 0, sizeof(s_client_fds));

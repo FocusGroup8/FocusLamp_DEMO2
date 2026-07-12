@@ -43,6 +43,8 @@ static SemaphoreHandle_t s_client_sem = NULL;
 /* Exponential backoff reconnect state */
 static int s_reconnect_delay_ms = 0;
 static const int s_reconnect_min_ms = WS_MANAGER_RECONNECT_MS;
+static int s_consecutive_errors = 0;
+#define WS_MANAGER_MAX_ERROR_LOGS 3  /* Only log first N consecutive errors */
 
 static void websocket_event_handler(void *arg, esp_event_base_t event_base,
                                     int32_t event_id, void *event_data)
@@ -54,6 +56,7 @@ static void websocket_event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "WebSocket client connected");
         s_client_connected = true;
         s_reconnect_delay_ms = s_reconnect_min_ms;
+        s_consecutive_errors = 0;
         dispatch_event(WS_MANAGER_EVENT_CONNECTED, NULL);
         if (s_client_sem) {
             xSemaphoreGive(s_client_sem);
@@ -61,7 +64,11 @@ static void websocket_event_handler(void *arg, esp_event_base_t event_base,
         break;
 
     case WEBSOCKET_EVENT_DISCONNECTED:
-        ESP_LOGW(TAG, "WebSocket client disconnected");
+        if (s_consecutive_errors <= WS_MANAGER_MAX_ERROR_LOGS) {
+            ESP_LOGW(TAG, "WebSocket client disconnected");
+        } else if (s_consecutive_errors % 10 == 0) {
+            ESP_LOGW(TAG, "WebSocket client disconnected (%d consecutive errors)", s_consecutive_errors);
+        }
         s_client_connected = false;
         dispatch_event(WS_MANAGER_EVENT_DISCONNECTED, NULL);
         break;
@@ -79,7 +86,12 @@ static void websocket_event_handler(void *arg, esp_event_base_t event_base,
         break;
 
     case WEBSOCKET_EVENT_ERROR:
-        ESP_LOGE(TAG, "WebSocket client error");
+        s_consecutive_errors++;
+        if (s_consecutive_errors <= WS_MANAGER_MAX_ERROR_LOGS) {
+            ESP_LOGE(TAG, "WebSocket client error");
+        } else if (s_consecutive_errors % 10 == 0) {
+            ESP_LOGW(TAG, "WebSocket client error (%d consecutive)", s_consecutive_errors);
+        }
         dispatch_event(WS_MANAGER_EVENT_ERROR, NULL);
         break;
 
@@ -111,6 +123,7 @@ esp_err_t ws_manager_client_start(const ws_manager_client_config_t *config)
         .ping_interval_sec = WS_MANAGER_PING_INTERVAL,
         .reconnect_timeout_ms = WS_MANAGER_RECONNECT_MS,
         .disable_auto_reconnect = false,
+        .enable_close_reconnect = true,
     };
 
     if (config->subprotocol) {
@@ -234,10 +247,25 @@ static int s_client_fds[WS_MANAGER_SERVER_MAX_CONN];
 static int s_client_count = 0;
 static SemaphoreHandle_t s_server_mutex = NULL;
 
+/* Pre-allocated receive buffer to avoid frequent malloc/free */
+static uint8_t s_recv_buf[WS_MANAGER_BUFFER_SIZE];
+
+/* Memory water level: reject new connections below this threshold */
+#define WS_MANAGER_MEM_WATERMARK  (32 * 1024)  /* 32KB */
+
 static void track_client_add(int fd)
 {
     if (s_server_mutex) {
         xSemaphoreTake(s_server_mutex, portMAX_DELAY);
+    }
+    /* Memory water level check */
+    if (esp_get_free_heap_size() < WS_MANAGER_MEM_WATERMARK) {
+        ESP_LOGW(TAG, "Server: low memory (%" PRIu32 " bytes), rejecting client fd=%d",
+                 esp_get_free_heap_size(), fd);
+        if (s_server_mutex) {
+            xSemaphoreGive(s_server_mutex);
+        }
+        return;
     }
     if (s_client_count < WS_MANAGER_SERVER_MAX_CONN) {
         s_client_fds[s_client_count++] = fd;
@@ -286,7 +314,6 @@ static esp_err_t ws_server_handler(httpd_req_t *req)
 
     /* Receive WebSocket frame */
     httpd_ws_frame_t ws_pkt;
-    uint8_t *buf = NULL;
     memset(&ws_pkt, 0, sizeof(httpd_ws_frame_t));
     ws_pkt.type = HTTPD_WS_TYPE_TEXT;
 
@@ -297,31 +324,51 @@ static esp_err_t ws_server_handler(httpd_req_t *req)
         return ret;
     }
 
-    if (ws_pkt.len) {
-        buf = calloc(1, ws_pkt.len + 1);
-        if (buf == NULL) {
-            ESP_LOGE(TAG, "Server: no memory for recv buffer");
-            return ESP_ERR_NO_MEM;
+    if (ws_pkt.len > 0) {
+        /* Use pre-allocated buffer if fits, otherwise allocate */
+        uint8_t *buf;
+        bool dynamic_alloc = false;
+
+        if (ws_pkt.len <= sizeof(s_recv_buf)) {
+            buf = s_recv_buf;
+        } else {
+            buf = calloc(1, ws_pkt.len + 1);
+            if (buf == NULL) {
+                ESP_LOGE(TAG, "Server: no memory for recv buffer (len=%d)", ws_pkt.len);
+                return ESP_ERR_NO_MEM;
+            }
+            dynamic_alloc = true;
         }
         ws_pkt.payload = buf;
         ret = httpd_ws_recv_frame(req, &ws_pkt, ws_pkt.len);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Server: recv frame data failed: %s", esp_err_to_name(ret));
-            free(buf);
+            if (dynamic_alloc) { free(buf); }
             return ret;
         }
+
+        /* Dispatch data event */
+        ws_manager_data_t msg = {
+            .type = (ws_pkt.type == HTTPD_WS_TYPE_TEXT) ? WS_DATA_TYPE_TEXT : WS_DATA_TYPE_BINARY,
+            .data = (const char *)ws_pkt.payload,
+            .data_len = ws_pkt.len,
+            .client_fd = httpd_req_to_sockfd(req),
+        };
+        dispatch_event(WS_MANAGER_EVENT_DATA, &msg);
+
+#if (WS_MANAGER_SERVER_ECHO == 1)
+        /* Echo received message back to sender */
+        httpd_ws_frame_t echo_pkt = {
+            .payload = ws_pkt.payload,
+            .len = ws_pkt.len,
+            .type = ws_pkt.type,
+            .final = true,
+        };
+        httpd_ws_send_frame(req, &echo_pkt);
+#endif
+
+        if (dynamic_alloc) { free(buf); }
     }
-
-    /* Dispatch data event */
-    ws_manager_data_t msg = {
-        .type = (ws_pkt.type == HTTPD_WS_TYPE_TEXT) ? WS_DATA_TYPE_TEXT : WS_DATA_TYPE_BINARY,
-        .data = (const char *)ws_pkt.payload,
-        .data_len = ws_pkt.len,
-        .client_fd = httpd_req_to_sockfd(req),
-    };
-    dispatch_event(WS_MANAGER_EVENT_DATA, &msg);
-
-    free(buf);
     return ESP_OK;
 }
 

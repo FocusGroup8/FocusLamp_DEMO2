@@ -37,6 +37,9 @@ menu "WebSocket Manager Configuration"
             depends on WS_MANAGER_CLIENT_ENABLE
             help
                 Size of the WebSocket send/receive buffer.
+                Also used as the server's pre-allocated receive buffer.
+                For text-only usage, 512-1024 is sufficient.
+                For binary data or large payloads, increase to 2048-4096.
 
         config WS_MANAGER_CLIENT_URI
             string "Default client URI"
@@ -71,6 +74,14 @@ menu "WebSocket Manager Configuration"
             depends on WS_MANAGER_SERVER_ENABLE
             help
                 Maximum number of simultaneous WebSocket client connections.
+
+        config WS_MANAGER_SERVER_ECHO
+            bool "Enable server echo mode"
+            default y
+            depends on WS_MANAGER_SERVER_ENABLE
+            help
+                When enabled, the server echoes received messages back to the sender.
+                When disabled, received messages are only dispatched via the DATA callback.
 
     endmenu
 

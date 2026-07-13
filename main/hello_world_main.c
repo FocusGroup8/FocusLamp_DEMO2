@@ -12,6 +12,7 @@
 #include "wifi_manager.h"
 #include "websocket_manager.h"
 #include "xiaozhi_manager.h"
+#include "audio_bridge.h"
 
 static const char *TAG = "MAIN";
 
@@ -111,14 +112,13 @@ static void xiaozhi_event_callback(xiaozhi_manager_event_t event, void *data, vo
 
 /*---------------------------------------------------------------
  * Xiaozhi audio callback (TTS audio data from server)
- * Currently logs audio data reception since no speaker hardware.
- * When audio hardware is available, this callback should feed
- * data to the I2S TX channel for playback.
+ * Routes OPUS-encoded TTS audio to I2S speaker via audio_bridge.
+ * When audio hardware is available, audio_bridge_tts_callback
+ * decodes OPUS and writes PCM to I2S TX channel.
  *-------------------------------------------------------------*/
 static void xiaozhi_audio_callback(const uint8_t *data, int len, void *ctx)
 {
-    /* TODO: Feed data to I2S TX channel when audio hardware is available */
-    ESP_LOGD(TAG, "[Xiaozhi] Audio data: %d bytes", len);
+    audio_bridge_tts_callback(data, len, ctx);
 }
 
 /*---------------------------------------------------------------
@@ -167,7 +167,14 @@ void app_main(void)
     }
 #endif
 
-    /* Step 3: Initialize Xiaozhi Manager */
+    /* Step 3: Initialize Audio Bridge (I2S for TTS playback) */
+    audio_bridge_config_t audio_cfg = AUDIO_BRIDGE_DEFAULT_CONFIG();
+    err = audio_bridge_init(&audio_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Audio Bridge init failed: %s", esp_err_to_name(err));
+    }
+
+    /* Step 4: Initialize Xiaozhi Manager */
     xiaozhi_manager_config_t xiaozhi_cfg = XIAOZHI_MANAGER_DEFAULT_CONFIG();
     xiaozhi_cfg.event_cb = xiaozhi_event_callback;
     xiaozhi_cfg.audio_cb = xiaozhi_audio_callback;

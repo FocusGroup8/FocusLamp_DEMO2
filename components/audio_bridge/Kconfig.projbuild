@@ -1,0 +1,19 @@
+menu "Audio Bridge"
+    config AUDIO_BRIDGE_ENABLE
+        bool "Enable Audio Bridge"
+        default y
+        help
+            Enable the Audio Bridge component for I2S audio playback and recording.
+
+    config AUDIO_BRIDGE_DEFAULT_SAMPLE_RATE
+        int "Default sample rate (Hz)"
+        default 16000
+        range 8000 48000
+        depends on AUDIO_BRIDGE_ENABLE
+
+    config AUDIO_BRIDGE_DEFAULT_VOLUME
+        int "Default volume (%)"
+        default 70
+        range 0 100
+        depends on AUDIO_BRIDGE_ENABLE
+endmenu

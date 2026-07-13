@@ -1,0 +1,2 @@
+## Audio Bridge component - no external dependencies
+## Uses IDF built-in driver/i2s only

@@ -4,6 +4,29 @@
 CONFIG_IDF_TARGET="esp32p4"
 
 #
+# Serial flasher config
+#
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+# end of Serial flasher config
+
+#
+# Partition Table
+#
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+# end of Partition Table
+
+#
+# WebSocket Manager Configuration
+#
+
+#
+# Client Configuration
+#
+CONFIG_WS_MANAGER_CLIENT_URI="ws://192.168.4.2:8765"
+# end of Client Configuration
+# end of WebSocket Manager Configuration
+
+#
 # WiFi Manager Configuration
 #
 CONFIG_WIFI_MANAGER_SSID="RT3"

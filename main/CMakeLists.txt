@@ -1,2 +1,2 @@
 idf_component_register(SRCS "hello_world_main.c"
-                       REQUIRES wifi_manager websocket_manager)
+                       REQUIRES wifi_manager websocket_manager xiaozhi_manager)

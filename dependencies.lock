@@ -164,6 +164,6 @@ direct_dependencies:
 - espressif/esp_websocket_client
 - espressif/esp_wifi_remote
 - espressif/esp_xiaozhi
-manifest_hash: 18ffd829586edd177f8f6eadf2ccb5a1f7b990124ba13ad4e1008da16f4dbf1f
+manifest_hash: 48b47b1cd6dda6a7bdf56237a7af79d8bf79fd0ce55e186694d2c0cf9d9f895f
 target: esp32p4
 version: 2.0.0

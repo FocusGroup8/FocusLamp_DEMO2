@@ -16,4 +16,40 @@ menu "Audio Bridge"
         default 70
         range 0 100
         depends on AUDIO_BRIDGE_ENABLE
+
+    config AUDIO_BRIDGE_DECODE_TASK_STACK_SIZE
+        int "OPUS decode task stack size (bytes)"
+        default 8192
+        range 4096 32768
+        depends on AUDIO_BRIDGE_ENABLE
+        help
+            Stack size for the dedicated OPUS audio decode task.
+            Must be large enough for OPUS decoder stack usage plus
+            FPU/PIE/HWLOOP coprocessor lazy save areas allocated
+            from the task stack bottom by FreeRTOS.
+            ESP32-P4 coprocessor save areas: FPU=136B, PIE=~200B, HWLOOP=~20B.
+            8KB is sufficient for OPUS 16kHz mono 60ms decoding.
+
+    config AUDIO_BRIDGE_DECODE_TASK_PRIORITY
+        int "OPUS decode task priority"
+        default 5
+        range 1 25
+        depends on AUDIO_BRIDGE_ENABLE
+        help
+            FreeRTOS priority for the OPUS audio decode task.
+            Should be high enough to ensure smooth audio playback
+            but not starve critical system tasks.
+
+    config AUDIO_BRIDGE_DECODE_TASK_CORE
+        int "OPUS decode task core ID"
+        default -1
+        range -1 1
+        depends on AUDIO_BRIDGE_ENABLE
+        help
+            CPU core to pin the OPUS decode task to.
+            -1: no affinity (task can run on any core)
+            0: APP_CPU
+            1: PRO_CPU
+            Pinning to a specific core can improve audio stability
+            by avoiding cache pollution from other tasks.
 endmenu

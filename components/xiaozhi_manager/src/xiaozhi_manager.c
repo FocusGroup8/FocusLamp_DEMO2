@@ -22,6 +22,7 @@
 
 #include "task_manager.h"
 #include "device_controller.h"
+#include "audio_bridge.h"
 
 static const char *TAG = "XIAOZHI_MGR";
 
@@ -32,6 +33,12 @@ static bool s_owns_mcp = false;
 
 static xiaozhi_manager_config_t s_config = {0};
 static xiaozhi_display_cb_t s_display_cb = NULL;
+
+/* Microphone state: tracks whether mic capture is active.
+ * Mic is started when audio channel opens, stopped when it closes.
+ * During TTS playback, mic is paused to avoid echo feedback. */
+static bool s_mic_active = false;
+static bool s_mic_paused_for_tts = false;
 
 /* Forward declarations for MCP tool callbacks */
 static esp_mcp_value_t mcp_tool_notification_speak(const esp_mcp_property_list_t *properties);
@@ -66,6 +73,71 @@ static void xiaozhi_audio_callback(const uint8_t *data, int len, void *ctx)
 }
 
 /*---------------------------------------------------------------
+ * Internal: Microphone callback — OPUS frame from audio_bridge
+ *
+ * Called by audio_bridge's mic_task for each encoded OPUS frame.
+ * Forwards the frame to the xiaozhi server via WebSocket.
+ *-------------------------------------------------------------*/
+static void xiaozhi_mic_callback(const uint8_t *opus_data, int len, void *ctx)
+{
+    if (s_chat_handle && !s_mic_paused_for_tts) {
+        esp_xiaozhi_chat_send_audio_data(s_chat_handle, (const char *)opus_data, (size_t)len);
+    }
+}
+
+/*---------------------------------------------------------------
+ * Internal: Start/stop microphone capture
+ *-------------------------------------------------------------*/
+static void mic_start_if_needed(void)
+{
+    if (s_mic_active || s_mic_paused_for_tts) {
+        return;
+    }
+    esp_err_t ret = audio_bridge_mic_start(xiaozhi_mic_callback, NULL);
+    if (ret == ESP_OK) {
+        s_mic_active = true;
+        ESP_LOGI(TAG, "Microphone capture started");
+    } else {
+        ESP_LOGE(TAG, "Failed to start microphone: %s", esp_err_to_name(ret));
+    }
+}
+
+static void mic_stop_if_needed(void)
+{
+    if (!s_mic_active) {
+        return;
+    }
+    audio_bridge_mic_stop();
+    s_mic_active = false;
+    s_mic_paused_for_tts = false;
+    ESP_LOGI(TAG, "Microphone capture stopped");
+}
+
+static void mic_pause_for_tts(void)
+{
+    if (!s_mic_active || s_mic_paused_for_tts) {
+        return;
+    }
+    /* Stop mic during TTS to avoid echo. The mic_task will be restarted
+     * when TTS stops. This is simpler than trying to mute/discard frames. */
+    audio_bridge_mic_stop();
+    s_mic_paused_for_tts = true;
+    s_mic_active = false;
+    ESP_LOGI(TAG, "Microphone paused for TTS playback");
+}
+
+static void mic_resume_after_tts(void)
+{
+    if (!s_mic_paused_for_tts) {
+        return;
+    }
+    s_mic_paused_for_tts = false;
+    /* Restart mic — audio channel is still open */
+    mic_start_if_needed();
+    ESP_LOGI(TAG, "Microphone resumed after TTS playback");
+}
+
+/*---------------------------------------------------------------
  * Internal: esp_xiaozhi chat event callback
  *-------------------------------------------------------------*/
 static void xiaozhi_event_callback(esp_xiaozhi_chat_event_t event, void *event_data, void *ctx)
@@ -77,6 +149,7 @@ static void xiaozhi_event_callback(esp_xiaozhi_chat_event_t event, void *event_d
             switch (tts_state->state) {
             case ESP_XIAOZHI_CHAT_TTS_STATE_START:
                 s_state = XIAOZHI_MANAGER_STATE_SPEAKING;
+                mic_pause_for_tts();
                 if (s_config.event_cb) {
                     s_config.event_cb(XIAOZHI_MANAGER_EVENT_TTS_START, NULL, s_config.event_cb_ctx);
                 }
@@ -84,6 +157,7 @@ static void xiaozhi_event_callback(esp_xiaozhi_chat_event_t event, void *event_d
                 break;
             case ESP_XIAOZHI_CHAT_TTS_STATE_STOP:
                 s_state = XIAOZHI_MANAGER_STATE_CONNECTED;
+                mic_resume_after_tts();
                 if (s_config.event_cb) {
                     s_config.event_cb(XIAOZHI_MANAGER_EVENT_TTS_STOP, NULL, s_config.event_cb_ctx);
                 }
@@ -162,6 +236,7 @@ static void xiaozhi_esp_event_handler(void *arg, esp_event_base_t event_base,
     case ESP_XIAOZHI_CHAT_EVENT_AUDIO_CHANNEL_OPENED:
         s_state = XIAOZHI_MANAGER_STATE_LISTENING;
         ESP_LOGI(TAG, "Audio channel opened");
+        mic_start_if_needed();
         if (s_config.event_cb) {
             s_config.event_cb(XIAOZHI_MANAGER_EVENT_AUDIO_CHANNEL_OPENED, NULL, s_config.event_cb_ctx);
         }
@@ -170,6 +245,7 @@ static void xiaozhi_esp_event_handler(void *arg, esp_event_base_t event_base,
     case ESP_XIAOZHI_CHAT_EVENT_AUDIO_CHANNEL_CLOSED:
         s_state = XIAOZHI_MANAGER_STATE_CONNECTED;
         ESP_LOGI(TAG, "Audio channel closed");
+        mic_stop_if_needed();
         if (s_config.event_cb) {
             s_config.event_cb(XIAOZHI_MANAGER_EVENT_AUDIO_CHANNEL_CLOSED, NULL, s_config.event_cb_ctx);
         }
@@ -203,7 +279,7 @@ static esp_mcp_value_t mcp_tool_audio_speaker_set_volume(const esp_mcp_property_
 
     ESP_LOGI(TAG, "[MCP] audio_speaker.set_volume: %d", volume);
 
-    /* TODO: integrate with actual volume control when audio hardware available */
+    audio_bridge_set_volume(volume);
     return esp_mcp_value_create_bool(true);
 }
 
@@ -357,8 +433,8 @@ esp_err_t xiaozhi_manager_init(const xiaozhi_manager_config_t *config)
     chat_config.event_callback_ctx = NULL;
     chat_config.mcp_engine = s_mcp_engine;
     chat_config.owns_mcp_engine = true;
-    chat_config.has_mqtt_config = info.has_mqtt_config;
-    chat_config.has_websocket_config = info.has_websocket_config;
+    chat_config.has_mqtt_config = false;       /* 强制使用WebSocket传输，避免UDP不通导致音频数据丢失 */
+    chat_config.has_websocket_config = true;
 
     ret = esp_xiaozhi_chat_init(&chat_config, &s_chat_handle);
     if (ret != ESP_OK) {
@@ -393,6 +469,9 @@ esp_err_t xiaozhi_manager_deinit(void)
     if (s_state == XIAOZHI_MANAGER_STATE_IDLE) {
         return ESP_OK;
     }
+
+    /* Stop microphone capture first */
+    mic_stop_if_needed();
 
     /* Stop chat if running */
     if (s_chat_handle) {

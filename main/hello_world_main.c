@@ -82,12 +82,16 @@ static void xiaozhi_event_callback(xiaozhi_manager_event_t event, void *data, vo
     switch (event) {
     case XIAOZHI_MANAGER_EVENT_CONNECTED:
         ESP_LOGI(TAG, "[Xiaozhi] Connected to server");
+        /* 连接成功后自动打开音频通道，发送唤醒词触发对话测试TTS */
+        xiaozhi_manager_open_audio_channel();
         break;
     case XIAOZHI_MANAGER_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "[Xiaozhi] Disconnected from server");
         break;
     case XIAOZHI_MANAGER_EVENT_AUDIO_CHANNEL_OPENED:
         ESP_LOGI(TAG, "[Xiaozhi] Audio channel opened");
+        /* 音频通道打开后发送唤醒词，触发服务器对话和TTS */
+        xiaozhi_manager_send_wake_word("你好小智");
         break;
     case XIAOZHI_MANAGER_EVENT_AUDIO_CHANNEL_CLOSED:
         ESP_LOGI(TAG, "[Xiaozhi] Audio channel closed");

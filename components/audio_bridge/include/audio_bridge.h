@@ -28,6 +28,18 @@ typedef struct {
 }
 
 /**
+ * @brief Microphone audio output callback
+ *
+ * Called by audio_bridge when OPUS-encoded microphone audio is ready.
+ * The callee must consume or copy the data before returning.
+ *
+ * @param opus_data OPUS-encoded audio frame
+ * @param len Frame length in bytes
+ * @param ctx User context provided in audio_bridge_mic_start()
+ */
+typedef void (*audio_bridge_mic_callback_t)(const uint8_t *opus_data, int len, void *ctx);
+
+/**
  * @brief Initialize audio bridge (I2S full-duplex)
  */
 esp_err_t audio_bridge_init(const audio_bridge_config_t *config);
@@ -39,19 +51,11 @@ esp_err_t audio_bridge_deinit(void);
 
 /**
  * @brief Write PCM data to I2S TX (speaker playback)
- * @param data PCM data (16-bit signed, mono, at configured sample rate)
- * @param len Data length in bytes
- * @param bytes_written Output: actual bytes written
- * @param timeout_ms Timeout (portMAX_DELAY for infinite)
  */
 esp_err_t audio_bridge_write_pcm(const void *data, size_t len, size_t *bytes_written, uint32_t timeout_ms);
 
 /**
  * @brief Read PCM data from I2S RX (microphone capture)
- * @param data Output buffer
- * @param len Buffer length
- * @param bytes_read Output: actual bytes read
- * @param timeout_ms Timeout
  */
 esp_err_t audio_bridge_read_pcm(void *data, size_t len, size_t *bytes_read, uint32_t timeout_ms);
 
@@ -60,24 +64,37 @@ esp_err_t audio_bridge_read_pcm(void *data, size_t len, size_t *bytes_read, uint
  *
  * This is designed as the audio_callback for esp_xiaozhi.
  * Decodes OPUS frames and writes PCM to I2S.
- *
- * @param data OPUS-encoded audio data
- * @param len Data length in bytes
- * @param ctx User context (unused)
  */
 void audio_bridge_tts_callback(const uint8_t *data, int len, void *ctx);
 
 /**
  * @brief Set TTS playback volume
- * @param volume_percent Volume 0-100
  */
 esp_err_t audio_bridge_set_volume(int volume_percent);
 
 /**
  * @brief Get current volume
- * @return Volume 0-100
  */
 int audio_bridge_get_volume(void);
+
+/**
+ * @brief Start microphone capture + OPUS encoding
+ *
+ * Creates a dedicated mic_task that:
+ * 1. Reads PCM from I2S RX (microphone)
+ * 2. Encodes to OPUS (16kHz, mono, 60ms frames, VOIP mode)
+ * 3. Calls the provided callback with each encoded frame
+ *
+ * @param callback Function called for each OPUS-encoded frame
+ * @param ctx User context passed to callback
+ * @return ESP_OK on success
+ */
+esp_err_t audio_bridge_mic_start(audio_bridge_mic_callback_t callback, void *ctx);
+
+/**
+ * @brief Stop microphone capture
+ */
+esp_err_t audio_bridge_mic_stop(void);
 
 #ifdef __cplusplus
 }

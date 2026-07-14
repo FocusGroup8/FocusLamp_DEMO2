@@ -1,2 +1,3 @@
-## Audio Bridge component - no external dependencies
-## Uses IDF built-in driver/i2s only
+dependencies:
+  espressif/esp_audio_codec:
+    version: "2.5.0"

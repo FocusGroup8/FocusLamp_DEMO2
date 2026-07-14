@@ -433,13 +433,13 @@ esp_err_t audio_bridge_init(const audio_bridge_config_t *config)
     s_volume = CONFIG_AUDIO_BRIDGE_DEFAULT_VOLUME;
 
     // Step 1: Create channel pair (full-duplex)
-    /* DMA缓冲区配置：
-     * OPUS 60ms帧 = 960 samples，32-bit I2S = 3840 bytes/帧。
-     * 需要足够的DMA缓冲来平滑网络抖动和解码速度波动。
-     * dma_desc=12, dma_frame=960 → 12×960×4 = 46080 bytes (TX)
-     * 12帧 × 60ms = 720ms 缓冲深度，足以覆盖解码和网络延迟 */
+    /* DMA缓冲区配置（对齐 mipi_dsi 参考项目）：
+     * dma_desc_num=16: 消息队列深度=15，避免 uxQueueSpacesAvailable<=1
+     * 强制缓冲区切换导致 partial read 超时（原 desc_num=12 队列深度=11 不足）
+     * dma_frame_num=960: OPUS 60ms帧 = 960 samples × 4 bytes = 3840 bytes/帧
+     * 16×3840 = 61440 bytes 总缓冲，~960ms 缓冲深度 */
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-    chan_cfg.dma_desc_num  = 12;
+    chan_cfg.dma_desc_num  = 16;
     chan_cfg.dma_frame_num = 960;
     chan_cfg.auto_clear    = true;
 
@@ -505,17 +505,12 @@ esp_err_t audio_bridge_init(const audio_bridge_config_t *config)
     }
     ESP_LOGI(TAG, "Preloaded %d TX DMA buffers", preload_count);
 
-    // Step 4: Enable TX first, then RX
+    // Step 4: Enable TX only (RX is enabled on-demand when mic starts)
+    // Deferred RX enable avoids DMA stalling when no consumer reads for extended
+    // periods. See mipi_dsi reference: enable + delay + test read pattern.
     ret = i2s_channel_enable(s_tx_handle);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to enable TX channel: %s", esp_err_to_name(ret));
-        goto cleanup_channels;
-    }
-
-    ret = i2s_channel_enable(s_rx_handle);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to enable RX channel: %s", esp_err_to_name(ret));
-        i2s_channel_disable(s_tx_handle);
         goto cleanup_channels;
     }
 
@@ -547,6 +542,11 @@ esp_err_t audio_bridge_deinit(void)
 
     decode_task_stop();
     opus_decoder_destroy();
+
+    /* Disable RX channel if it was enabled (mic may have been running) */
+    if (s_rx_handle) {
+        i2s_channel_disable(s_rx_handle);
+    }
 
     // i2s_del_channel will automatically disable the channel if enabled
     if (s_tx_handle) {
@@ -769,18 +769,24 @@ static void mic_task(void *arg)
     esp_opus_enc_get_frame_size(s_opus_encoder, &in_size, &out_size);
     ESP_LOGI(TAG, "OPUS encoder: in_size=%d, out_size=%d", in_size, out_size);
 
+    int frame_count = 0;
+
     while (s_mic_task_running) {
-        /* Read one 60ms frame from I2S RX (960 samples * 4 bytes = 3840 bytes) */
+        /* Read one 60ms frame from I2S RX (960 samples * 4 bytes = 3840 bytes)
+         * Timeout 1000ms (aligned with mipi_dsi reference: recorder uses 1000ms).
+         * Shorter timeouts (200ms) caused ESP_ERR_TIMEOUT after DMA queue pressure
+         * forced buffer switches (partial reads). */
         size_t bytes_read = 0;
         esp_err_t ret = i2s_channel_read(s_rx_handle, i2s_rx_buf, MIC_I2S_READ_SIZE,
-                                          &bytes_read, pdMS_TO_TICKS(200));
+                                          &bytes_read, pdMS_TO_TICKS(1000));
         if (ret != ESP_OK) {
-            ESP_LOGD(TAG, "I2S RX read failed: %s", esp_err_to_name(ret));
+            ESP_LOGW(TAG, "I2S RX read failed: %s (bytes_read=%u)", esp_err_to_name(ret), (unsigned)bytes_read);
             continue;
         }
 
         if (bytes_read < MIC_I2S_READ_SIZE) {
-            /* Partial read — skip this frame */
+            /* Partial read — log and skip (should be rare with dma_desc_num=16) */
+            ESP_LOGW(TAG, "I2S RX partial read: %u/%u bytes", (unsigned)bytes_read, (unsigned)MIC_I2S_READ_SIZE);
             continue;
         }
 
@@ -788,6 +794,22 @@ static void mic_task(void *arg)
         for (int i = 0; i < MIC_FRAME_SAMPLES; i++) {
             /* I2S data is left-shifted by 16 bits, right-shift to get 16-bit */
             pcm16_buf[i] = (int16_t)(i2s_rx_buf[i] >> 16);
+        }
+
+        /* Debug: log first few raw I2S samples and PCM values every 50 frames */
+        frame_count++;
+        if (frame_count <= 3 || (frame_count % 50 == 0)) {
+            int32_t max_val = 0;
+            for (int i = 0; i < MIC_FRAME_SAMPLES; i++) {
+                int32_t abs_val = pcm16_buf[i] > 0 ? pcm16_buf[i] : -pcm16_buf[i];
+                if (abs_val > max_val) max_val = abs_val;
+            }
+            ESP_LOGI(TAG, "Mic frame #%d: i2s[0..3]=%08X,%08X,%08X,%08X pcm[0..3]=%d,%d,%d,%d peak=%ld",
+                     frame_count,
+                     (unsigned)i2s_rx_buf[0], (unsigned)i2s_rx_buf[1],
+                     (unsigned)i2s_rx_buf[2], (unsigned)i2s_rx_buf[3],
+                     pcm16_buf[0], pcm16_buf[1], pcm16_buf[2], pcm16_buf[3],
+                     (long)max_val);
         }
 
         /* Encode to OPUS */
@@ -802,7 +824,7 @@ static void mic_task(void *arg)
 
         esp_audio_err_t enc_ret = esp_opus_enc_process(s_opus_encoder, &in_frame, &out_frame);
         if (enc_ret != ESP_AUDIO_ERR_OK) {
-            ESP_LOGD(TAG, "OPUS encode failed: %d", enc_ret);
+            ESP_LOGW(TAG, "OPUS encode failed: %d", enc_ret);
             continue;
         }
 
@@ -845,6 +867,29 @@ esp_err_t audio_bridge_mic_start(audio_bridge_mic_callback_t callback, void *ctx
     if (s_mic_task_handle != NULL) {
         ESP_LOGW(TAG, "Mic already running");
         return ESP_OK;
+    }
+
+    /* Enable RX channel on-demand (deferred from init).
+     * i2s_channel_enable resets the RX message queue, ensuring a clean DMA state.
+     * Add a short delay after enable and do a test read to verify RX is working,
+     * following the same pattern as the mipi_dsi reference project. */
+    esp_err_t ret = i2s_channel_enable(s_rx_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to enable RX channel: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    /* Test read to verify RX DMA is producing data */
+    int32_t test_buf[64];
+    size_t test_bytes = 0;
+    for (int i = 0; i < 3; i++) {
+        ret = i2s_channel_read(s_rx_handle, test_buf, sizeof(test_buf), &test_bytes, pdMS_TO_TICKS(100));
+        ESP_LOGI(TAG, "RX test read %d: %s (%u bytes)", i + 1, esp_err_to_name(ret), (unsigned)test_bytes);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "RX test read %d failed, continuing anyway", i + 1);
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 
     s_mic_callback = callback;
@@ -890,6 +935,12 @@ esp_err_t audio_bridge_mic_stop(void)
     s_mic_task_handle = NULL;
     s_mic_callback = NULL;
     s_mic_callback_ctx = NULL;
+
+    /* Disable RX channel when mic stops.
+     * Next mic_start will re-enable with a fresh DMA state. */
+    if (s_rx_handle) {
+        i2s_channel_disable(s_rx_handle);
+    }
 
     ESP_LOGI(TAG, "Mic task stopped");
     return ESP_OK;

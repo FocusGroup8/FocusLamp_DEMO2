@@ -134,6 +134,14 @@ static void mic_resume_after_tts(void)
     s_mic_paused_for_tts = false;
     /* Restart mic — audio channel is still open */
     mic_start_if_needed();
+
+    /* Notify server to start listening for user input.
+     * Without this, the server does not process incoming audio after TTS ends,
+     * causing the conversation to stall after the first reply. */
+    if (s_chat_handle) {
+        esp_xiaozhi_chat_send_start_listening(s_chat_handle, ESP_XIAOZHI_CHAT_LISTENING_MODE_AUTO);
+    }
+
     ESP_LOGI(TAG, "Microphone resumed after TTS playback");
 }
 
@@ -585,6 +593,22 @@ esp_err_t xiaozhi_manager_speak(const char *text, int priority)
     return ESP_OK;
 }
 
+esp_err_t xiaozhi_manager_start_listening(int mode)
+{
+    ESP_RETURN_ON_FALSE(s_chat_handle, ESP_ERR_INVALID_STATE, TAG, "Not initialized");
+
+    ESP_LOGI(TAG, "Starting listening (mode=%d)", mode);
+    return esp_xiaozhi_chat_send_start_listening(s_chat_handle, mode);
+}
+
+esp_err_t xiaozhi_manager_stop_listening(void)
+{
+    ESP_RETURN_ON_FALSE(s_chat_handle, ESP_ERR_INVALID_STATE, TAG, "Not initialized");
+
+    ESP_LOGI(TAG, "Stopping listening");
+    return esp_xiaozhi_chat_send_stop_listening(s_chat_handle);
+}
+
 #else /* XIAOZHI_MANAGER_ENABLE == 0 */
 
 /* Stub implementations when component is disabled */
@@ -605,5 +629,7 @@ esp_err_t xiaozhi_manager_close_audio_channel(void) { return ESP_ERR_NOT_SUPPORT
 esp_err_t xiaozhi_manager_send_audio(const char *data, size_t data_len) { (void)data; (void)data_len; return ESP_ERR_NOT_SUPPORTED; }
 esp_mcp_t *xiaozhi_manager_get_mcp_engine(void) { return NULL; }
 esp_err_t xiaozhi_manager_speak(const char *text, int priority) { (void)text; (void)priority; return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t xiaozhi_manager_start_listening(int mode) { (void)mode; return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t xiaozhi_manager_stop_listening(void) { return ESP_ERR_NOT_SUPPORTED; }
 
 #endif /* XIAOZHI_MANAGER_ENABLE */

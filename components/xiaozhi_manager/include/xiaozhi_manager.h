@@ -180,6 +180,27 @@ esp_mcp_t *xiaozhi_manager_get_mcp_engine(void);
  */
 esp_err_t xiaozhi_manager_speak(const char *text, int priority);
 
+/**
+ * @brief  Start listening for voice input
+ *
+ * Sends a "listen" message with state="start" to the server,
+ * telling it to start processing incoming audio data.
+ * Must be called after TTS ends to resume conversation.
+ *
+ * @param mode  Listening mode (ESP_XIAOZHI_CHAT_LISTENING_MODE_AUTO, etc.)
+ * @return ESP_OK on success
+ */
+esp_err_t xiaozhi_manager_start_listening(int mode);
+
+/**
+ * @brief  Stop listening for voice input
+ *
+ * Sends a "listen" message with state="stop" to the server.
+ *
+ * @return ESP_OK on success
+ */
+esp_err_t xiaozhi_manager_stop_listening(void);
+
 #ifdef __cplusplus
 }
 #endif

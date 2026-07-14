@@ -675,7 +675,7 @@ static void *s_mic_callback_ctx = NULL;
 static void *s_opus_encoder = NULL;
 
 /* Mic task configuration */
-#define MIC_TASK_STACK_SIZE    CONFIG_AUDIO_BRIDGE_DECODE_TASK_STACK_SIZE
+#define MIC_TASK_STACK_SIZE    CONFIG_AUDIO_BRIDGE_MIC_TASK_STACK_SIZE
 #define MIC_TASK_PRIORITY      CONFIG_AUDIO_BRIDGE_DECODE_TASK_PRIORITY
 #define MIC_TASK_CORE          CONFIG_AUDIO_BRIDGE_DECODE_TASK_CORE
 #define MIC_TASK_NAME          "audio_mic"

@@ -29,23 +29,20 @@ static inline uint8_t *gui_back_fb(simple_gui_t *gui)
 }
 
 /**
- * @brief Write a single pixel directly into the back frame buffer
+ * @brief Write a single pixel directly into the back frame buffer (RGB565)
  *
  * No bounds checking here — callers must clip. Intentionally inlined for speed.
  */
 static inline void gui_fb_set_pixel(simple_gui_t *gui, int x, int y, uint8_t r, uint8_t g, uint8_t b)
 {
-    uint8_t *p = gui_back_fb(gui) + ((size_t)y * gui->width + x) * 3;
-    p[0]       = r;
-    p[1]       = g;
-    p[2]       = b;
+    uint16_t *p = (uint16_t *)gui_back_fb(gui) + (size_t)y * gui->width + x;
+    *p          = ((uint16_t)(r & 0xF8) << 8) | ((uint16_t)(g & 0xFC) << 3) | ((uint16_t)(b & 0xF8) >> 3);
 }
 
 /**
- * @brief Fill a horizontal span in the back frame buffer (32-bit optimized)
+ * @brief Fill a horizontal span in the back frame buffer (RGB565, 32-bit optimized)
  *
- * Uses alignment-aware uint32_t writes for the bulk, falling back to byte
- * writes for unaligned head/tail. ~3x faster than byte-by-byte for long spans.
+ * RGB565 = 2 bytes/pixel. Each uint32_t write covers 2 pixels.
  *
  * @param x0  Start x (inclusive, clipped)
  * @param x1  End x (inclusive, clipped)
@@ -57,55 +54,41 @@ static void gui_fb_hspan(simple_gui_t *gui, int x0, int x1, int y, uint8_t r, ui
     if (count <= 0)
         return;
 
-    uint8_t *line = gui_back_fb(gui) + ((size_t)y * gui->width + x0) * 3;
+    const uint16_t rgb565 = ((uint16_t)(r & 0xF8) << 8) | ((uint16_t)(g & 0xFC) << 3) | ((uint16_t)(b & 0xF8) >> 3);
+    uint16_t *line        = (uint16_t *)gui_back_fb(gui) + (size_t)y * gui->width + x0;
 
-    /*
-     * RGB888 = 3 bytes/pixel. A 4-pixel group (12 bytes) maps to 3 uint32_t:
-     *   v0 = R G B R   v1 = G B R G   v2 = B R G B
-     * This pattern repeats every 4 pixels.
-     */
-    uint32_t v0 = ((uint32_t)r) | ((uint32_t)g << 8) | ((uint32_t)b << 16) | ((uint32_t)r << 24);
-    uint32_t v1 = ((uint32_t)g) | ((uint32_t)b << 8) | ((uint32_t)r << 16) | ((uint32_t)g << 24);
-    uint32_t v2 = ((uint32_t)b) | ((uint32_t)r << 8) | ((uint32_t)g << 16) | ((uint32_t)b << 24);
+    /* 2 pixels per uint32_t write */
+    uint32_t pair = ((uint32_t)rgb565 << 16) | rgb565;
 
-    /* Handle unaligned head: write bytes until 4-byte aligned */
+    /* Handle unaligned head: write 16-bit pixels until 4-byte aligned */
     uintptr_t addr = (uintptr_t)line;
     int head       = (4 - (addr & 3)) & 3;
-    head           = head / 3; /* how many whole pixels to reach alignment */
-    if (head == 2)
-        head = 0; /* can't align with 2 pixels (6 bytes) */
+    head           = head / 2; /* how many whole pixels to reach alignment */
     if (head > count)
         head = 0;
 
-    uint8_t *p = line;
+    uint16_t *p = line;
     for (int i = 0; i < head; i++) {
-        *p++ = r;
-        *p++ = g;
-        *p++ = b;
+        *p++ = rgb565;
     }
     count -= head;
 
-    /* Bulk: write 4-pixel groups (12 bytes = 3 uint32_t) */
-    int groups = count / 4;
-    if (groups > 0 && ((uintptr_t)p & 3) == 0) {
+    /* Bulk: write 2-pixel pairs via uint32_t */
+    int pairs = count / 2;
+    if (pairs > 0 && ((uintptr_t)p & 3) == 0) {
         uint32_t *wp = (uint32_t *)p;
-        for (int i = 0; i < groups; i++) {
-            *wp++ = v0;
-            *wp++ = v1;
-            *wp++ = v2;
+        for (int i = 0; i < pairs; i++) {
+            *wp++ = pair;
         }
-        p = (uint8_t *)wp;
+        p = (uint16_t *)wp;
     } else {
-        /* Fallback if alignment failed: byte writes for the bulk */
-        groups = 0;
+        pairs = 0;
     }
-    count -= groups * 4;
+    count -= pairs * 2;
 
-    /* Tail: remaining 0-3 pixels */
-    for (int i = 0; i < count; i++) {
-        *p++ = r;
-        *p++ = g;
-        *p++ = b;
+    /* Tail: remaining 0-1 pixel */
+    if (count > 0) {
+        *p++ = rgb565;
     }
 }
 
@@ -140,7 +123,7 @@ static void gui_fb_fill_rect_ppa(simple_gui_t *gui, int x0, int y0, int x1, int 
                 .pic_h          = gui->height,
                 .block_offset_x = x0,
                 .block_offset_y = y0,
-                .fill_cm        = PPA_FILL_COLOR_MODE_RGB888,
+                .fill_cm        = PPA_FILL_COLOR_MODE_RGB565,
             },
         .fill_block_w = fill_w,
         .fill_block_h = fill_h,
@@ -282,7 +265,7 @@ void simple_gui_init(simple_gui_t *gui, esp_lcd_panel_handle_t panel, uint16_t w
     gui->fb[1]           = NULL;
     gui->cur_fb          = 0;
     gui->fb_size         = 0;
-    gui->bpp             = 24;
+    gui->bpp             = 16;
     gui->ppa_fill        = NULL;
 }
 
@@ -299,7 +282,7 @@ void gui_init_double_buffer(simple_gui_t *gui, esp_lcd_panel_handle_t panel, uin
     gui->fb[0]           = fb0;
     gui->fb[1]           = fb1;
     gui->cur_fb          = 0; // fb[0] is displayed first; we draw to fb[1]
-    gui->bpp             = 24;
+    gui->bpp             = 16;
     gui->fb_size         = (size_t)width * height * (gui->bpp / 8);
     gui->double_buffered = true;
 
@@ -374,8 +357,8 @@ void gui_draw_pixel(simple_gui_t *gui, int x, int y, uint32_t color)
         return;
     }
 
-    uint8_t pixel[3] = {r, g, b};
-    esp_lcd_panel_draw_bitmap(gui->panel, x, y, x + 1, y + 1, pixel);
+    uint16_t pixel = ((uint16_t)(r & 0xF8) << 8) | ((uint16_t)(g & 0xFC) << 3) | ((uint16_t)(b & 0xF8) >> 3);
+    esp_lcd_panel_draw_bitmap(gui->panel, x, y, x + 1, y + 1, &pixel);
 }
 
 /**
@@ -405,16 +388,15 @@ void gui_draw_hline(simple_gui_t *gui, int x, int y, int length, uint32_t color)
         return;
     }
 
-    size_t buffer_size    = length * 3;
-    uint8_t *pixel_buffer = (uint8_t *)heap_caps_malloc(buffer_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    size_t buffer_size     = length * 2;
+    uint16_t *pixel_buffer = (uint16_t *)heap_caps_malloc(buffer_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (pixel_buffer == NULL) {
         ESP_LOGE(TAG, "Failed to allocate pixel buffer from PSRAM");
         return;
     }
+    const uint16_t rgb565 = ((uint16_t)(r & 0xF8) << 8) | ((uint16_t)(g & 0xFC) << 3) | ((uint16_t)(b & 0xF8) >> 3);
     for (int i = 0; i < length; i++) {
-        pixel_buffer[i * 3 + 0] = r;
-        pixel_buffer[i * 3 + 1] = g;
-        pixel_buffer[i * 3 + 2] = b;
+        pixel_buffer[i] = rgb565;
     }
     esp_lcd_panel_draw_bitmap(gui->panel, x, y, x + length, y + 1, pixel_buffer);
     free(pixel_buffer);
@@ -449,16 +431,15 @@ void gui_draw_vline(simple_gui_t *gui, int x, int y, int length, uint32_t color)
         return;
     }
 
-    size_t buffer_size    = length * 3;
-    uint8_t *pixel_buffer = (uint8_t *)heap_caps_malloc(buffer_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    size_t buffer_size     = length * 2;
+    uint16_t *pixel_buffer = (uint16_t *)heap_caps_malloc(buffer_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (pixel_buffer == NULL) {
         ESP_LOGE(TAG, "Failed to allocate pixel buffer from PSRAM");
         return;
     }
+    const uint16_t rgb565 = ((uint16_t)(r & 0xF8) << 8) | ((uint16_t)(g & 0xFC) << 3) | ((uint16_t)(b & 0xF8) >> 3);
     for (int i = 0; i < length; i++) {
-        pixel_buffer[i * 3 + 0] = r;
-        pixel_buffer[i * 3 + 1] = g;
-        pixel_buffer[i * 3 + 2] = b;
+        pixel_buffer[i] = rgb565;
     }
     esp_lcd_panel_draw_bitmap(gui->panel, x, y, x + 1, y + length, pixel_buffer);
     free(pixel_buffer);
@@ -522,18 +503,17 @@ void gui_draw_filled_rect(simple_gui_t *gui, int x1, int y1, int x2, int y2, uin
         return;
     }
 
-    int width             = x2 - x1 + 1;
-    int height            = y2 - y1 + 1;
-    size_t buffer_size    = width * height * 3;
-    uint8_t *pixel_buffer = (uint8_t *)heap_caps_malloc(buffer_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    int width              = x2 - x1 + 1;
+    int height             = y2 - y1 + 1;
+    size_t buffer_size     = width * height * 2;
+    uint16_t *pixel_buffer = (uint16_t *)heap_caps_malloc(buffer_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (pixel_buffer == NULL) {
         ESP_LOGE(TAG, "Failed to allocate pixel buffer from PSRAM");
         return;
     }
+    const uint16_t rgb565 = ((uint16_t)(r & 0xF8) << 8) | ((uint16_t)(g & 0xFC) << 3) | ((uint16_t)(b & 0xF8) >> 3);
     for (int i = 0; i < width * height; i++) {
-        pixel_buffer[i * 3 + 0] = r;
-        pixel_buffer[i * 3 + 1] = g;
-        pixel_buffer[i * 3 + 2] = b;
+        pixel_buffer[i] = rgb565;
     }
     esp_lcd_panel_draw_bitmap(gui->panel, x1, y1, x2 + 1, y2 + 1, pixel_buffer);
     free(pixel_buffer);
@@ -598,8 +578,8 @@ void gui_draw_filled_circle(simple_gui_t *gui, int cx, int cy, int radius, uint3
     }
 
     // Legacy single-buffer path: batch with a line buffer + draw_bitmap
-    const int max_w   = (2 * radius + 1);
-    uint8_t *line_buf = (uint8_t *)malloc(max_w * 3);
+    const int max_w    = (2 * radius + 1);
+    uint16_t *line_buf = (uint16_t *)malloc(max_w * 2);
     if (line_buf == NULL) {
         // Fallback: per-pixel path (slow but correct)
         for (int y = -radius; y <= radius; y++) {
@@ -615,10 +595,9 @@ void gui_draw_filled_circle(simple_gui_t *gui, int cx, int cy, int radius, uint3
     }
 
     // Pre-fill the buffer with the solid color once; we'll reuse it for every scanline.
-    for (int i = 0; i < max_w * 3; i += 3) {
-        line_buf[i]     = r;
-        line_buf[i + 1] = g;
-        line_buf[i + 2] = b;
+    const uint16_t rgb565 = ((uint16_t)(r & 0xF8) << 8) | ((uint16_t)(g & 0xFC) << 3) | ((uint16_t)(b & 0xF8) >> 3);
+    for (int i = 0; i < max_w; i++) {
+        line_buf[i] = rgb565;
     }
 
     // Scanline fill: for each y, compute the half-width via sqrt.
@@ -646,7 +625,7 @@ void gui_draw_filled_circle(simple_gui_t *gui, int cx, int cy, int radius, uint3
         if (x1 >= gui->width) {
             x1 = gui->width - 1;
         }
-        esp_lcd_panel_draw_bitmap(gui->panel, x0, dy, x1 + 1, dy + 1, &line_buf[clip_left * 3]);
+        esp_lcd_panel_draw_bitmap(gui->panel, x0, dy, x1 + 1, dy + 1, &line_buf[clip_left]);
     }
 
     free(line_buf);
@@ -778,7 +757,7 @@ void gui_draw_char(simple_gui_t *gui, int x, int y, char ch, uint32_t color, uin
         size = 1;
     }
     if (size > 4) {
-        size = 4; // Clamp to limit buffer size (32x32x3 = 3072 bytes)
+        size = 4; // Clamp to limit buffer size (32x32x2 = 2048 bytes)
     }
 
     int ch_int = (int)(uint8_t)ch;
@@ -872,10 +851,10 @@ void gui_draw_char(simple_gui_t *gui, int x, int y, char ch, uint32_t color, uin
         const uint8_t bg_r    = (bg_color >> 16) & 0xFF;
         const uint8_t bg_g    = (bg_color >> 8) & 0xFF;
         const uint8_t bg_b    = bg_color & 0xFF;
-        const int buf_stride  = glyph_w * 3;
-        const size_t buf_size = (size_t)glyph_w * glyph_h * 3;
+        const int buf_stride  = glyph_w * 2;
+        const size_t buf_size = (size_t)glyph_w * glyph_h * 2;
 
-        uint8_t stack_buf[8 * 8 * 3]; // only for size==1
+        uint8_t stack_buf[8 * 8 * 2]; // only for size==1
         uint8_t *buf;
         bool used_heap = false;
 
@@ -905,18 +884,17 @@ void gui_draw_char(simple_gui_t *gui, int x, int y, char ch, uint32_t color, uin
 
         for (int row = 0; row < 8; row++) {
             for (int srow = 0; srow < size; srow++) {
-                const int dy   = row * size + srow;
-                uint8_t *pline = &buf[dy * buf_stride];
+                const int dy    = row * size + srow;
+                uint16_t *pline = (uint16_t *)&buf[dy * buf_stride];
                 for (int col = 0; col < 8; col++) {
                     const bool on    = (bitmap[row] & (1 << (7 - col))) != 0;
                     const uint8_t pr = on ? r : bg_r;
                     const uint8_t pg = on ? g : bg_g;
                     const uint8_t pb = on ? b : bg_b;
+                    const uint16_t pixel =
+                        ((uint16_t)(pr & 0xF8) << 8) | ((uint16_t)(pg & 0xFC) << 3) | ((uint16_t)(pb & 0xF8) >> 3);
                     for (int scol = 0; scol < size; scol++) {
-                        const int dx  = (col * size + scol) * 3;
-                        pline[dx]     = pr;
-                        pline[dx + 1] = pg;
-                        pline[dx + 2] = pb;
+                        pline[col * size + scol] = pixel;
                     }
                 }
             }
@@ -933,7 +911,8 @@ void gui_draw_char(simple_gui_t *gui, int x, int y, char ch, uint32_t color, uin
     // background pixels must not overwrite existing content. Instead, push each
     // foreground run as a small horizontal bitmap (one DSI call per run).
     // This is still far faster than per-pixel calls because most rows have few runs.
-    uint8_t run_buf[32 * 3]; // max glyph_w at size=4
+    uint16_t run_buf[32]; // max glyph_w at size=4
+    const uint16_t fg565 = ((uint16_t)(r & 0xF8) << 8) | ((uint16_t)(g & 0xFC) << 3) | ((uint16_t)(b & 0xF8) >> 3);
     for (int row = 0; row < 8; row++) {
         int col = 0;
         while (col < 8) {
@@ -949,10 +928,8 @@ void gui_draw_char(simple_gui_t *gui, int x, int y, char ch, uint32_t color, uin
             const int run_len = run_end - col;
             const int run_w   = run_len * size;
             // Fill run buffer with foreground color
-            for (int i = 0; i < run_w * 3; i += 3) {
-                run_buf[i]     = r;
-                run_buf[i + 1] = g;
-                run_buf[i + 2] = b;
+            for (int i = 0; i < run_w; i++) {
+                run_buf[i] = fg565;
             }
             // For each scaled row, push the run
             for (int srow = 0; srow < size; srow++) {
@@ -975,7 +952,7 @@ void gui_draw_char(simple_gui_t *gui, int x, int y, char ch, uint32_t color, uin
                 if (dx1 > gui->width) {
                     dx1 = gui->width;
                 }
-                esp_lcd_panel_draw_bitmap(gui->panel, dx0, dy, dx1, dy + 1, &run_buf[clip_left * 3]);
+                esp_lcd_panel_draw_bitmap(gui->panel, dx0, dy, dx1, dy + 1, &run_buf[clip_left]);
             }
             col = run_end;
         }

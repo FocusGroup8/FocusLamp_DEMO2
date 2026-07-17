@@ -42,6 +42,7 @@ if(CONFIG_EXAMPLE_ENABLE_CAMERA)
     list(APPEND COMP_SRCS
         "camera/camera_controller.c"
         "camera/camera_test.c"
+        "camera/camera_preview.c"
     )
 endif()
 

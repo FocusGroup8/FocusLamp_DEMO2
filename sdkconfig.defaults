@@ -18,6 +18,7 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 #
 # Example Configuration
 #
+CONFIG_EXAMPLE_ENABLE_CAMERA=y
 CONFIG_EXAMPLE_ENABLE_SYSMON=y
 # end of Example Configuration
 

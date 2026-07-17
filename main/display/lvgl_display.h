@@ -41,6 +41,7 @@ typedef struct {
     lv_display_t *disp;           /*!< LVGL display handle */
     lv_indev_t *touch_indev;      /*!< LVGL touch input device (NULL if no touch) */
     esp_lcd_panel_handle_t panel; /*!< DPI panel handle */
+    lv_obj_t *canvas;             /*!< Camera preview canvas (NULL if not created) */
 } lvgl_display_t;
 
 /**
@@ -74,6 +75,35 @@ void lvgl_display_demo_ui(lvgl_display_t *ctx);
  * @return ESP_OK on success
  */
 esp_err_t lvgl_display_deinit(lvgl_display_t *ctx);
+
+/**
+ * @brief Create a camera preview canvas
+ *
+ * Creates an LVGL canvas object that displays a raw RGB565 pixel buffer
+ * using LV_COLOR_FORMAT_RGB565 (little-endian, matching DPI panel).
+ * The canvas covers the full screen area.
+ *
+ * @param ctx       LVGL display context
+ * @param buf       RGB565 pixel buffer (must remain valid while canvas is active)
+ * @param width     Canvas width in pixels
+ * @param height    Canvas height in pixels
+ * @return ESP_OK on success
+ */
+esp_err_t lvgl_display_create_canvas(lvgl_display_t *ctx, uint8_t *buf, uint32_t width, uint32_t height);
+
+/**
+ * @brief Update the canvas with new frame data
+ *
+ * Calls lv_canvas_set_buffer() to refresh the canvas buffer reference,
+ * then marks the canvas as dirty so LVGL redraws it.
+ * Follows the official ESP-BSP display_camera_video example pattern.
+ *
+ * @param ctx       LVGL display context (must have canvas created)
+ * @param buf       RGB565 pixel buffer with new frame data
+ * @param width     Canvas width in pixels
+ * @param height    Canvas height in pixels
+ */
+void lvgl_display_update_canvas(lvgl_display_t *ctx, uint8_t *buf, uint32_t width, uint32_t height);
 
 #ifdef __cplusplus
 }

@@ -63,8 +63,10 @@
  * @name Panel Color Format
  * @{
  */
-#define BOARD_LCD_COLOR_FORMAT LCD_COLOR_FMT_RGB888   /*!< MIPI DSI color format: RGB888 (24-bit) */
-#define BOARD_LCD_BITS_PER_PIXEL 24                   /*!< Bits per pixel (must match color format) */
+#define BOARD_LCD_COLOR_FORMAT                                                                                          \
+    LCD_COLOR_FMT_RGB565 /*!< MIPI DSI color format: RGB565 (16-bit) — matches camera ISP output, ST7701S COLMOD=0x55 \
+                          */
+#define BOARD_LCD_BITS_PER_PIXEL 16                   /*!< Bits per pixel (must match color format) */
 #define BOARD_LCD_RGB_ORDER LCD_RGB_ELEMENT_ORDER_RGB /*!< RGB element order (not BGR) */
 /** @} */
 

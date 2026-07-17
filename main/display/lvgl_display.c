@@ -48,11 +48,12 @@ esp_err_t lvgl_display_init(const lvgl_display_cfg_t *cfg, lvgl_display_t *ctx)
         .double_buffer = true,
         .hres          = cfg->hres,
         .vres          = cfg->vres,
-        .color_format  = LV_COLOR_FORMAT_RGB888,
+        .color_format  = LV_COLOR_FORMAT_RGB565,
         .flags =
             {
                 .buff_dma    = 0,
                 .buff_spiram = 1,
+                .swap_bytes  = 0, /* DPI panel expects little-endian RGB565 (BSP_LCD_BIGENDIAN=0) */
             },
     };
 
@@ -160,7 +161,48 @@ esp_err_t lvgl_display_deinit(lvgl_display_t *ctx)
         ESP_LOGW(TAG, "LVGL port deinit failed: %s", esp_err_to_name(ret));
     }
 
+    ctx->canvas = NULL;
     memset(ctx, 0, sizeof(lvgl_display_t));
     ESP_LOGI(TAG, "LVGL display deinitialized");
     return ESP_OK;
+}
+
+esp_err_t lvgl_display_create_canvas(lvgl_display_t *ctx, uint8_t *buf, uint32_t width, uint32_t height)
+{
+    if (!ctx || !ctx->disp || !buf) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    lvgl_port_lock(0);
+
+    /* Clear existing screen content */
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_clean(scr);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
+
+    /* Create canvas covering the full screen
+     * Use RGB565 (little-endian) format — PPA byte_swap=true converts
+     * ISP's big-endian output to little-endian, matching the DPI panel
+     * (BSP_LCD_BIGENDIAN=0) and LVGL's native RGB565 format.
+     */
+    ctx->canvas = lv_canvas_create(scr);
+    lv_canvas_set_buffer(ctx->canvas, buf, width, height, LV_COLOR_FORMAT_RGB565);
+    lv_obj_center(ctx->canvas);
+
+    lvgl_port_unlock();
+
+    ESP_LOGI(TAG, "Canvas created (%lux%lu RGB565, buf=%p)", (unsigned long)width, (unsigned long)height, buf);
+    return ESP_OK;
+}
+
+void lvgl_display_update_canvas(lvgl_display_t *ctx, uint8_t *buf, uint32_t width, uint32_t height)
+{
+    if (!ctx || !ctx->canvas) {
+        return;
+    }
+
+    /* Caller must hold LVGL lock — this matches the official ESP-BSP
+     * display_camera_video pattern where lock is managed externally. */
+    lv_canvas_set_buffer(ctx->canvas, buf, width, height, LV_COLOR_FORMAT_RGB565);
+    lv_obj_invalidate(ctx->canvas);
 }

@@ -1,6 +1,10 @@
 dependencies:
-  espressif/esp_lcd_st7701: "2.0.2~2"
-  espressif/esp_lcd_touch_gt911: "1.2.0~2"
-  espressif/esp_audio_codec: "2.6.0"
-  joltwallet/littlefs: "1.22.2"
-  esphome/micro-opus: "^0.4.1"      # Native OGG Opus decoder (stable, includes ogg_opus_decoder.h)
+  espressif/esp_lcd_st7701: 2.0.2~2
+  espressif/esp_lcd_touch_gt911: 1.2.0~2
+  espressif/esp_audio_codec: 2.6.0
+  joltwallet/littlefs: 1.22.2
+  esphome/micro-opus: ^0.4.1        # Native OGG Opus decoder (stable, includes ogg_opus_decoder.h)
+  espressif/esp_cam_sensor: ^2.3.0
+  espressif/esp_video: ^2.3.0
+  lvgl/lvgl: ^9.5.0
+  espressif/esp_lvgl_port: ^2.8.0~1

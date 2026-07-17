@@ -1,27 +1,83 @@
 menu "Example Configuration"
 
     #===========================================================================#
-    # System Operation Mode (Mutually Exclusive Audio/Display)                 #
+    # Board Type Selection (Mutually Exclusive Top/Bottom)                     #
     #===========================================================================#
 
-    choice EXAMPLE_SYSTEM_MODE
-        prompt "System Operation Mode (Mutually Exclusive)"
-        default EXAMPLE_SYSTEM_MODE_DISPLAY
+    choice EXAMPLE_BOARD_TYPE
+        prompt "Board Type (Mutually Exclusive)"
+        default EXAMPLE_BOARD_TYPE_TOP
         help
-            Select the system operation mode. Audio and display subsystems
-            cannot run simultaneously to avoid resource conflicts.
-            
-            - AUDIO mode: Only audio subsystem (no LCD display)
-              Use this for audio recording/playback testing without display overhead.
-            - DISPLAY mode: Only display subsystem (no audio hardware)
-              Use this for LCD/touch demos without audio hardware requirements.
+            Select the board type. Top and Bottom boards are mutually exclusive
+            to avoid resource conflicts.
 
-        config EXAMPLE_SYSTEM_MODE_AUDIO
-            bool "Audio Only (No Display)"
-            select EXAMPLE_ENABLE_AUDIO
-        config EXAMPLE_SYSTEM_MODE_DISPLAY
-            bool "Display Only (No Audio)"
+            - Top Board: Display, LED, and Camera subsystems (individually selectable)
+              Use this for visual output, lighting control, and image capture.
+            - Bottom Board: Audio subsystem (individually selectable)
+              Use this for audio recording and playback.
+
+        config EXAMPLE_BOARD_TYPE_TOP
+            bool "Top Board (Display + LED + Camera)"
+        config EXAMPLE_BOARD_TYPE_BOTTOM
+            bool "Bottom Board (Audio)"
     endchoice
+
+    #===========================================================================#
+    # Top Board Configuration                                                   #
+    #===========================================================================#
+
+    config EXAMPLE_ENABLE_DISPLAY
+        bool "Enable Display subsystem"
+        default y
+        depends on EXAMPLE_BOARD_TYPE_TOP
+        help
+            Enable LCD display subsystem with ST7701S MIPI DSI panel and GT911 touch.
+            This includes LVGL graphics library and related demos.
+
+    config EXAMPLE_ENABLE_LED
+        bool "Enable LED control"
+        default n
+        depends on EXAMPLE_BOARD_TYPE_TOP
+        help
+            Enable LED control module with dual PWM channels.
+            LED_A (cool white) on GPIO 29, LED_B (warm white) on GPIO 28.
+
+    config EXAMPLE_RUN_LED_TEST
+        bool "Run LED test on startup"
+        default n
+        depends on EXAMPLE_ENABLE_LED
+        help
+            Execute LED controller test sequence at startup.
+            Tests brightness ramp, color temperature sweep, and on/off control.
+
+    config EXAMPLE_ENABLE_CAMERA
+        bool "Enable Camera (OV5647)"
+        default n
+        depends on EXAMPLE_BOARD_TYPE_TOP
+        help
+            Enable OV5647 camera module via MIPI-CSI interface.
+            Requires esp_cam_sensor and esp_video components.
+
+    config EXAMPLE_RUN_CAMERA_TEST
+        bool "Run Camera test on startup"
+        default n
+        depends on EXAMPLE_ENABLE_CAMERA
+        help
+            Execute camera controller test at startup.
+            Initializes camera pipeline, captures 5 frames, prints frame info,
+            then releases resources. Useful for hardware verification.
+
+    #===========================================================================#
+    # Bottom Board Configuration                                                #
+    #===========================================================================#
+
+    config EXAMPLE_ENABLE_AUDIO
+        bool "Enable Audio subsystem (I2S microphone + speaker)"
+        default n
+        depends on EXAMPLE_BOARD_TYPE_BOTTOM
+        help
+            Enable I2S audio subsystem with INMP441 microphone and MAX98357A amplifier.
+            This adds I2S driver, LittleFS storage, and audio codec dependencies.
 
     #===========================================================================#
     # Display System Configuration                                              #
@@ -30,7 +86,7 @@ menu "Example Configuration"
     config EXAMPLE_USE_DMA2D_COPY_FRAME
         bool "Use DMA2D to copy draw buffer to frame buffer"
         default y
-        depends on EXAMPLE_SYSTEM_MODE_DISPLAY
+        depends on EXAMPLE_ENABLE_DISPLAY
         help
             Enable this option, DMA2D will be used to copy the LVGL draw buffer to the target frame buffer.
             This can save some CPU time and improve the performance.
@@ -38,7 +94,7 @@ menu "Example Configuration"
     config EXAMPLE_MONITOR_REFRESH_BY_GPIO
         bool "Monitor Refresh Rate by GPIO"
         default y
-        depends on EXAMPLE_SYSTEM_MODE_DISPLAY
+        depends on EXAMPLE_ENABLE_DISPLAY
         help
             Enable this option, you can visualize the refresh rate by attaching a logic analyzer to a specific GPIO.
             The GPIO will output a square wave with the frequency equals to half of the refresh rate.
@@ -46,35 +102,35 @@ menu "Example Configuration"
     config EXAMPLE_LCD_USE_ST7701S
         bool "Use ST7701S LCD controller"
         default y
-        depends on EXAMPLE_SYSTEM_MODE_DISPLAY
+        depends on EXAMPLE_ENABLE_DISPLAY
         help
             ST7701S driver IC for KD034WXFID001 3.4 inch 480x480 MIPI DSI panel.
 
     config EXAMPLE_TOUCH_USE_GT911
         bool "Use GT911 touch controller"
         default y
-        depends on EXAMPLE_SYSTEM_MODE_DISPLAY
+        depends on EXAMPLE_ENABLE_DISPLAY
         help
             GT911 capacitive touch controller connected via I2C.
 
     config EXAMPLE_ENABLE_GESTURE_RECOGNITION
         bool "Enable gesture recognition library"
         default y
-        depends on EXAMPLE_SYSTEM_MODE_DISPLAY
+        depends on EXAMPLE_ENABLE_DISPLAY
         help
             Compile gesture recognition module (swipe, pinch, rotation, long press).
 
     config EXAMPLE_ENABLE_TOUCH_GAME
         bool "Enable touch game demo"
         default y
-        depends on EXAMPLE_SYSTEM_MODE_DISPLAY
+        depends on EXAMPLE_ENABLE_DISPLAY
         help
             Compile gesture-controlled ball game demo.
 
     config EXAMPLE_GESTURE_DEBUG_LOG
         bool "Enable gesture recognition debug logging"
         default n
-        depends on EXAMPLE_SYSTEM_MODE_DISPLAY
+        depends on EXAMPLE_ENABLE_DISPLAY
         help
             Enable verbose per-frame logging in gesture recognition.
             Disable for production to improve performance.
@@ -82,7 +138,7 @@ menu "Example Configuration"
     choice EXAMPLE_DEMO
         prompt "Select demo to run"
         default EXAMPLE_DEMO_TOUCH_GAME
-        depends on EXAMPLE_SYSTEM_MODE_DISPLAY
+        depends on EXAMPLE_ENABLE_DISPLAY
         help
             Choose which demo to run at startup. Only one demo runs at a time.
 
@@ -101,15 +157,6 @@ menu "Example Configuration"
     #===========================================================================#
     # Audio System Configuration                                                #
     #===========================================================================#
-
-    config EXAMPLE_ENABLE_AUDIO
-        bool "Enable audio system (I2S microphone + speaker)"
-        default n
-        depends on EXAMPLE_SYSTEM_MODE_AUDIO
-        help
-            Enable I2S audio subsystem with INMP441 microphone and MAX98357A amplifier.
-            This adds I2S driver, LittleFS storage, and audio codec dependencies.
-            Note: This is automatically selected when SYSTEM_MODE_AUDIO is chosen.
 
     config EXAMPLE_RUN_I2S_TEST
         bool "Run I2S driver verification test on startup"
@@ -184,13 +231,17 @@ menu "Example Configuration"
                 Complete audio system with recording, playback, and system monitoring.
     endchoice
 
+    #===========================================================================#
+    # System Monitor Configuration (Independent of Board Type)                  #
+    #===========================================================================#
+
     config EXAMPLE_ENABLE_SYSMON
         bool "Enable system resource monitor"
         default n
         help
             Enable real-time system resource monitoring during system operation.
             Logs heap usage, PSRAM usage, and task statistics.
-            Works in both AUDIO and DISPLAY modes.
+            Works in both Top and Bottom board modes.
 
     config EXAMPLE_SYSMON_INTERVAL_SEC
         int "Monitor log interval (seconds)"

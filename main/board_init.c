@@ -8,33 +8,111 @@
 
 #include "board_config.h"
 #include "driver/gpio.h"
-#include "driver/i2c_master.h"
 #include "esp_err.h"
+#include "esp_log.h"
+
+#if CONFIG_EXAMPLE_ENABLE_DISPLAY
 #include "esp_lcd_mipi_dsi.h"
 #include "esp_lcd_st7701.h"
 #include "esp_lcd_touch.h"
 #include "esp_lcd_touch_gt911.h"
 #include "esp_ldo_regulator.h"
-#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "st7701s_kd034_init.h"
+#endif
+
+#if CONFIG_EXAMPLE_ENABLE_CAMERA
+#include "esp_sccb_i2c.h"
+#include "esp_sccb_intf.h"
+#endif
 
 static const char *TAG = "BOARD_INIT";
 
+/* ----------------------------------------------------------------------- */
+/* Shared I2C0 Bus Management (Touch + Camera SCCB)                        */
+/* ----------------------------------------------------------------------- */
+
+#if CONFIG_EXAMPLE_ENABLE_CAMERA
+static i2c_master_bus_handle_t s_shared_i2c_bus = NULL;
+static int s_i2c_ref_count                      = 0;
+
+esp_err_t board_i2c_bus_init(i2c_master_bus_handle_t *out_handle)
+{
+    if (s_shared_i2c_bus != NULL) {
+        /* Bus already created, just increment ref count */
+        s_i2c_ref_count++;
+        if (out_handle) {
+            *out_handle = s_shared_i2c_bus;
+        }
+        ESP_LOGD(TAG, "I2C0 bus already initialized (ref_count=%d)", s_i2c_ref_count);
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "Creating shared I2C0 master bus (SDA=%d, SCL=%d)...", BOARD_CAM_SCCB_SDA_GPIO,
+             BOARD_CAM_SCCB_SCL_GPIO);
+
+    i2c_master_bus_config_t i2c_bus_config = {
+        .i2c_port                     = BOARD_CAM_SCCB_I2C_PORT,
+        .sda_io_num                   = BOARD_CAM_SCCB_SDA_GPIO,
+        .scl_io_num                   = BOARD_CAM_SCCB_SCL_GPIO,
+        .clk_source                   = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt            = 7,
+        .flags.enable_internal_pullup = true,
+    };
+
+    esp_err_t ret = i2c_new_master_bus(&i2c_bus_config, &s_shared_i2c_bus);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create I2C0 master bus: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    s_i2c_ref_count = 1;
+    if (out_handle) {
+        *out_handle = s_shared_i2c_bus;
+    }
+    ESP_LOGI(TAG, "Shared I2C0 bus initialized");
+    return ESP_OK;
+}
+
+i2c_master_bus_handle_t board_i2c_bus_get_handle(void)
+{
+    return s_shared_i2c_bus;
+}
+
+void board_i2c_bus_deinit(void)
+{
+    if (s_shared_i2c_bus == NULL) {
+        return;
+    }
+    s_i2c_ref_count--;
+    if (s_i2c_ref_count <= 0) {
+        ESP_LOGI(TAG, "Deleting shared I2C0 bus (ref_count=0)");
+        i2c_del_master_bus(s_shared_i2c_bus);
+        s_shared_i2c_bus = NULL;
+        s_i2c_ref_count  = 0;
+    } else {
+        ESP_LOGD(TAG, "I2C0 bus still in use (ref_count=%d)", s_i2c_ref_count);
+    }
+}
+#endif /* CONFIG_EXAMPLE_ENABLE_CAMERA */
+
+#if CONFIG_EXAMPLE_ENABLE_DISPLAY
 // LDO handle kept for lifetime of program
 static esp_ldo_channel_handle_t s_ldo_mipi_phy = NULL;
-// I2C handles for cleanup in touch_deinit
+// I2C panel IO handle for touch cleanup
+static esp_lcd_panel_io_handle_t s_io_handle = NULL;
+
+/* For shared I2C bus: when camera is enabled, use board_i2c_bus_get_handle();
+ * when camera is disabled, touch_init creates its own bus. */
+#if !CONFIG_EXAMPLE_ENABLE_CAMERA
 static i2c_master_bus_handle_t s_i2c_bus_handle = NULL;
-static esp_lcd_panel_io_handle_t s_io_handle    = NULL;
+#endif
 
 /* ----------------------------------------------------------------------- */
 /* LCD initialization                                                       */
 /* ----------------------------------------------------------------------- */
 
-/**
- * @brief Initialize MIPI DSI PHY power via LDO regulator
- */
 static void init_dsi_phy_power(void)
 {
     esp_ldo_channel_config_t ldo_mipi_phy_config = {
@@ -45,9 +123,6 @@ static void init_dsi_phy_power(void)
     ESP_LOGI(TAG, "MIPI DSI PHY powered on");
 }
 
-/**
- * @brief Initialize backlight GPIO
- */
 static void init_backlight(void)
 {
     gpio_config_t bk_gpio_config = {
@@ -63,13 +138,9 @@ void board_init_lcd(esp_lcd_panel_handle_t *out_panel)
 {
     ESP_LOGI(TAG, "KD034WXFID001 (ST7701S) MIPI DSI LCD 480x480 60Hz");
 
-    // Step 1: Enable MIPI DSI PHY power
     init_dsi_phy_power();
-
-    // Step 2: Initialize backlight
     init_backlight();
 
-    // Step 3: Create MIPI DSI bus
     ESP_LOGI(TAG, "Creating MIPI DSI bus...");
     esp_lcd_dsi_bus_handle_t mipi_dsi_bus = NULL;
     esp_lcd_dsi_bus_config_t bus_config   = {
@@ -80,7 +151,6 @@ void board_init_lcd(esp_lcd_panel_handle_t *out_panel)
     };
     ESP_ERROR_CHECK(esp_lcd_new_dsi_bus(&bus_config, &mipi_dsi_bus));
 
-    // Step 4: Create DBI panel IO
     ESP_LOGI(TAG, "Creating DBI panel IO...");
     esp_lcd_panel_io_handle_t mipi_dbi_io = NULL;
     esp_lcd_dbi_io_config_t dbi_config    = {
@@ -90,7 +160,6 @@ void board_init_lcd(esp_lcd_panel_handle_t *out_panel)
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_dbi(mipi_dsi_bus, &dbi_config, &mipi_dbi_io));
 
-    // Step 5: Configure DPI panel timing
     ESP_LOGI(TAG, "Configuring DPI panel timing...");
     esp_lcd_dpi_panel_config_t dpi_config = {
         .dpi_clk_src        = MIPI_DSI_DPI_CLK_SRC_DEFAULT,
@@ -111,7 +180,6 @@ void board_init_lcd(esp_lcd_panel_handle_t *out_panel)
             },
     };
 
-    // Step 6: Configure ST7701S vendor config
     st7701_vendor_config_t vendor_config = {
         .init_cmds                = kd034wxfid001_init_cmds,
         .init_cmds_size           = KD034WXFID001_INIT_CMDS_SIZE,
@@ -130,11 +198,9 @@ void board_init_lcd(esp_lcd_panel_handle_t *out_panel)
         .vendor_config  = &vendor_config,
     };
 
-    // Step 7: Create ST7701S panel
     ESP_LOGI(TAG, "Creating ST7701S panel...");
     ESP_ERROR_CHECK(esp_lcd_new_panel_st7701(mipi_dbi_io, &panel_config, out_panel));
 
-    // Step 8: Reset and initialize panel
     ESP_LOGI(TAG, "Resetting panel...");
     ESP_ERROR_CHECK(esp_lcd_panel_reset(*out_panel));
 
@@ -155,8 +221,19 @@ esp_err_t touch_init(simple_gui_t *gui, esp_lcd_touch_handle_t *out_tp)
 {
     ESP_LOGI(TAG, "Initializing touch controller...");
 
-    // Step 1: Create I2C master bus
-    ESP_LOGI(TAG, "Creating I2C master bus...");
+    i2c_master_bus_handle_t i2c_bus = NULL;
+
+#if CONFIG_EXAMPLE_ENABLE_CAMERA
+    /* Use shared I2C bus (camera and touch share I2C0) */
+    ESP_LOGI(TAG, "Using shared I2C0 bus for touch...");
+    esp_err_t ret = board_i2c_bus_init(&i2c_bus);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to init shared I2C bus: %s", esp_err_to_name(ret));
+        return ret;
+    }
+#else
+    /* Create dedicated I2C bus for touch (no camera) */
+    ESP_LOGI(TAG, "Creating dedicated I2C bus for touch...");
     i2c_master_bus_config_t i2c_bus_config = {
         .i2c_port                     = BOARD_TOUCH_I2C_PORT,
         .sda_io_num                   = BOARD_TOUCH_I2C_SDA_GPIO,
@@ -175,12 +252,13 @@ esp_err_t touch_init(simple_gui_t *gui, esp_lcd_touch_handle_t *out_tp)
         vTaskDelay(pdMS_TO_TICKS(3000));
         return ret;
     }
+    i2c_bus = s_i2c_bus_handle;
+#endif
 
-    // Step 2: Create esp_lcd_panel_io_i2c
     ESP_LOGI(TAG, "Creating LCD panel IO I2C...");
     esp_lcd_panel_io_i2c_config_t io_config = ESP_LCD_TOUCH_IO_I2C_GT911_CONFIG();
 
-    ret = esp_lcd_new_panel_io_i2c(s_i2c_bus_handle, &io_config, &s_io_handle);
+    ret = esp_lcd_new_panel_io_i2c(i2c_bus, &io_config, &s_io_handle);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to create panel IO I2C: %s", esp_err_to_name(ret));
         gui_clear_screen(gui, COLOR_RED);
@@ -190,7 +268,6 @@ esp_err_t touch_init(simple_gui_t *gui, esp_lcd_touch_handle_t *out_tp)
         return ret;
     }
 
-    // Step 3: Initialize GT911 touch controller
     ESP_LOGI(TAG, "Initializing GT911 touch controller...");
     esp_lcd_touch_io_gt911_config_t tp_gt911_config = {
         .dev_addr = io_config.dev_addr,
@@ -238,12 +315,19 @@ void touch_deinit(esp_lcd_touch_handle_t tp)
         esp_lcd_panel_io_del(s_io_handle);
         s_io_handle = NULL;
     }
+#if CONFIG_EXAMPLE_ENABLE_CAMERA
+    /* Release shared I2C bus reference */
+    board_i2c_bus_deinit();
+#else
+    /* Delete dedicated I2C bus */
     if (s_i2c_bus_handle) {
         i2c_del_master_bus(s_i2c_bus_handle);
         s_i2c_bus_handle = NULL;
     }
+#endif
     ESP_LOGI(TAG, "Touch deinitialized");
 }
+#endif /* CONFIG_EXAMPLE_ENABLE_DISPLAY */
 
 /* ----------------------------------------------------------------------- */
 /* Audio initialization                                                     */
@@ -268,4 +352,4 @@ void board_deinit_audio(i2s_audio_handles_t *handles)
     i2s_audio_deinit(handles);
     ESP_LOGI(TAG, "I2S audio deinitialized");
 }
-#endif
+#endif /* CONFIG_EXAMPLE_ENABLE_AUDIO */

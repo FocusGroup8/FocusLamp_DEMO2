@@ -191,7 +191,31 @@
 /** @} */
 
 /*===========================================================================*/
-/* Section 6: Touch Game Parameters                                          */
+/* Section 6: LED Configuration (Dual PWM Cool/Warm White)                  */
+/*===========================================================================*/
+
+/**
+ * @name LED GPIO Assignments
+ * @brief PWM pins for dual-channel LED control
+ * @{
+ */
+#define BOARD_LED_A_GPIO GPIO_NUM_29 /*!< LED_A warm white PWM pin (PWM_A = 暖光) */
+#define BOARD_LED_B_GPIO GPIO_NUM_28 /*!< LED_B cool white PWM pin (PWM_B = 冷光) */
+/** @} */
+
+/**
+ * @name LED PWM Parameters
+ * @{
+ */
+#define BOARD_LED_PWM_FREQ_HZ 5000               /*!< PWM frequency 5kHz (above visible flicker) */
+#define BOARD_LED_PWM_TIMER LEDC_TIMER_1         /*!< LEDC timer for LED PWM (TIMER_1 to avoid backlight TIMER_0) */
+#define BOARD_LED_PWM_DUTY_RES LEDC_TIMER_10_BIT /*!< 10-bit duty (0-1023) */
+#define BOARD_LED_PWM_CHANNEL_A LEDC_CHANNEL_0   /*!< LEDC channel for LED_A */
+#define BOARD_LED_PWM_CHANNEL_B LEDC_CHANNEL_1   /*!< LEDC channel for LED_B */
+/** @} */
+
+/*===========================================================================*/
+/* Section 7: Touch Game Parameters                                          */
 /*===========================================================================*/
 
 /**
@@ -366,4 +390,74 @@
  */
 #define BOARD_AUDIO_PARTITION_LABEL "storage" /*!< Partition label in partitions.csv */
 #define BOARD_AUDIO_MOUNT_POINT "/storage"    /*!< File system mount point */
+/** @} */
+
+/*===========================================================================*/
+/* Section 9: Camera Configuration (OV5647 MIPI-CSI)                         */
+/*===========================================================================*/
+
+/**
+ * @name Camera SCCB (I2C) Configuration
+ * @brief Shared I2C0 bus with GT911 touch controller
+ * @note GT911 I2C address: 0x14, OV5647 SCCB address: 0x36
+ * @{
+ */
+#define BOARD_CAM_SCCB_I2C_PORT I2C_NUM_0  /*!< SCCB shares I2C0 with touch */
+#define BOARD_CAM_SCCB_SDA_GPIO GPIO_NUM_7 /*!< Shared I2C0 SDA pin */
+#define BOARD_CAM_SCCB_SCL_GPIO GPIO_NUM_8 /*!< Shared I2C0 SCL pin */
+#define BOARD_CAM_SCCB_FREQ_HZ 10000       /*!< SCCB clock frequency 10kHz (per ESP-IDF example) */
+#define BOARD_CAM_SCCB_ADDR 0x36           /*!< OV5647 SCCB 7-bit address */
+/** @} */
+
+/**
+ * @name OV5647 Camera Sensor Configuration
+ * @brief MIPI-CSI 2-lane, RAW8 output
+ * @{
+ */
+#define BOARD_CAM_SENSOR_NAME "OV5647"                                 /*!< Camera sensor name string */
+#define BOARD_CAM_FORMAT_NAME "MIPI_2lane_24Minput_RAW8_800x640_50fps" /*!< Output format */
+#define BOARD_CAM_H_RES 800                                            /*!< Camera horizontal resolution */
+#define BOARD_CAM_V_RES 640                                            /*!< Camera vertical resolution */
+#define BOARD_CAM_FPS 50                                               /*!< Camera frame rate */
+#define BOARD_CAM_PORT 1                                               /*!< ESP_CAM_SENSOR_MIPI_CSI = 1 */
+/** @} */
+
+/**
+ * @name MIPI-CSI Controller Configuration
+ * @brief CSI receives RAW8 from OV5647, outputs RGB565 to ISP
+ * @{
+ */
+#define BOARD_CSI_CTLR_ID 0             /*!< CSI controller ID */
+#define BOARD_CSI_DATA_LANE_NUM 2       /*!< Number of MIPI-CSI data lanes */
+#define BOARD_CSI_LANE_BITRATE_MBPS 400 /*!< CSI lane bit rate in Mbps (OV5647 IDI 100MHz * 4 = 400Mbps) */
+#define BOARD_CSI_INPUT_COLOR 0x08      /*!< CAM_CTLR_COLOR_RAW8 */
+#define BOARD_CSI_OUTPUT_COLOR 0x04     /*!< CAM_CTLR_COLOR_RGB565 */
+/** @} */
+
+/**
+ * @name ISP (Image Signal Processor) Configuration
+ * @brief Converts RAW8 from CSI to RGB565 for display
+ * @{
+ */
+#define BOARD_ISP_CLK_HZ (80 * 1000 * 1000) /*!< ISP processor clock 80MHz */
+#define BOARD_ISP_INPUT_COLOR 0x08          /*!< ISP_COLOR_RAW8 */
+#define BOARD_ISP_OUTPUT_COLOR 0x04         /*!< ISP_COLOR_RGB565 */
+/** @} */
+
+/**
+ * @name Camera GPIO Configuration
+ * @brief Control pins for OV5647 module
+ * @{
+ */
+#define BOARD_CAM_RESET_GPIO (-1) /*!< Camera hardware reset pin (-1 = not used) */
+#define BOARD_CAM_PWDN_GPIO (-1)  /*!< Camera power down pin (-1 = not used) */
+#define BOARD_CAM_XCLK_GPIO (-1)  /*!< Camera external clock pin (-1 = not used, MIPI mode) */
+/** @} */
+
+/**
+ * @name Camera Frame Buffer Configuration
+ * @{
+ */
+#define BOARD_CAM_FB_COUNT 1   /*!< Number of frame buffers (1=single, 2=double) */
+#define BOARD_CAM_RGB565_BPP 2 /*!< Bytes per pixel for RGB565 */
 /** @} */

@@ -7,6 +7,7 @@
 #pragma once
 
 #include "driver/isp.h"
+#include "driver/jpeg_encode.h"
 #include "esp_cam_ctlr.h"
 #include "esp_cam_sensor.h"
 #include "esp_err.h"
@@ -37,6 +38,9 @@ typedef struct {
     size_t frame_buffer_size;            /*!< Frame buffer size in bytes */
     esp_cam_ctlr_trans_t csi_trans;      /*!< CSI transaction (persistent storage for callback user_data) */
     void *capture_task;                  /*!< Task handle waiting for frame capture (TaskHandle_t as void*) */
+    jpeg_encoder_handle_t jpeg_encoder;  /*!< JPEG hardware encoder handle */
+    uint8_t *jpeg_out_buf;               /*!< JPEG output buffer in PSRAM */
+    size_t jpeg_out_buf_size;            /*!< JPEG output buffer capacity in bytes */
     bool is_initialized;                 /*!< Initialization state flag */
     bool is_streaming;                   /*!< Streaming state flag */
 } camera_handles_t;
@@ -109,6 +113,29 @@ esp_err_t camera_controller_deinit(camera_handles_t *handles);
  * @return ESP_OK on success, ESP_ERR_TIMEOUT on timeout
  */
 esp_err_t camera_capture_frame(camera_handles_t *handles);
+
+/**
+ * @brief Encode the current frame buffer to JPEG
+ *
+ * Takes the RGB565 frame already captured in handles->frame_buffer and
+ * encodes it to JPEG using the ESP32-P4 hardware JPEG encoder.
+ *
+ * @param[in]  handles      Camera pipeline handles (must have a captured frame)
+ * @param[out] out_size     Actual size of the JPEG output in bytes
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t camera_encode_jpeg(camera_handles_t *handles, uint32_t *out_size);
+
+/**
+ * @brief Get the JPEG output buffer pointer
+ *
+ * Returns the pointer to the JPEG output buffer for reading the encoded data.
+ * The buffer content is valid until the next call to camera_encode_jpeg().
+ *
+ * @param[in] handles  Camera pipeline handles
+ * @return Pointer to JPEG output buffer, or NULL if not initialized
+ */
+const uint8_t *camera_get_jpeg_buffer(camera_handles_t *handles);
 
 /**
  * @brief Run camera controller test

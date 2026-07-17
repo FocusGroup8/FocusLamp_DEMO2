@@ -267,12 +267,46 @@ esp_err_t camera_controller_init(const camera_config_t *config, camera_handles_t
     }
     isp_enabled = true;
 
+    /*--- Step 8: Create JPEG hardware encoder ---*/
+    ESP_LOGI(TAG, "Creating JPEG encoder (RGB565->JPEG, Q=%d, subsampling=YUV422)...", BOARD_JPEG_QUALITY);
+    jpeg_encode_engine_cfg_t jpeg_eng_cfg = {
+        .intr_priority = 0,
+        .timeout_ms    = 100,
+    };
+    ret = jpeg_new_encoder_engine(&jpeg_eng_cfg, &handles->jpeg_encoder);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create JPEG encoder: %s", esp_err_to_name(ret));
+        goto cleanup;
+    }
+    ESP_LOGI(TAG, "JPEG encoder created");
+
+    /* Allocate JPEG output buffer in PSRAM */
+    jpeg_encode_memory_alloc_cfg_t jpeg_mem_cfg = {
+        .buffer_direction = JPEG_ENC_ALLOC_OUTPUT_BUFFER,
+    };
+    handles->jpeg_out_buf = jpeg_alloc_encoder_mem(BOARD_JPEG_OUT_BUF_SIZE, &jpeg_mem_cfg, &handles->jpeg_out_buf_size);
+    if (handles->jpeg_out_buf == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate JPEG output buffer (%d bytes)", BOARD_JPEG_OUT_BUF_SIZE);
+        ret = ESP_ERR_NO_MEM;
+        goto cleanup;
+    }
+    ESP_LOGI(TAG, "JPEG output buffer allocated: %zu bytes (requested %d)", handles->jpeg_out_buf_size,
+             BOARD_JPEG_OUT_BUF_SIZE);
+
     handles->is_initialized = true;
     ESP_LOGI(TAG, "Camera pipeline initialized successfully");
     return ESP_OK;
 
 cleanup:
     /* Release resources in reverse order of creation */
+    if (handles->jpeg_out_buf) {
+        free(handles->jpeg_out_buf);
+        handles->jpeg_out_buf = NULL;
+    }
+    if (handles->jpeg_encoder) {
+        jpeg_del_encoder_engine(handles->jpeg_encoder);
+        handles->jpeg_encoder = NULL;
+    }
     if (isp_enabled) {
         esp_isp_disable(handles->isp_proc);
     }
@@ -381,6 +415,16 @@ esp_err_t camera_controller_deinit(camera_handles_t *handles)
         camera_controller_stop(handles);
     }
 
+    /* Delete JPEG encoder and free output buffer */
+    if (handles->jpeg_encoder) {
+        jpeg_del_encoder_engine(handles->jpeg_encoder);
+        handles->jpeg_encoder = NULL;
+    }
+    if (handles->jpeg_out_buf) {
+        free(handles->jpeg_out_buf);
+        handles->jpeg_out_buf = NULL;
+    }
+
     /* Disable and delete ISP */
     if (handles->isp_proc) {
         esp_isp_disable(handles->isp_proc);
@@ -466,6 +510,54 @@ esp_err_t camera_capture_frame(camera_handles_t *handles)
     ESP_LOGI(TAG, "capture_frame: frame received (buf=%p, size=%zu)", handles->frame_buffer,
              handles->frame_buffer_size);
     return ESP_OK;
+}
+
+esp_err_t camera_encode_jpeg(camera_handles_t *handles, uint32_t *out_size)
+{
+    if (!handles || !handles->is_initialized || !handles->jpeg_encoder || !handles->jpeg_out_buf) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!handles->frame_buffer) {
+        ESP_LOGE(TAG, "No frame buffer available for JPEG encoding");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!out_size) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Cache invalidate: ensure JPEG encoder sees latest DMA-written data */
+    esp_err_t ret = esp_cache_msync(handles->frame_buffer, handles->frame_buffer_size, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "JPEG input cache msync failed: %s", esp_err_to_name(ret));
+    }
+
+    jpeg_encode_cfg_t encode_cfg = {
+        .height        = BOARD_CAM_V_RES,
+        .width         = BOARD_CAM_H_RES,
+        .src_type      = JPEG_ENCODE_IN_FORMAT_RGB565,
+        .sub_sample    = BOARD_JPEG_SUB_SAMPLE,
+        .image_quality = BOARD_JPEG_QUALITY,
+    };
+
+    ret = jpeg_encoder_process(handles->jpeg_encoder, &encode_cfg, (const uint8_t *)handles->frame_buffer,
+                               (uint32_t)handles->frame_buffer_size, handles->jpeg_out_buf,
+                               (uint32_t)handles->jpeg_out_buf_size, out_size);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "JPEG encode failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "JPEG encoded: %lu bytes (quality=%d, subsample=YUV422)", (unsigned long)*out_size,
+             BOARD_JPEG_QUALITY);
+    return ESP_OK;
+}
+
+const uint8_t *camera_get_jpeg_buffer(camera_handles_t *handles)
+{
+    if (!handles || !handles->jpeg_out_buf) {
+        return NULL;
+    }
+    return handles->jpeg_out_buf;
 }
 
 #endif /* CONFIG_EXAMPLE_ENABLE_CAMERA */

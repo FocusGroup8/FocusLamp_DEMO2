@@ -25,6 +25,7 @@
  */
 
 #include "driver/i2s_std.h"
+#include "hal/jpeg_types.h"
 
 #include <stdint.h>
 
@@ -460,4 +461,16 @@
  */
 #define BOARD_CAM_FB_COUNT 1   /*!< Number of frame buffers (1=single, 2=double) */
 #define BOARD_CAM_RGB565_BPP 2 /*!< Bytes per pixel for RGB565 */
+/** @} */
+
+/**
+ * @name JPEG Hardware Encoder Configuration
+ * @brief ESP32-P4 hardware JPEG encoder parameters
+ * @{
+ */
+#define BOARD_JPEG_QUALITY 80 /*!< JPEG encoding quality (1-100). 80 = high quality, ~50-100KB/frame */
+#define BOARD_JPEG_SUB_SAMPLE \
+    JPEG_DOWN_SAMPLING_YUV422 /*!< JPEG chroma subsampling (YUV422: good quality/compression balance) */
+#define BOARD_JPEG_OUT_BUF_SIZE \
+    (200 * 1024) /*!< JPEG output buffer size in bytes (200KB, sufficient for 800x640 Q=80) */
 /** @} */

@@ -46,6 +46,15 @@ esp_err_t camera_test_run(camera_handles_t *handles)
             break;
         }
         ESP_LOGI(TAG, "  Frame %d: addr=%p, size=%zu bytes", i, handles->frame_buffer, handles->frame_buffer_size);
+
+        /* Encode to JPEG */
+        uint32_t jpeg_size = 0;
+        ret                = camera_encode_jpeg(handles, &jpeg_size);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "  Frame %d JPEG encode failed: %s", i, esp_err_to_name(ret));
+        } else {
+            ESP_LOGI(TAG, "  Frame %d JPEG: %lu bytes", i, (unsigned long)jpeg_size);
+        }
     }
 
     ESP_LOGI(TAG, "===== Camera Controller Test Complete =====");

@@ -10,10 +10,13 @@
 #include "board_config.h"
 #include "board_init.h"
 #include "esp_log.h"
+#include "esp_lvgl_port.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "gesture_data_collector.h"
 #include "gesture_recognition.h"
+#include "lvgl.h"
+#include "lvgl_display.h"
 #include "simple_gui.h"
 #include "system_monitor.h"
 #include "touch_game.h"
@@ -28,6 +31,7 @@ static display_state_t s_state        = DISPLAY_STATE_IDLE;
 static display_config_t s_config      = {0};
 static display_handles_t s_handles    = {0};
 static simple_gui_t s_gui             = {0};
+static lvgl_display_t s_lvgl_ctx      = {0};
 static esp_lcd_panel_handle_t s_panel = NULL;
 static esp_lcd_touch_handle_t s_touch = NULL;
 
@@ -37,7 +41,17 @@ esp_err_t display_system_init(const display_config_t *config, display_handles_t 
 
     // Use default config if NULL
     if (config == NULL) {
-        s_config.mode                 = DISPLAY_MODE_TOUCH_GAME;
+#if CONFIG_EXAMPLE_DEMO_LVGL
+        s_config.mode = DISPLAY_MODE_LVGL;
+#elif CONFIG_EXAMPLE_DEMO_GESTURE_RECOGNITION
+        s_config.mode = DISPLAY_MODE_GESTURE_RECOGNITION;
+#elif CONFIG_EXAMPLE_DEMO_TOUCH_GUI
+        s_config.mode = DISPLAY_MODE_TOUCH_GUI;
+#elif CONFIG_EXAMPLE_DEMO_DATA_COLLECTOR
+        s_config.mode = DISPLAY_MODE_DATA_COLLECTOR;
+#else
+        s_config.mode = DISPLAY_MODE_TOUCH_GAME;
+#endif
         s_config.enable_touch         = true;
         s_config.enable_double_buffer = true;
         s_config.enable_ppa_accel     = true;
@@ -51,46 +65,86 @@ esp_err_t display_system_init(const display_config_t *config, display_handles_t 
     s_handles.panel_handle = s_panel;
     ESP_LOGI(TAG, "LCD panel initialized");
 
-    // Step 2: Initialize GUI context with double-buffer
-    if (s_config.enable_double_buffer) {
-        ESP_LOGI(TAG, "Initializing GUI with double-buffer mode...");
-        gui_init_double_buffer(&s_gui, s_panel, BOARD_LCD_H_RES, BOARD_LCD_V_RES);
-    } else {
-        ESP_LOGI(TAG, "Initializing GUI in single-buffer mode...");
-        simple_gui_init(&s_gui, s_panel, BOARD_LCD_H_RES, BOARD_LCD_V_RES);
-    }
-    s_handles.gui_handle = &s_gui;
-    ESP_LOGI(TAG, "GUI initialized (double_buffer=%d)", s_config.enable_double_buffer);
-
-    // Step 3: Initialize PPA hardware accelerator (if enabled)
-    if (s_config.enable_ppa_accel && s_gui.ppa_fill == NULL) {
-        ESP_LOGW(TAG, "PPA accelerator requested but not initialized in gui_init");
-    }
-
-    // Step 4: Initialize touch controller (if enabled)
-    if (s_config.enable_touch) {
-        ESP_LOGI(TAG, "Initializing touch controller...");
-        esp_err_t ret = touch_init(&s_gui, &s_touch);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to initialize touch: %s", esp_err_to_name(ret));
-            // Touch init failed but display is functional - continue without touch
+    if (s_config.mode == DISPLAY_MODE_LVGL) {
+        /* LVGL mode: Initialize touch first (without simple_gui), then init LVGL */
+        if (s_config.enable_touch) {
+            ESP_LOGI(TAG, "Initializing touch controller...");
+            esp_err_t ret = touch_init(NULL, &s_touch);
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to initialize touch: %s", esp_err_to_name(ret));
+                s_touch                = NULL;
+                s_handles.touch_handle = NULL;
+                ESP_LOGW(TAG, "Display system will operate without touch input");
+            } else {
+                s_handles.touch_handle = s_touch;
+                ESP_LOGI(TAG, "Touch controller initialized");
+            }
+        } else {
+            ESP_LOGI(TAG, "Touch disabled by configuration");
             s_touch                = NULL;
             s_handles.touch_handle = NULL;
-            ESP_LOGW(TAG, "Display system will operate without touch input");
-        } else {
-            s_handles.touch_handle = s_touch;
-            ESP_LOGI(TAG, "Touch controller initialized");
         }
-    } else {
-        ESP_LOGI(TAG, "Touch disabled by configuration");
-        s_touch                = NULL;
-        s_handles.touch_handle = NULL;
-    }
 
-    // Step 5: Clear screen to black
-    gui_clear_screen(&s_gui, COLOR_BLACK);
-    gui_draw_string(&s_gui, 10, 200, "Display System Ready", COLOR_WHITE, COLOR_BLACK, 2);
-    gui_swap_buffers(&s_gui);
+        /* Initialize LVGL display */
+        ESP_LOGI(TAG, "Initializing LVGL display...");
+        lvgl_display_cfg_t lvgl_cfg = {
+            .panel_handle  = s_panel,
+            .touch_handle  = s_touch,
+            .hres          = BOARD_LCD_H_RES,
+            .vres          = BOARD_LCD_V_RES,
+            .avoid_tearing = 0, /* avoid_tearing=1 causes deadlock with ST7701S DPI on_refresh_done */
+        };
+        esp_err_t ret = lvgl_display_init(&lvgl_cfg, &s_lvgl_ctx);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to init LVGL display: %s", esp_err_to_name(ret));
+            return ret;
+        }
+        s_handles.gui_handle = &s_lvgl_ctx;
+        s_handles.lvgl_ctx   = &s_lvgl_ctx;
+        ESP_LOGI(TAG, "LVGL display initialized (avoid_tearing=%d)", lvgl_cfg.avoid_tearing);
+    } else {
+        /* simple_gui mode: Original path for touch game, gesture, etc. */
+        // Step 2: Initialize GUI context with double-buffer
+        if (s_config.enable_double_buffer) {
+            ESP_LOGI(TAG, "Initializing GUI with double-buffer mode...");
+            gui_init_double_buffer(&s_gui, s_panel, BOARD_LCD_H_RES, BOARD_LCD_V_RES);
+        } else {
+            ESP_LOGI(TAG, "Initializing GUI in single-buffer mode...");
+            simple_gui_init(&s_gui, s_panel, BOARD_LCD_H_RES, BOARD_LCD_V_RES);
+        }
+        s_handles.gui_handle = &s_gui;
+        ESP_LOGI(TAG, "GUI initialized (double_buffer=%d)", s_config.enable_double_buffer);
+
+        // Step 3: Initialize PPA hardware accelerator (if enabled)
+        if (s_config.enable_ppa_accel && s_gui.ppa_fill == NULL) {
+            ESP_LOGW(TAG, "PPA accelerator requested but not initialized in gui_init");
+        }
+
+        // Step 4: Initialize touch controller (if enabled)
+        if (s_config.enable_touch) {
+            ESP_LOGI(TAG, "Initializing touch controller...");
+            esp_err_t ret = touch_init(&s_gui, &s_touch);
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to initialize touch: %s", esp_err_to_name(ret));
+                // Touch init failed but display is functional - continue without touch
+                s_touch                = NULL;
+                s_handles.touch_handle = NULL;
+                ESP_LOGW(TAG, "Display system will operate without touch input");
+            } else {
+                s_handles.touch_handle = s_touch;
+                ESP_LOGI(TAG, "Touch controller initialized");
+            }
+        } else {
+            ESP_LOGI(TAG, "Touch disabled by configuration");
+            s_touch                = NULL;
+            s_handles.touch_handle = NULL;
+        }
+
+        // Step 5: Clear screen to black
+        gui_clear_screen(&s_gui, COLOR_BLACK);
+        gui_draw_string(&s_gui, 10, 200, "Display System Ready", COLOR_WHITE, COLOR_BLACK, 2);
+        gui_swap_buffers(&s_gui);
+    }
 
     s_state = DISPLAY_STATE_IDLE;
     ESP_LOGI(TAG, "Display system initialized successfully");
@@ -143,6 +197,11 @@ esp_err_t display_system_start(const display_handles_t *handles)
 
     // Run the selected demo mode
     switch (s_config.mode) {
+    case DISPLAY_MODE_LVGL:
+        ESP_LOGI(TAG, "Launching LVGL demo UI...");
+        lvgl_display_demo_ui(&s_lvgl_ctx);
+        break;
+
     case DISPLAY_MODE_TOUCH_GAME:
         ESP_LOGI(TAG, "Launching Touch Game demo...");
         touch_game_demo(&s_gui, s_touch);
@@ -182,10 +241,18 @@ esp_err_t display_system_stop(const display_handles_t *handles)
         return ESP_OK;
     }
 
-    // Clear screen to indicate stop
-    gui_clear_screen(&s_gui, COLOR_BLACK);
-    gui_draw_string(&s_gui, 10, 200, "Display Stopped", COLOR_YELLOW, COLOR_BLACK, 3);
-    gui_swap_buffers(&s_gui);
+    // Clear screen to indicate stop (mode-dependent)
+    if (s_config.mode == DISPLAY_MODE_LVGL) {
+        lvgl_port_lock(0);
+        lv_obj_t *scr = lv_screen_active();
+        lv_obj_clean(scr);
+        lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
+        lvgl_port_unlock();
+    } else {
+        gui_clear_screen(&s_gui, COLOR_BLACK);
+        gui_draw_string(&s_gui, 10, 200, "Display Stopped", COLOR_YELLOW, COLOR_BLACK, 3);
+        gui_swap_buffers(&s_gui);
+    }
 
     s_state = DISPLAY_STATE_IDLE;
     ESP_LOGI(TAG, "Display system stopped");
@@ -207,7 +274,13 @@ void display_system_deinit(display_handles_t *handles)
         display_system_stop(handles);
     }
 
-    // Step 1: Deinitialize touch controller
+    // Step 1: Deinitialize LVGL (if in LVGL mode)
+    if (s_config.mode == DISPLAY_MODE_LVGL && s_lvgl_ctx.disp != NULL) {
+        ESP_LOGI(TAG, "Deinitializing LVGL display...");
+        lvgl_display_deinit(&s_lvgl_ctx);
+    }
+
+    // Step 2: Deinitialize touch controller
     if (s_touch != NULL) {
         ESP_LOGI(TAG, "Deinitializing touch controller...");
         touch_deinit(s_touch);
@@ -216,12 +289,12 @@ void display_system_deinit(display_handles_t *handles)
         ESP_LOGI(TAG, "Touch controller deinitialized");
     }
 
-    // Step 2: Clear GUI state
+    // Step 3: Clear GUI state
     ESP_LOGI(TAG, "Clearing GUI context...");
     memset(&s_gui, 0, sizeof(simple_gui_t));
     s_handles.gui_handle = NULL;
 
-    // Step 3: Panel handle remains valid (MIPI DSI is global resource)
+    // Step 4: Panel handle remains valid (MIPI DSI is global resource)
     // Note: We don't call esp_lcd_panel_del() because the MIPI DSI bus
     // is shared and should be kept alive for potential restart.
     // Only clear our reference.
@@ -229,14 +302,15 @@ void display_system_deinit(display_handles_t *handles)
     s_panel                = NULL;
     s_handles.panel_handle = NULL;
 
-    // Step 4: Clear handles for caller
+    // Step 5: Clear handles for caller
     if (handles != NULL) {
         handles->panel_handle = NULL;
         handles->gui_handle   = NULL;
         handles->touch_handle = NULL;
+        handles->lvgl_ctx     = NULL;
     }
 
-    // Step 5: Deinitialize system monitor
+    // Step 6: Deinitialize system monitor
     ESP_LOGI(TAG, "Deinitializing system monitor...");
     sysmon_deinit();
     ESP_LOGI(TAG, "System monitor deinitialized");

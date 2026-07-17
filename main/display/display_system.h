@@ -35,6 +35,7 @@ typedef enum {
     DISPLAY_MODE_GESTURE_RECOGNITION, /*!< Gesture recognition demo */
     DISPLAY_MODE_TOUCH_GUI,           /*!< Touch GUI demo (button test) */
     DISPLAY_MODE_DATA_COLLECTOR,      /*!< Gesture data collector for calibration */
+    DISPLAY_MODE_LVGL,                /*!< LVGL framework mode (esp_lvgl_port) */
 } display_mode_t;
 
 /**
@@ -64,6 +65,7 @@ typedef struct {
     void *panel_handle;                  /*!< LCD panel handle (opaque) */
     void *gui_handle;                    /*!< GUI context handle (opaque) */
     esp_lcd_touch_handle_t touch_handle; /*!< Touch controller handle */
+    void *lvgl_ctx;                      /*!< LVGL display context (opaque, used in LVGL mode) */
 } display_handles_t;
 
 /**

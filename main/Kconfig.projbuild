@@ -137,11 +137,16 @@ menu "Example Configuration"
 
     choice EXAMPLE_DEMO
         prompt "Select demo to run"
-        default EXAMPLE_DEMO_TOUCH_GAME
+        default EXAMPLE_DEMO_LVGL
         depends on EXAMPLE_ENABLE_DISPLAY
         help
             Choose which demo to run at startup. Only one demo runs at a time.
 
+        config EXAMPLE_DEMO_LVGL
+            bool "LVGL Framework (esp_lvgl_port)"
+            help
+                Use LVGL 9.x graphics library with esp_lvgl_port for MIPI DSI display.
+                Provides full GUI framework with widgets, animations, and touch support.
         config EXAMPLE_DEMO_TOUCH_GAME
             bool "Touch Game (gesture-controlled ball)"
             select EXAMPLE_ENABLE_TOUCH_GAME

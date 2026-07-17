@@ -246,9 +246,11 @@ esp_err_t touch_init(simple_gui_t *gui, esp_lcd_touch_handle_t *out_tp)
     esp_err_t ret = i2c_new_master_bus(&i2c_bus_config, &s_i2c_bus_handle);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to create I2C master bus: %s", esp_err_to_name(ret));
-        gui_clear_screen(gui, COLOR_RED);
-        gui_draw_string(gui, 10, 200, "I2C BUS FAIL", COLOR_WHITE, COLOR_RED, 4);
-        gui_swap_buffers(gui);
+        if (gui) {
+            gui_clear_screen(gui, COLOR_RED);
+            gui_draw_string(gui, 10, 200, "I2C BUS FAIL", COLOR_WHITE, COLOR_RED, 4);
+            gui_swap_buffers(gui);
+        }
         vTaskDelay(pdMS_TO_TICKS(3000));
         return ret;
     }
@@ -261,9 +263,11 @@ esp_err_t touch_init(simple_gui_t *gui, esp_lcd_touch_handle_t *out_tp)
     ret = esp_lcd_new_panel_io_i2c(i2c_bus, &io_config, &s_io_handle);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to create panel IO I2C: %s", esp_err_to_name(ret));
-        gui_clear_screen(gui, COLOR_RED);
-        gui_draw_string(gui, 10, 200, "IO I2C FAIL", COLOR_WHITE, COLOR_RED, 4);
-        gui_swap_buffers(gui);
+        if (gui) {
+            gui_clear_screen(gui, COLOR_RED);
+            gui_draw_string(gui, 10, 200, "IO I2C FAIL", COLOR_WHITE, COLOR_RED, 4);
+            gui_swap_buffers(gui);
+        }
         vTaskDelay(pdMS_TO_TICKS(3000));
         return ret;
     }
@@ -295,9 +299,11 @@ esp_err_t touch_init(simple_gui_t *gui, esp_lcd_touch_handle_t *out_tp)
     ret = esp_lcd_touch_new_i2c_gt911(s_io_handle, &tp_cfg, out_tp);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "GT911 initialization failed: %s", esp_err_to_name(ret));
-        gui_clear_screen(gui, COLOR_RED);
-        gui_draw_string(gui, 10, 200, "GT911 INIT FAIL", COLOR_WHITE, COLOR_RED, 4);
-        gui_swap_buffers(gui);
+        if (gui) {
+            gui_clear_screen(gui, COLOR_RED);
+            gui_draw_string(gui, 10, 200, "GT911 INIT FAIL", COLOR_WHITE, COLOR_RED, 4);
+            gui_swap_buffers(gui);
+        }
         vTaskDelay(pdMS_TO_TICKS(3000));
         return ret;
     }

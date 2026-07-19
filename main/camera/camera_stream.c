@@ -50,11 +50,15 @@ static void camera_stream_task(void *arg)
 {
     ESP_LOGI(TAG, "Streaming task started (target_fps=%d, quality=%d)", s_state.current_fps, s_state.current_quality);
 
-    const TickType_t frame_period = pdMS_TO_TICKS(1000 / s_state.current_fps);
-    int64_t last_stats_log        = esp_timer_get_time();
+    /* frame_period is recomputed inside the loop so that runtime set_fps()
+     * takes effect immediately. Previously this was a const computed once
+     * at task start, which caused set_fps() to update current_fps but the
+     * loop delay remained at the original value. */
+    int64_t last_stats_log = esp_timer_get_time();
 
     while (s_state.running) {
-        TickType_t tick_start = xTaskGetTickCount();
+        TickType_t tick_start   = xTaskGetTickCount();
+        TickType_t frame_period = pdMS_TO_TICKS(1000 / s_state.current_fps);
 
         /* Capture frame */
         esp_err_t ret = camera_capture_frame(s_state.config.camera);

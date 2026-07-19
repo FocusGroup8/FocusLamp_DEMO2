@@ -99,111 +99,86 @@ static void ws_data_handler(ws_manager_event_t event, void *data)
 
 /*---------------------------------------------------------------
  * MCP Tool Callbacks: Camera control
+ *
+ * Architecture Notice (2026-07-19):
+ * All MCP tool callbacks are intentionally left as "not_implemented" stubs.
+ * This project (mipi_dsi) only exposes the MCP *interface layer* — protocol
+ * parsing and tool metadata declaration live in mcp_tools.c. Concrete control
+ * logic is implemented in the wifi_test project (via esp_xiaozhi MCP engine),
+ * which connects to this project's /mcp endpoint as a WebSocket client.
+ *
+ * To restore local control for standalone testing, replace these stubs with
+ * real implementations calling camera_stream_* / display_system_* APIs.
  *-------------------------------------------------------------*/
 static esp_err_t mcp_cb_camera_start(const void *args_json, char *response_buf, int response_buf_size)
 {
     (void)args_json;
-    esp_err_t ret = camera_stream_start();
-    snprintf(response_buf, response_buf_size, "{\"ok\":%s}", (ret == ESP_OK) ? "true" : "false");
-    return ret;
+    snprintf(response_buf, response_buf_size,
+             "{\"error\":\"not_implemented\",\"reason\":\"control lives in wifi_test project\"}");
+    return ESP_ERR_NOT_SUPPORTED;
 }
 
 static esp_err_t mcp_cb_camera_stop(const void *args_json, char *response_buf, int response_buf_size)
 {
     (void)args_json;
-    esp_err_t ret = camera_stream_stop();
-    snprintf(response_buf, response_buf_size, "{\"ok\":%s}", (ret == ESP_OK) ? "true" : "false");
-    return ret;
+    snprintf(response_buf, response_buf_size,
+             "{\"error\":\"not_implemented\",\"reason\":\"control lives in wifi_test project\"}");
+    return ESP_ERR_NOT_SUPPORTED;
 }
 
 static esp_err_t mcp_cb_camera_set_quality(const void *args_json, char *response_buf, int response_buf_size)
 {
-    const cJSON *args = (const cJSON *)args_json;
-    if (!cJSON_IsObject(args)) {
-        snprintf(response_buf, response_buf_size, "{\"error\":\"invalid args\"}");
-        return ESP_ERR_INVALID_ARG;
-    }
-    cJSON *q = cJSON_GetObjectItem(args, "quality");
-    if (!cJSON_IsNumber(q) || q->valueint < 1 || q->valueint > 100) {
-        snprintf(response_buf, response_buf_size, "{\"error\":\"quality must be 1-100\"}");
-        return ESP_ERR_INVALID_ARG;
-    }
-    esp_err_t ret = camera_stream_set_quality(q->valueint);
-    snprintf(response_buf, response_buf_size, "{\"quality\":%d}", camera_stream_get_quality());
-    return ret;
+    (void)args_json;
+    snprintf(response_buf, response_buf_size,
+             "{\"error\":\"not_implemented\",\"reason\":\"control lives in wifi_test project\"}");
+    return ESP_ERR_NOT_SUPPORTED;
 }
 
 static esp_err_t mcp_cb_camera_set_fps(const void *args_json, char *response_buf, int response_buf_size)
 {
-    const cJSON *args = (const cJSON *)args_json;
-    if (!cJSON_IsObject(args)) {
-        snprintf(response_buf, response_buf_size, "{\"error\":\"invalid args\"}");
-        return ESP_ERR_INVALID_ARG;
-    }
-    cJSON *f = cJSON_GetObjectItem(args, "fps");
-    if (!cJSON_IsNumber(f) || f->valueint < 1 || f->valueint > 30) {
-        snprintf(response_buf, response_buf_size, "{\"error\":\"fps must be 1-30\"}");
-        return ESP_ERR_INVALID_ARG;
-    }
-    esp_err_t ret = camera_stream_set_fps(f->valueint);
-    snprintf(response_buf, response_buf_size, "{\"fps\":%d}", camera_stream_get_fps());
-    return ret;
+    (void)args_json;
+    snprintf(response_buf, response_buf_size,
+             "{\"error\":\"not_implemented\",\"reason\":\"control lives in wifi_test project\"}");
+    return ESP_ERR_NOT_SUPPORTED;
 }
 
 /*---------------------------------------------------------------
  * MCP Tool Callbacks: Display control
+ *
+ * Architecture Notice (2026-07-19):
+ * All display tool callbacks are intentionally left as "not_implemented" stubs
+ * (same as camera callbacks above). Concrete control logic lives in wifi_test.
  *-------------------------------------------------------------*/
 static esp_err_t mcp_cb_display_on(const void *args_json, char *response_buf, int response_buf_size)
 {
     (void)args_json;
-    /* TODO: implement display on/off via display_system when API is extended.
-     * For now, return ok to acknowledge command. */
-    snprintf(response_buf, response_buf_size, "{\"ok\":true,\"note\":\"display_on not fully implemented\"}");
-    return ESP_OK;
+    snprintf(response_buf, response_buf_size,
+             "{\"error\":\"not_implemented\",\"reason\":\"control lives in wifi_test project\"}");
+    return ESP_ERR_NOT_SUPPORTED;
 }
 
 static esp_err_t mcp_cb_display_off(const void *args_json, char *response_buf, int response_buf_size)
 {
     (void)args_json;
-    snprintf(response_buf, response_buf_size, "{\"ok\":true,\"note\":\"display_off not fully implemented\"}");
-    return ESP_OK;
+    snprintf(response_buf, response_buf_size,
+             "{\"error\":\"not_implemented\",\"reason\":\"control lives in wifi_test project\"}");
+    return ESP_ERR_NOT_SUPPORTED;
 }
 
 static esp_err_t mcp_cb_display_set_brightness(const void *args_json, char *response_buf, int response_buf_size)
 {
-    const cJSON *args = (const cJSON *)args_json;
-    if (!cJSON_IsObject(args)) {
-        snprintf(response_buf, response_buf_size, "{\"error\":\"invalid args\"}");
-        return ESP_ERR_INVALID_ARG;
-    }
-    cJSON *level = cJSON_GetObjectItem(args, "level");
-    if (!cJSON_IsNumber(level) || level->valueint < 0 || level->valueint > 100) {
-        snprintf(response_buf, response_buf_size, "{\"error\":\"level must be 0-100\"}");
-        return ESP_ERR_INVALID_ARG;
-    }
-    /* TODO: implement via display_system when API is extended */
-    snprintf(response_buf, response_buf_size, "{\"level\":%d,\"note\":\"brightness not fully implemented\"}",
-             level->valueint);
-    return ESP_OK;
+    (void)args_json;
+    snprintf(response_buf, response_buf_size,
+             "{\"error\":\"not_implemented\",\"reason\":\"control lives in wifi_test project\"}");
+    return ESP_ERR_NOT_SUPPORTED;
 }
 
 static esp_err_t mcp_cb_display_show_camera(const void *args_json, char *response_buf, int response_buf_size)
 {
-    const cJSON *args = (const cJSON *)args_json;
-    if (!cJSON_IsObject(args)) {
-        snprintf(response_buf, response_buf_size, "{\"error\":\"invalid args\"}");
-        return ESP_ERR_INVALID_ARG;
-    }
-    cJSON *enable = cJSON_GetObjectItem(args, "enable");
-    if (!cJSON_IsBool(enable)) {
-        snprintf(response_buf, response_buf_size, "{\"error\":\"enable must be bool\"}");
-        return ESP_ERR_INVALID_ARG;
-    }
-    /* TODO: implement local display camera preview when display_system API is extended */
-    bool en = cJSON_IsTrue(enable);
-    snprintf(response_buf, response_buf_size, "{\"enable\":%s,\"note\":\"show_camera not fully implemented\"}",
-             en ? "true" : "false");
-    return ESP_OK;
+    (void)args_json;
+    snprintf(response_buf, response_buf_size,
+             "{\"error\":\"not_implemented\",\"reason\":\"control lives in wifi_test project\"}");
+    return ESP_ERR_NOT_SUPPORTED;
 }
 
 /*---------------------------------------------------------------

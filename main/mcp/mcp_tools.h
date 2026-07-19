@@ -33,6 +33,27 @@ extern "C" {
  * Available tools (8 total):
  *   Camera: camera.start, camera.stop, camera.set_quality, camera.set_fps
  *   Display: display.on, display.off, display.set_brightness, display.show_camera
+ *
+ * ---------------------------------------------------------------------------
+ * Architecture Notice (2026-07-19):
+ * ---------------------------------------------------------------------------
+ * This project (mipi_dsi) only exposes the MCP *interface layer* — protocol
+ * parsing, tool metadata declaration (s_tool_meta), and the JSON-RPC 2.0
+ * response builder. The concrete control logic (camera_stream_start/stop,
+ * display brightness, etc.) is intentionally NOT implemented here.
+ *
+ * Cross-project collaboration:
+ *   - wifi_test project integrates esp_xiaozhi MCP engine (esp_mcp_t)
+ *   - wifi_test registers its own tools via esp_mcp_tool_create() and
+ *     implements tool callbacks that connect to this project's /mcp endpoint
+ *     over WebSocket to forward tool calls.
+ *   - This project's /mcp endpoint responds to tools.list with the full tool
+ *     metadata (interface contract), but tools.call returns "not_implemented"
+ *     because the concrete control lives in wifi_test.
+ *
+ * To restore local control (e.g. for standalone testing), populate the
+ * mcp_tools_callbacks_t fields in network_manager.c with real implementations.
+ * ---------------------------------------------------------------------------
  */
 
 /**

@@ -33,6 +33,8 @@ typedef struct {
     esp_cam_sensor_device_t *cam_sensor; /*!< OV5647 sensor device handle */
     esp_cam_ctlr_handle_t csi_ctlr;      /*!< CSI controller handle */
     isp_proc_handle_t isp_proc;          /*!< ISP processor handle */
+    isp_ae_ctlr_t ae_ctlr;               /*!< ISP AE controller (statistics, V4L2-aligned) */
+    isp_hist_ctlr_t hist_ctlr;           /*!< ISP HIST controller (statistics, V4L2-aligned) */
     esp_sccb_io_handle_t sccb_handle;    /*!< SCCB I2C IO handle */
     void *frame_buffer;                  /*!< Frame buffer in PSRAM */
     size_t frame_buffer_size;            /*!< Frame buffer size in bytes */

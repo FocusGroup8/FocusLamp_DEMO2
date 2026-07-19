@@ -12,6 +12,9 @@
 #include "board_init.h"
 #include "camera_controller.h"
 #include "driver/isp.h"
+#include "driver/isp_ae.h"
+#include "driver/isp_hist.h"
+#include "driver/isp_wbg.h"
 #include "esp_cache.h"
 #include "esp_cam_ctlr.h"
 #include "esp_cam_ctlr_csi.h"
@@ -311,6 +314,139 @@ esp_err_t camera_controller_init(const camera_config_t *config, camera_handles_t
         }
     }
 
+    /* Enable ISP WBG (White Balance Gain) submodule.
+     *
+     * V4L2 driver path unconditionally enables WBG (see esp_video_isp_device.c
+     * isp_start_pipeline), but uses red_balance_gain/blue_balance_gain from
+     * static zero-initialized struct, which results in gain_r=0 and gain_b=0,
+     * effectively zeroing R/B channels. This is a V4L2 driver bug or it
+     * expects user-space to set gains via VIDIOC_S_EXT_CTRLS.
+     *
+     * Here we explicitly set gains to 1.0 (neutral) to preserve image colors
+     * while still keeping the WBG submodule enabled for future tuning. */
+    esp_isp_wbg_config_t wbg_cfg = {0};
+    ret                          = esp_isp_wbg_configure(handles->isp_proc, &wbg_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "ISP WBG configure failed: %s", esp_err_to_name(ret));
+    } else {
+        ret = esp_isp_wbg_enable(handles->isp_proc);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "ISP WBG enable failed: %s", esp_err_to_name(ret));
+        } else {
+            /* Set neutral gains (1.0 for all channels) to avoid V4L2 default
+             * zero-gain issue. ESP_VIDEO_ISP_WBG_DEC_BITS is the internal
+             * fixed-point decimal bits used by the V4L2 driver; we use the
+             * same value for consistency. */
+#define ISP_WBG_DEC_BITS 8
+            isp_wbg_gain_t wbg_gain = {
+                .gain_r = (1 << ISP_WBG_DEC_BITS),
+                .gain_g = (1 << ISP_WBG_DEC_BITS),
+                .gain_b = (1 << ISP_WBG_DEC_BITS),
+            };
+            ret = esp_isp_wbg_set_wb_gain(handles->isp_proc, wbg_gain);
+            if (ret != ESP_OK) {
+                ESP_LOGW(TAG, "ISP WBG set gain failed: %s", esp_err_to_name(ret));
+            } else {
+                ESP_LOGI(TAG, "ISP WBG enabled (gains R=G=B=1.0)");
+            }
+        }
+    }
+
+    /* Enable ISP AE (Auto Exposure) statistics controller.
+     *
+     * V4L2 driver path unconditionally starts AE controller with sample
+     * point AFTER_DEMOSAIC and full-frame window (see isp_start_ae).
+     * Statistics are collected but not consumed here (no callback registered),
+     * matching V4L2 default behavior where user-space reads stats via
+     * VIDIOC_DQBUF on the metadata device. Kept for pipeline parity and
+     * future extension (e.g. auto-exposure control loop). */
+    esp_isp_ae_config_t ae_cfg = {
+        .sample_point = ISP_AE_SAMPLE_POINT_AFTER_DEMOSAIC,
+        .window =
+            {
+                .top_left  = {0, 0},
+                .btm_right = {config->h_res - 1, config->v_res - 1},
+            },
+        .intr_priority = 0,
+    };
+    ret = esp_isp_new_ae_controller(handles->isp_proc, &ae_cfg, &handles->ae_ctlr);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "ISP AE new controller failed: %s", esp_err_to_name(ret));
+        handles->ae_ctlr = NULL;
+    } else {
+        ret = esp_isp_ae_controller_enable(handles->ae_ctlr);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "ISP AE enable failed: %s", esp_err_to_name(ret));
+            esp_isp_del_ae_controller(handles->ae_ctlr);
+            handles->ae_ctlr = NULL;
+        } else {
+            ret = esp_isp_ae_controller_start_continuous_statistics(handles->ae_ctlr);
+            if (ret != ESP_OK) {
+                ESP_LOGW(TAG, "ISP AE start continuous stats failed: %s", esp_err_to_name(ret));
+                esp_isp_ae_controller_disable(handles->ae_ctlr);
+                esp_isp_del_ae_controller(handles->ae_ctlr);
+                handles->ae_ctlr = NULL;
+            } else {
+                ESP_LOGI(TAG, "ISP AE controller enabled (continuous stats, no callback)");
+            }
+        }
+    }
+
+    /* Enable ISP HIST (Histogram) statistics controller.
+     *
+     * V4L2 driver path unconditionally starts HIST controller in YUV_Y mode
+     * with 25 subwindow weights and 16-segment thresholds (see isp_start_hist).
+     * Default configuration copied from V4L2 driver isp_start_hist(). */
+    esp_isp_hist_config_t hist_cfg = {
+        .hist_mode = ISP_HIST_SAMPLING_YUV_Y,
+        .rgb_coefficient =
+            {
+                .coeff_b = {{85, 0}},
+                .coeff_g = {{85, 0}},
+                .coeff_r = {{85, 0}},
+            },
+        .window_weight =
+            {
+                {.decimal = 10, .integer = 0}, {.decimal = 10, .integer = 0}, {.decimal = 10, .integer = 0},
+                {.decimal = 10, .integer = 0}, {.decimal = 10, .integer = 0}, {.decimal = 10, .integer = 0},
+                {.decimal = 10, .integer = 0}, {.decimal = 11, .integer = 0}, {.decimal = 10, .integer = 0},
+                {.decimal = 10, .integer = 0}, {.decimal = 10, .integer = 0}, {.decimal = 11, .integer = 0},
+                {.decimal = 12, .integer = 0}, {.decimal = 11, .integer = 0}, {.decimal = 10, .integer = 0},
+                {.decimal = 10, .integer = 0}, {.decimal = 10, .integer = 0}, {.decimal = 11, .integer = 0},
+                {.decimal = 10, .integer = 0}, {.decimal = 10, .integer = 0}, {.decimal = 10, .integer = 0},
+                {.decimal = 10, .integer = 0}, {.decimal = 10, .integer = 0}, {.decimal = 10, .integer = 0},
+                {.decimal = 10, .integer = 0},
+            },
+        .segment_threshold = {16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240},
+        .window =
+            {
+                .top_left  = {0, 0},
+                .btm_right = {config->h_res - 1, config->v_res - 1},
+            },
+    };
+    ret = esp_isp_new_hist_controller(handles->isp_proc, &hist_cfg, &handles->hist_ctlr);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "ISP HIST new controller failed: %s", esp_err_to_name(ret));
+        handles->hist_ctlr = NULL;
+    } else {
+        ret = esp_isp_hist_controller_enable(handles->hist_ctlr);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "ISP HIST enable failed: %s", esp_err_to_name(ret));
+            esp_isp_del_hist_controller(handles->hist_ctlr);
+            handles->hist_ctlr = NULL;
+        } else {
+            ret = esp_isp_hist_controller_start_continuous_statistics(handles->hist_ctlr);
+            if (ret != ESP_OK) {
+                ESP_LOGW(TAG, "ISP HIST start continuous stats failed: %s", esp_err_to_name(ret));
+                esp_isp_hist_controller_disable(handles->hist_ctlr);
+                esp_isp_del_hist_controller(handles->hist_ctlr);
+                handles->hist_ctlr = NULL;
+            } else {
+                ESP_LOGI(TAG, "ISP HIST controller enabled (YUV_Y mode, continuous stats)");
+            }
+        }
+    }
+
     /*--- Step 8: Create JPEG hardware encoder ---*/
     ESP_LOGI(TAG, "Creating JPEG encoder (RGB565->JPEG, Q=%d, subsampling=YUV422)...", BOARD_JPEG_QUALITY);
     jpeg_encode_engine_cfg_t jpeg_eng_cfg = {
@@ -350,6 +486,19 @@ cleanup:
     if (handles->jpeg_encoder) {
         jpeg_del_encoder_engine(handles->jpeg_encoder);
         handles->jpeg_encoder = NULL;
+    }
+    /* Stop and delete AE/HIST statistics controllers (created after Color) */
+    if (handles->hist_ctlr) {
+        esp_isp_hist_controller_stop_continuous_statistics(handles->hist_ctlr);
+        esp_isp_hist_controller_disable(handles->hist_ctlr);
+        esp_isp_del_hist_controller(handles->hist_ctlr);
+        handles->hist_ctlr = NULL;
+    }
+    if (handles->ae_ctlr) {
+        esp_isp_ae_controller_stop_continuous_statistics(handles->ae_ctlr);
+        esp_isp_ae_controller_disable(handles->ae_ctlr);
+        esp_isp_del_ae_controller(handles->ae_ctlr);
+        handles->ae_ctlr = NULL;
     }
     if (isp_enabled) {
         esp_isp_disable(handles->isp_proc);
@@ -467,6 +616,20 @@ esp_err_t camera_controller_deinit(camera_handles_t *handles)
     if (handles->jpeg_out_buf) {
         free(handles->jpeg_out_buf);
         handles->jpeg_out_buf = NULL;
+    }
+
+    /* Stop and delete AE/HIST statistics controllers (created after Color) */
+    if (handles->hist_ctlr) {
+        esp_isp_hist_controller_stop_continuous_statistics(handles->hist_ctlr);
+        esp_isp_hist_controller_disable(handles->hist_ctlr);
+        esp_isp_del_hist_controller(handles->hist_ctlr);
+        handles->hist_ctlr = NULL;
+    }
+    if (handles->ae_ctlr) {
+        esp_isp_ae_controller_stop_continuous_statistics(handles->ae_ctlr);
+        esp_isp_ae_controller_disable(handles->ae_ctlr);
+        esp_isp_del_ae_controller(handles->ae_ctlr);
+        handles->ae_ctlr = NULL;
     }
 
     /* Disable and delete ISP */

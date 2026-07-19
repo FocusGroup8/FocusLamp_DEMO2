@@ -49,7 +49,7 @@ esp_err_t camera_test_run(camera_handles_t *handles)
 
         /* Encode to JPEG */
         uint32_t jpeg_size = 0;
-        ret                = camera_encode_jpeg(handles, &jpeg_size);
+        ret                = camera_encode_jpeg(handles, BOARD_JPEG_QUALITY, &jpeg_size);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "  Frame %d JPEG encode failed: %s", i, esp_err_to_name(ret));
         } else {

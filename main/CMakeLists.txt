@@ -1,6 +1,12 @@
 # Base sources (always compiled)
 set(COMP_SRCS "main.c" "board_init.c" "system_manager.c" "system_monitor.c")
 
+# MCP tools sources (always compiled, lightweight JSON-RPC engine)
+list(APPEND COMP_SRCS "mcp/mcp_tools.c")
+
+# Network integration sources (always compiled)
+list(APPEND COMP_SRCS "network/network_manager.c")
+
 # Display sources (conditional on EXAMPLE_ENABLE_DISPLAY)
 if(CONFIG_EXAMPLE_ENABLE_DISPLAY)
     list(APPEND COMP_SRCS
@@ -43,11 +49,12 @@ if(CONFIG_EXAMPLE_ENABLE_CAMERA)
         "camera/camera_controller.c"
         "camera/camera_test.c"
         "camera/camera_preview.c"
+        "camera/camera_stream.c"
     )
 endif()
 
 # Include directories
-set(COMP_INCLUDE_DIRS "." "led")
+set(COMP_INCLUDE_DIRS "." "led" "mcp" "network")
 
 if(CONFIG_EXAMPLE_ENABLE_DISPLAY)
     list(APPEND COMP_INCLUDE_DIRS "display")
@@ -62,8 +69,8 @@ if(CONFIG_EXAMPLE_ENABLE_CAMERA)
 endif()
 
 # Component dependencies
-set(COMP_REQUIRES "esp_driver_ppa" "esp_driver_jpeg")
-set(COMP_PRIV_REQUIRES "esp_mm" "esp_timer")
+set(COMP_REQUIRES "esp_driver_ppa" "esp_driver_jpeg" "wifi_manager" "websocket_manager" "task_manager")
+set(COMP_PRIV_REQUIRES "esp_mm" "esp_timer" "json")
 
 if(CONFIG_EXAMPLE_ENABLE_CAMERA)
     list(APPEND COMP_REQUIRES "espressif__esp_cam_sensor" "espressif__esp_sccb_intf")

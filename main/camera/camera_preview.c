@@ -114,14 +114,14 @@ esp_err_t camera_preview_process_frame(const camera_handles_t *handles, camera_p
     /* Diagnostic: dump first 16 bytes of ISP output (first 8 pixels of RGB565) */
     {
         uint8_t *raw = (uint8_t *)handles->frame_buffer;
-        ESP_LOGI(
+        ESP_LOGD(
             TAG,
             "ISP raw bytes [0..15]: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
             raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7], raw[8], raw[9], raw[10], raw[11], raw[12],
             raw[13], raw[14], raw[15]);
         /* Also dump bytes at start of row 1 (offset = 800*2 = 1600) */
         uint8_t *row1 = raw + 1600;
-        ESP_LOGI(TAG, "ISP row1 bytes [0..7]: %02X %02X %02X %02X %02X %02X %02X %02X", row1[0], row1[1], row1[2],
+        ESP_LOGD(TAG, "ISP row1 bytes [0..7]: %02X %02X %02X %02X %02X %02X %02X %02X", row1[0], row1[1], row1[2],
                  row1[3], row1[4], row1[5], row1[6], row1[7]);
     }
 
@@ -195,7 +195,7 @@ esp_err_t camera_preview_process_frame(const camera_handles_t *handles, camera_p
     /* Diagnostic: dump first 16 bytes of PPA output (first 8 pixels) */
     {
         uint8_t *out = preview->out_buf;
-        ESP_LOGI(
+        ESP_LOGD(
             TAG,
             "PPA out bytes [0..15]: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
             out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7], out[8], out[9], out[10], out[11], out[12],

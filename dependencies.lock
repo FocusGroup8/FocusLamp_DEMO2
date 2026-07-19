@@ -19,6 +19,20 @@ dependencies:
       registry_url: https://components.espressif.com
       type: service
     version: 0.5.3
+  espressif/eppp_link:
+    component_hash: 04f7f31868b8ae6014c96132740a192d09611a6e46aaa7038c865ffc7e26b38f
+    dependencies:
+    - name: espressif/esp_serial_slave_link
+      registry_url: https://components.espressif.com
+      require: private
+      version: ^1.1.0
+    - name: idf
+      require: private
+      version: '>=5.2'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.1.5
   espressif/esp_audio_codec:
     component_hash: ef72edb6b70f593fb18ec6621dfbd5356abcaf6703cec75602d8b39e534c0382
     dependencies:
@@ -68,6 +82,16 @@ dependencies:
     - esp32s3
     - esp32p4
     version: 1.3.0
+  espressif/esp_hosted:
+    component_hash: f970ce453bcd6e779e067de04488aa6212295f4a607f041d038844c8cf8edea3
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.3'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 2.12.11
   espressif/esp_ipa:
     component_hash: da24ae8139754b48af75a8c737b81e8eb7fc5a7af4ced5d70af1feb3a056838c
     dependencies:
@@ -150,6 +174,16 @@ dependencies:
       registry_url: https://components.espressif.com
       type: service
     version: 0.0.8
+  espressif/esp_serial_slave_link:
+    component_hash: ac1776806de0a6e371c84e87898bb983e19ce62aa7f1e2e5c4a3b0234a575d2c
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.1.2
   espressif/esp_video:
     component_hash: 2391b4f34230cb1eeea23a0cb1920ae762bb9f0252d4947fe981154530519198
     dependencies:
@@ -194,6 +228,36 @@ dependencies:
     - esp32c61
     - esp32s31
     version: 2.3.0
+  espressif/esp_websocket_client:
+    component_hash: 3fb288702517ef4d75bf933a115f1056ee0c2540d964f9e1d856e0bb67e1dfeb
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.7.0
+  espressif/esp_wifi_remote:
+    component_hash: df05028f37207964fc2e54b01d8d71f680d979800d3667802606c9d7b0281c16
+    dependencies:
+    - name: espressif/esp_hosted
+      registry_url: https://components.espressif.com
+      require: private
+      rules:
+      - if: target in [esp32h2, esp32p4]
+      version: '>=2.11'
+    - name: espressif/wifi_remote_over_eppp
+      registry_url: https://components.espressif.com
+      require: private
+      version: '>=0.1'
+    - name: idf
+      require: private
+      version: '>=5.3'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.6.2
   espressif/usb_host_uvc:
     component_hash: 3dde9c89980212de1e394a29d3fe782a2988a08fd2a16af34eee6f642aab6ebe
     dependencies:
@@ -218,6 +282,20 @@ dependencies:
     - esp32s31
     - linux
     version: 2.5.1
+  espressif/wifi_remote_over_eppp:
+    component_hash: 1fd6968af20f0b19e421f6b519b0a8caf81d689afc3783b564c28559e45f66ef
+    dependencies:
+    - name: espressif/eppp_link
+      registry_url: https://components.espressif.com
+      require: private
+      version: '>=0.1'
+    - name: idf
+      require: private
+      version: '>=5.3'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 0.3.3
   idf:
     source:
       type: idf
@@ -243,12 +321,15 @@ direct_dependencies:
 - esphome/micro-opus
 - espressif/esp_audio_codec
 - espressif/esp_cam_sensor
+- espressif/esp_hosted
 - espressif/esp_lcd_st7701
 - espressif/esp_lcd_touch_gt911
 - espressif/esp_lvgl_port
 - espressif/esp_video
+- espressif/esp_websocket_client
+- espressif/esp_wifi_remote
 - joltwallet/littlefs
 - lvgl/lvgl
-manifest_hash: 08a51cc7bffebb5c247f4e0f605c0f4a6b72d4a2e11be9365120d95fce2892e3
+manifest_hash: 46a4ec53162bffe34e6809b8a239f2bc3d6fda65e6a817bcdf93195362e9dc00
 target: esp32p4
 version: 2.0.0

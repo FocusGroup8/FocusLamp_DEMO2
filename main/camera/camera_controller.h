@@ -121,10 +121,11 @@ esp_err_t camera_capture_frame(camera_handles_t *handles);
  * encodes it to JPEG using the ESP32-P4 hardware JPEG encoder.
  *
  * @param[in]  handles      Camera pipeline handles (must have a captured frame)
+ * @param[in]  quality      JPEG quality (1-100, higher = better quality, larger size)
  * @param[out] out_size     Actual size of the JPEG output in bytes
  * @return ESP_OK on success, error code otherwise
  */
-esp_err_t camera_encode_jpeg(camera_handles_t *handles, uint32_t *out_size);
+esp_err_t camera_encode_jpeg(camera_handles_t *handles, int quality, uint32_t *out_size);
 
 /**
  * @brief Get the JPEG output buffer pointer

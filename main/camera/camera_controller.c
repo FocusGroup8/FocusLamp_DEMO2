@@ -242,7 +242,7 @@ esp_err_t camera_controller_init(const camera_config_t *config, camera_handles_t
     csi_enabled = true;
 
     /*--- Step 7: Create ISP processor ---*/
-    ESP_LOGI(TAG, "Creating ISP processor (clk=%dMHz, RAW8->RGB565)...", BOARD_ISP_CLK_HZ / 1000000);
+    ESP_LOGI(TAG, "Creating ISP processor (clk=%dMHz, RAW8->RGB565, bayer=GBRG)...", BOARD_ISP_CLK_HZ / 1000000);
     esp_isp_processor_cfg_t isp_config = {
         .clk_hz                 = BOARD_ISP_CLK_HZ,
         .input_data_source      = ISP_INPUT_DATA_SOURCE_CSI,
@@ -252,6 +252,12 @@ esp_err_t camera_controller_init(const camera_config_t *config, camera_handles_t
         .has_line_end_packet    = false,
         .h_res                  = config->h_res,
         .v_res                  = config->v_res,
+        /* OV5647 outputs Bayer RAW8 in GBRG order (see ov5647.c ov5647_isp_info[]).
+         * Without this field, ISP defaults to BGGR, causing R/B channel swap and
+         * green-tinted images. V4L2 driver path sets this automatically from
+         * sensor_info->isp_v1_info.bayer_type, but the low-level API path requires
+         * explicit configuration. */
+        .bayer_order = COLOR_RAW_ELEMENT_ORDER_GBRG,
     };
     ret = esp_isp_new_processor(&isp_config, &handles->isp_proc);
     if (ret != ESP_OK) {
@@ -266,6 +272,44 @@ esp_err_t camera_controller_init(const camera_config_t *config, camera_handles_t
         goto cleanup;
     }
     isp_enabled = true;
+
+    /* Enable ISP Demosaic submodule: without demosaic, ISP passes Bayer RAW8
+     * data through as-if it were RGB565, producing green-tinted, monochrome-like
+     * images. V4L2 driver path enables this automatically (see esp_video_isp_device.c
+     * isp_start_demosaic), but the low-level API path requires explicit enable.
+     * Default config (grad_ratio=0) matches V4L2 default behavior. */
+    esp_isp_demosaic_config_t demosaic_cfg = {0};
+    ret                                    = esp_isp_demosaic_configure(handles->isp_proc, &demosaic_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "ISP demosaic configure failed: %s", esp_err_to_name(ret));
+    } else {
+        ret = esp_isp_demosaic_enable(handles->isp_proc);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "ISP demosaic enable failed: %s", esp_err_to_name(ret));
+        } else {
+            ESP_LOGI(TAG, "ISP demosaic enabled (bayer=GBRG)");
+        }
+    }
+
+    /* Enable ISP Color submodule for basic contrast/saturation/hue/brightness.
+     * Default values: contrast=1.0, saturation=1.0, hue=0, brightness=0. */
+    esp_isp_color_config_t color_cfg = {
+        .color_contrast   = {.integer = 1, .decimal = 0},
+        .color_saturation = {.integer = 1, .decimal = 0},
+        .color_hue        = 0,
+        .color_brightness = 0,
+    };
+    ret = esp_isp_color_configure(handles->isp_proc, &color_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "ISP color configure failed: %s", esp_err_to_name(ret));
+    } else {
+        ret = esp_isp_color_enable(handles->isp_proc);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "ISP color enable failed: %s", esp_err_to_name(ret));
+        } else {
+            ESP_LOGI(TAG, "ISP color enabled");
+        }
+    }
 
     /*--- Step 8: Create JPEG hardware encoder ---*/
     ESP_LOGI(TAG, "Creating JPEG encoder (RGB565->JPEG, Q=%d, subsampling=YUV422)...", BOARD_JPEG_QUALITY);
@@ -507,12 +551,12 @@ esp_err_t camera_capture_frame(camera_handles_t *handles)
         ESP_LOGW(TAG, "capture_frame: cache msync failed: %s", esp_err_to_name(ret));
     }
 
-    ESP_LOGI(TAG, "capture_frame: frame received (buf=%p, size=%zu)", handles->frame_buffer,
+    ESP_LOGD(TAG, "capture_frame: frame received (buf=%p, size=%zu)", handles->frame_buffer,
              handles->frame_buffer_size);
     return ESP_OK;
 }
 
-esp_err_t camera_encode_jpeg(camera_handles_t *handles, uint32_t *out_size)
+esp_err_t camera_encode_jpeg(camera_handles_t *handles, int quality, uint32_t *out_size)
 {
     if (!handles || !handles->is_initialized || !handles->jpeg_encoder || !handles->jpeg_out_buf) {
         return ESP_ERR_INVALID_STATE;
@@ -522,6 +566,9 @@ esp_err_t camera_encode_jpeg(camera_handles_t *handles, uint32_t *out_size)
         return ESP_ERR_INVALID_STATE;
     }
     if (!out_size) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (quality < 1 || quality > 100) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -536,7 +583,7 @@ esp_err_t camera_encode_jpeg(camera_handles_t *handles, uint32_t *out_size)
         .width         = BOARD_CAM_H_RES,
         .src_type      = JPEG_ENCODE_IN_FORMAT_RGB565,
         .sub_sample    = BOARD_JPEG_SUB_SAMPLE,
-        .image_quality = BOARD_JPEG_QUALITY,
+        .image_quality = quality,
     };
 
     ret = jpeg_encoder_process(handles->jpeg_encoder, &encode_cfg, (const uint8_t *)handles->frame_buffer,
@@ -547,8 +594,8 @@ esp_err_t camera_encode_jpeg(camera_handles_t *handles, uint32_t *out_size)
         return ret;
     }
 
-    ESP_LOGI(TAG, "JPEG encoded: %lu bytes (quality=%d, subsample=YUV422)", (unsigned long)*out_size,
-             BOARD_JPEG_QUALITY);
+    /* High-frequency log: downgrade to DEBUG to avoid flooding serial console */
+    ESP_LOGD(TAG, "JPEG encoded: %lu bytes (quality=%d, subsample=YUV422)", (unsigned long)*out_size, quality);
     return ESP_OK;
 }
 

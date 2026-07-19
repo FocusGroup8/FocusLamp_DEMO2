@@ -148,7 +148,8 @@ esp_err_t system_manager_init(system_config_t *config)
         }
         ESP_LOGI(TAG, "Camera subsystem initialized successfully");
 
-        /* Initialize camera preview (PPA scaling) */
+        /* Initialize camera preview (PPA scaling) - only when local screen echo is enabled */
+#if CONFIG_EXAMPLE_ENABLE_CAMERA_PREVIEW
         ret = camera_preview_init(&s_camera_preview);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to initialize camera preview: %s", esp_err_to_name(ret));
@@ -156,6 +157,7 @@ esp_err_t system_manager_init(system_config_t *config)
             return ret;
         }
         ESP_LOGI(TAG, "Camera preview initialized");
+#endif
     }
 #endif
 
@@ -171,6 +173,7 @@ esp_err_t system_manager_init(system_config_t *config)
  * Continuously captures camera frames, processes through PPA,
  * and updates the LVGL canvas for real-time display.
  */
+#if CONFIG_EXAMPLE_ENABLE_CAMERA_PREVIEW
 static void camera_preview_task(void *arg)
 {
     ESP_LOGI(TAG, "Camera preview task started");
@@ -229,14 +232,15 @@ static void camera_preview_task(void *arg)
 
         frame_count++;
         if (frame_count % 30 == 0) {
-            ESP_LOGI(TAG, "Preview: %lu frames processed", (unsigned long)frame_count);
+            ESP_LOGD(TAG, "Preview: %lu frames processed", (unsigned long)frame_count);
         }
     }
 
     ESP_LOGI(TAG, "Camera preview task stopped (%lu frames total)", (unsigned long)frame_count);
     vTaskDelete(NULL);
 }
-#endif
+#endif /* CONFIG_EXAMPLE_ENABLE_CAMERA_PREVIEW */
+#endif /* CONFIG_EXAMPLE_ENABLE_CAMERA && CONFIG_EXAMPLE_ENABLE_DISPLAY */
 
 esp_err_t system_manager_start(void)
 {
@@ -291,8 +295,8 @@ esp_err_t system_manager_start(void)
         }
         ESP_LOGI(TAG, "Camera subsystem started");
 
-        /* Start camera preview task (if display is also available) */
-#if CONFIG_EXAMPLE_ENABLE_DISPLAY
+        /* Start camera preview task (only when local screen echo is enabled) */
+#if CONFIG_EXAMPLE_ENABLE_CAMERA_PREVIEW
         if (s_config.display_config.mode == DISPLAY_MODE_LVGL) {
             ESP_LOGI(TAG, "Starting camera preview task...");
             s_preview_running = true;
@@ -415,7 +419,9 @@ void system_manager_deinit(void)
 #if CONFIG_EXAMPLE_ENABLE_CAMERA
     if (s_mode == SYSTEM_MODE_TOP_BOARD) {
         ESP_LOGI(TAG, "Deinitializing camera subsystem...");
+#if CONFIG_EXAMPLE_ENABLE_CAMERA_PREVIEW
         camera_preview_deinit(&s_camera_preview);
+#endif
         camera_controller_deinit(&s_camera_handles);
         ESP_LOGI(TAG, "Camera subsystem deinitialized");
     }

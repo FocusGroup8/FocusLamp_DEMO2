@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "network_manager.h"
 #include "system_manager.h"
 
 #if CONFIG_EXAMPLE_ENABLE_DISPLAY
@@ -23,6 +24,7 @@
 
 #if CONFIG_EXAMPLE_ENABLE_CAMERA
 #include "camera_controller.h"
+#include "camera_stream.h"
 #endif
 
 static const char *TAG = "main";
@@ -89,12 +91,36 @@ void app_main(void)
     ESP_LOGI(TAG, "System running on %s board",
              system_manager_is_audio_active() ? "BOTTOM (Audio)" : "TOP (Display/LED/Camera)");
 
+    // Initialize network subsystem (WiFi + WebSocket + MCP + camera stream)
+    // Note: network_manager_init blocks until WiFi connects (up to 30s timeout)
+    ESP_LOGI(TAG, "Initializing network subsystem...");
+    ret = network_manager_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Network init failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Camera streaming will not be available. Check WiFi config.");
+    } else {
+        ESP_LOGI(TAG, "Network ready. IP: %s", network_manager_get_ip());
+#if CONFIG_EXAMPLE_ENABLE_CAMERA
+        // Auto-start camera streaming after network is up
+        ret = network_manager_start_camera_stream();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Camera stream start failed: %s", esp_err_to_name(ret));
+        } else {
+            ESP_LOGI(TAG, "Camera streaming started. Connect with browser:");
+            ESP_LOGI(TAG, "  HTML UI: open tools/web_ui/index.html");
+            ESP_LOGI(TAG, "  Camera stream: ws://%s/camera", network_manager_get_ip());
+            ESP_LOGI(TAG, "  MCP control: ws://%s/mcp", network_manager_get_ip());
+        }
+#endif
+    }
+
     // Keep running
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
     // Cleanup (will never reach here in normal operation)
+    network_manager_deinit();
 #if CONFIG_EXAMPLE_ENABLE_LED
     led_controller_deinit();
 #endif

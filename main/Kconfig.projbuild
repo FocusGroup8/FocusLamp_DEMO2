@@ -67,6 +67,16 @@ menu "Example Configuration"
             Initializes camera pipeline, captures 5 frames, prints frame info,
             then releases resources. Useful for hardware verification.
 
+    config EXAMPLE_ENABLE_CAMERA_PREVIEW
+        bool "Enable camera preview on display (screen echo)"
+        default n
+        depends on EXAMPLE_ENABLE_CAMERA && EXAMPLE_ENABLE_DISPLAY
+        help
+            Start camera_preview_task that down-scales camera frames (via PPA)
+            and renders them on the LVGL canvas. Disable this when the camera
+            stream is delivered over WebSocket/network instead of the local
+            display, to save PPA/CPU resources and avoid high-frequency logs.
+
     #===========================================================================#
     # Bottom Board Configuration                                                #
     #===========================================================================#

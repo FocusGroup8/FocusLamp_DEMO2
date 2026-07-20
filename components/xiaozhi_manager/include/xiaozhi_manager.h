@@ -25,6 +25,7 @@ typedef enum {
     XIAOZHI_MANAGER_EVENT_TTS_STOP,             /*!< TTS playback stopped */
     XIAOZHI_MANAGER_EVENT_TTS_SENTENCE,         /*!< TTS sentence received */
     XIAOZHI_MANAGER_EVENT_STT_TEXT,             /*!< STT text received */
+    XIAOZHI_MANAGER_EVENT_SERVER_GOODBYE,       /*!< Server sent goodbye (conversation ended) */
     XIAOZHI_MANAGER_EVENT_ERROR,               /*!< Error occurred */
 } xiaozhi_manager_event_t;
 
@@ -67,6 +68,10 @@ typedef struct {
     xiaozhi_manager_audio_cb_t audio_cb;        /*!< Audio data callback (for TTS playback) */
     void *event_cb_ctx;                         /*!< Event callback context */
     void *audio_cb_ctx;                         /*!< Audio callback context */
+    bool auto_reconnect;                        /*!< Enable automatic reconnection on disconnect/error */
+    int reconnect_delay_ms;                     /*!< Initial reconnection delay in ms (default 3000) */
+    int reconnect_max_delay_ms;                 /*!< Maximum reconnection delay in ms (default 60000) */
+    int reconnect_max_retries;                  /*!< Maximum reconnection attempts, 0 = unlimited (default 0) */
 } xiaozhi_manager_config_t;
 
 /**
@@ -77,6 +82,10 @@ typedef struct {
     .audio_cb = NULL, \
     .event_cb_ctx = NULL, \
     .audio_cb_ctx = NULL, \
+    .auto_reconnect = true, \
+    .reconnect_delay_ms = 3000, \
+    .reconnect_max_delay_ms = 60000, \
+    .reconnect_max_retries = 0, \
 }
 
 /**

@@ -1,6 +1,7 @@
 # Name,   Type, SubType, Offset,  Size, Flags
 # Custom partition table for wifi_test project
-# Expanded factory partition to 2MB to accommodate large application binary
+# 16MB Flash layout: factory(3MB) + model(4MB for ESP-SR) + remaining(~5MB)
 nvs,      data, nvs,     ,        0x6000,
 phy_init, data, phy,     ,        0x1000,
-factory,  app,  factory, ,        0x200000,
+factory,  app,  factory, ,        0x300000,
+model,    data, spiffs,  ,        0x400000,

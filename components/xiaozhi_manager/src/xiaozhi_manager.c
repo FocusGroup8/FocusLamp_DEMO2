@@ -8,6 +8,9 @@
 #include "esp_log.h"
 #include "esp_check.h"
 #include "esp_event.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #include "xiaozhi_manager.h"
 #include "xiaozhi_manager_config.h"
@@ -23,6 +26,7 @@
 #include "task_manager.h"
 #include "device_controller.h"
 #include "audio_bridge.h"
+#include "wake_word_engine.h"
 
 static const char *TAG = "XIAOZHI_MGR";
 
@@ -34,16 +38,98 @@ static bool s_owns_mcp = false;
 static xiaozhi_manager_config_t s_config = {0};
 static xiaozhi_display_cb_t s_display_cb = NULL;
 
+/* Auto-reconnect state */
+static esp_timer_handle_t s_reconnect_timer = NULL;
+static int s_reconnect_count = 0;
+static int s_current_reconnect_delay_ms = 0;
+static bool s_reconnect_canceled = false;
+
 /* Microphone state: tracks whether mic capture is active.
  * Mic is started when audio channel opens, stopped when it closes.
- * During TTS playback, mic is paused to avoid echo feedback. */
+ * During TTS playback, mic is paused to avoid echo feedback.
+ * Protected by s_mic_mutex for thread safety (accessed from multiple
+ * event callbacks and the mic task context). */
 static bool s_mic_active = false;
 static bool s_mic_paused_for_tts = false;
+static SemaphoreHandle_t s_mic_mutex = NULL;
 
 /* Forward declarations for MCP tool callbacks */
 static esp_mcp_value_t mcp_tool_notification_speak(const esp_mcp_property_list_t *properties);
 static esp_mcp_value_t mcp_tool_audio_speaker_set_volume(const esp_mcp_property_list_t *properties);
 static esp_mcp_value_t mcp_tool_audio_speaker_play_tts(const esp_mcp_property_list_t *properties);
+
+/*---------------------------------------------------------------
+ * Auto-reconnect implementation
+ *-------------------------------------------------------------*/
+static void schedule_reconnect_if_needed(void);
+static void cancel_reconnect(void);
+
+static void reconnect_timer_callback(void *arg)
+{
+    (void)arg;
+    if (s_reconnect_canceled) {
+        return;
+    }
+    if (s_state != XIAOZHI_MANAGER_STATE_INITIALIZED && s_state != XIAOZHI_MANAGER_STATE_ERROR) {
+        return;  /* Already connected or in progress */
+    }
+    ESP_LOGI(TAG, "Auto-reconnecting (attempt %d)...", s_reconnect_count);
+    s_state = XIAOZHI_MANAGER_STATE_CONNECTING;
+    esp_err_t ret = esp_xiaozhi_chat_start(s_chat_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Reconnect attempt %d failed: %s", s_reconnect_count, esp_err_to_name(ret));
+        s_state = XIAOZHI_MANAGER_STATE_ERROR;
+        /* Schedule next retry */
+        schedule_reconnect_if_needed();
+    }
+    /* If successful, CONNECTED event will be received via callback,
+     * which resets the reconnect counter. */
+}
+
+static void schedule_reconnect_if_needed(void)
+{
+    if (!s_config.auto_reconnect || s_chat_handle == 0) {
+        return;
+    }
+    if (s_reconnect_timer == NULL) {
+        const esp_timer_create_args_t timer_args = {
+            .callback = reconnect_timer_callback,
+            .name = "xiaozhi_reconnect"
+        };
+        esp_timer_create(&timer_args, &s_reconnect_timer);
+    }
+
+    s_reconnect_count++;
+    if (s_config.reconnect_max_retries > 0 && s_reconnect_count > s_config.reconnect_max_retries) {
+        ESP_LOGE(TAG, "Max reconnect attempts (%d) reached, giving up", s_config.reconnect_max_retries);
+        return;
+    }
+
+    /* Exponential backoff with cap */
+    if (s_current_reconnect_delay_ms == 0) {
+        s_current_reconnect_delay_ms = s_config.reconnect_delay_ms;
+    } else {
+        s_current_reconnect_delay_ms *= 2;
+        if (s_current_reconnect_delay_ms > s_config.reconnect_max_delay_ms) {
+            s_current_reconnect_delay_ms = s_config.reconnect_max_delay_ms;
+        }
+    }
+
+    s_reconnect_canceled = false;
+    ESP_LOGI(TAG, "Scheduling reconnect in %d ms (attempt %d)",
+             s_current_reconnect_delay_ms, s_reconnect_count);
+    esp_timer_start_once(s_reconnect_timer, s_current_reconnect_delay_ms * 1000ULL);
+}
+
+static void cancel_reconnect(void)
+{
+    s_reconnect_canceled = true;
+    if (s_reconnect_timer != NULL) {
+        esp_timer_stop(s_reconnect_timer);
+    }
+    s_reconnect_count = 0;
+    s_current_reconnect_delay_ms = 0;
+}
 
 /*---------------------------------------------------------------
  * Display interface implementation
@@ -80,7 +166,10 @@ static void xiaozhi_audio_callback(const uint8_t *data, int len, void *ctx)
  *-------------------------------------------------------------*/
 static void xiaozhi_mic_callback(const uint8_t *opus_data, int len, void *ctx)
 {
-    if (s_chat_handle && !s_mic_paused_for_tts) {
+    /* Only send OPUS when in LISTENING state (audio channel opened).
+     * mic_task runs continuously to support wake word detection,
+     * but OPUS is only forwarded when server is ready to receive. */
+    if (s_state == XIAOZHI_MANAGER_STATE_LISTENING && !s_mic_paused_for_tts) {
         esp_xiaozhi_chat_send_audio_data(s_chat_handle, (const char *)opus_data, (size_t)len);
     }
 }
@@ -90,7 +179,12 @@ static void xiaozhi_mic_callback(const uint8_t *opus_data, int len, void *ctx)
  *-------------------------------------------------------------*/
 static void mic_start_if_needed(void)
 {
+    if (s_mic_mutex && xSemaphoreTake(s_mic_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGW(TAG, "Failed to take mic mutex in mic_start_if_needed");
+        return;
+    }
     if (s_mic_active || s_mic_paused_for_tts) {
+        if (s_mic_mutex) xSemaphoreGive(s_mic_mutex);
         return;
     }
     esp_err_t ret = audio_bridge_mic_start(xiaozhi_mic_callback, NULL);
@@ -100,40 +194,57 @@ static void mic_start_if_needed(void)
     } else {
         ESP_LOGE(TAG, "Failed to start microphone: %s", esp_err_to_name(ret));
     }
+    if (s_mic_mutex) xSemaphoreGive(s_mic_mutex);
 }
 
 static void mic_stop_if_needed(void)
 {
+    if (s_mic_mutex && xSemaphoreTake(s_mic_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGW(TAG, "Failed to take mic mutex in mic_stop_if_needed");
+        return;
+    }
     if (!s_mic_active) {
+        if (s_mic_mutex) xSemaphoreGive(s_mic_mutex);
         return;
     }
     audio_bridge_mic_stop();
     s_mic_active = false;
     s_mic_paused_for_tts = false;
     ESP_LOGI(TAG, "Microphone capture stopped");
+    if (s_mic_mutex) xSemaphoreGive(s_mic_mutex);
 }
 
 static void mic_pause_for_tts(void)
 {
-    if (!s_mic_active || s_mic_paused_for_tts) {
+    if (s_mic_mutex && xSemaphoreTake(s_mic_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGW(TAG, "Failed to take mic mutex in mic_pause_for_tts");
         return;
     }
-    /* Stop mic during TTS to avoid echo. The mic_task will be restarted
-     * when TTS stops. This is simpler than trying to mute/discard frames. */
-    audio_bridge_mic_stop();
+    if (!s_mic_active || s_mic_paused_for_tts) {
+        if (s_mic_mutex) xSemaphoreGive(s_mic_mutex);
+        return;
+    }
+    /* Mark mic as paused for TTS — mic_task continues running so that
+     * wake_word_engine's PCM callback (and AEC) keeps receiving audio.
+     * Only OPUS→server transmission is blocked (checked in xiaozhi_mic_callback). */
     s_mic_paused_for_tts = true;
-    s_mic_active = false;
-    ESP_LOGI(TAG, "Microphone paused for TTS playback");
+    ESP_LOGI(TAG, "Microphone paused for TTS playback (mic_task still running for AEC)");
+    if (s_mic_mutex) xSemaphoreGive(s_mic_mutex);
 }
 
 static void mic_resume_after_tts(void)
 {
+    if (s_mic_mutex && xSemaphoreTake(s_mic_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGW(TAG, "Failed to take mic mutex in mic_resume_after_tts");
+        return;
+    }
     if (!s_mic_paused_for_tts) {
+        if (s_mic_mutex) xSemaphoreGive(s_mic_mutex);
         return;
     }
     s_mic_paused_for_tts = false;
-    /* Restart mic — audio channel is still open */
-    mic_start_if_needed();
+    /* Mic task is still running — just resume sending OPUS to server */
+    if (s_mic_mutex) xSemaphoreGive(s_mic_mutex);
 
     /* Notify server to start listening for user input.
      * Without this, the server does not process incoming audio after TTS ends,
@@ -143,6 +254,25 @@ static void mic_resume_after_tts(void)
     }
 
     ESP_LOGI(TAG, "Microphone resumed after TTS playback");
+}
+
+static void mic_force_stop(void)
+{
+    /* Force-stop mic regardless of state (used during disconnect/error cleanup).
+     * Takes mutex if available, but proceeds even if mutex take fails. */
+    bool mutex_taken = false;
+    if (s_mic_mutex) {
+        mutex_taken = (xSemaphoreTake(s_mic_mutex, pdMS_TO_TICKS(500)) == pdTRUE);
+    }
+    if (s_mic_active || s_mic_paused_for_tts) {
+        audio_bridge_mic_stop();
+        s_mic_active = false;
+        s_mic_paused_for_tts = false;
+        ESP_LOGI(TAG, "Microphone force-stopped");
+    }
+    if (mutex_taken && s_mic_mutex) {
+        xSemaphoreGive(s_mic_mutex);
+    }
 }
 
 /*---------------------------------------------------------------
@@ -158,18 +288,30 @@ static void xiaozhi_event_callback(esp_xiaozhi_chat_event_t event, void *event_d
             case ESP_XIAOZHI_CHAT_TTS_STATE_START:
                 s_state = XIAOZHI_MANAGER_STATE_SPEAKING;
                 mic_pause_for_tts();
+                /* Wake word engine stays active — AEC cancels TTS echo.
+                 * Only mic (opus→server) is paused to avoid sending echo. */
                 if (s_config.event_cb) {
                     s_config.event_cb(XIAOZHI_MANAGER_EVENT_TTS_START, NULL, s_config.event_cb_ctx);
                 }
                 xiaozhi_display_notify(XIAOZHI_DISPLAY_EVENT_STATE_CHANGED, (void *)"speaking");
                 break;
             case ESP_XIAOZHI_CHAT_TTS_STATE_STOP:
-                s_state = XIAOZHI_MANAGER_STATE_CONNECTED;
+                /* TTS finished — return to LISTENING to continue conversation.
+                 * Aligned with official esp_xiaozhi state machine:
+                 *   kDeviceStateSpeaking -> kDeviceStateListening
+                 * This allows user to continue speaking without saying wake
+                 * word again. Conversation ends only on SERVER_GOODBYE or
+                 * AUDIO_CHANNEL_CLOSED. */
+                s_state = XIAOZHI_MANAGER_STATE_LISTENING;
                 mic_resume_after_tts();
+                /* Wake word engine was never paused — AEC handled echo cancellation.
+                 * NOTE: AEC is currently disabled for diagnostic purposes,
+                 * so wake word detection may trigger on TTS echo. Monitor
+                 * for false triggers and re-enable AEC after tuning. */
                 if (s_config.event_cb) {
                     s_config.event_cb(XIAOZHI_MANAGER_EVENT_TTS_STOP, NULL, s_config.event_cb_ctx);
                 }
-                xiaozhi_display_notify(XIAOZHI_DISPLAY_EVENT_STATE_CHANGED, (void *)"idle");
+                xiaozhi_display_notify(XIAOZHI_DISPLAY_EVENT_STATE_CHANGED, (void *)"listening");
                 break;
             case ESP_XIAOZHI_CHAT_TTS_STATE_SENTENCE_START:
                 if (s_config.event_cb) {
@@ -193,7 +335,13 @@ static void xiaozhi_event_callback(esp_xiaozhi_chat_event_t event, void *event_d
     case ESP_XIAOZHI_CHAT_EVENT_CHAT_ERROR: {
         esp_xiaozhi_chat_error_info_t *err_info = (esp_xiaozhi_chat_error_info_t *)event_data;
         ESP_LOGE(TAG, "Chat error: code=%d source=%s", err_info->code, err_info->source ? err_info->source : "unknown");
+        /* Clean up mic on error — it may still be running */
+        mic_force_stop();
+        /* Transition to ERROR state, but allow recovery by reconnecting.
+         * The error state is recoverable: call xiaozhi_manager_stop() then
+         * xiaozhi_manager_start() to retry. */
         s_state = XIAOZHI_MANAGER_STATE_ERROR;
+        schedule_reconnect_if_needed();  /* Auto-reconnect after error */
         if (s_config.event_cb) {
             s_config.event_cb(XIAOZHI_MANAGER_EVENT_ERROR, err_info, s_config.event_cb_ctx);
         }
@@ -227,7 +375,11 @@ static void xiaozhi_esp_event_handler(void *arg, esp_event_base_t event_base,
     switch (event_id) {
     case ESP_XIAOZHI_CHAT_EVENT_CONNECTED:
         s_state = XIAOZHI_MANAGER_STATE_CONNECTED;
+        cancel_reconnect();  /* Reset reconnect counter on successful connection */
         ESP_LOGI(TAG, "Connected to xiaozhi server");
+        /* Start mic_task on (re)connection to support continuous wake word detection.
+         * Idempotent: skips if already running (e.g., first connect after xiaozhi_manager_start). */
+        mic_start_if_needed();
         if (s_config.event_cb) {
             s_config.event_cb(XIAOZHI_MANAGER_EVENT_CONNECTED, NULL, s_config.event_cb_ctx);
         }
@@ -235,7 +387,9 @@ static void xiaozhi_esp_event_handler(void *arg, esp_event_base_t event_base,
         break;
     case ESP_XIAOZHI_CHAT_EVENT_DISCONNECTED:
         s_state = XIAOZHI_MANAGER_STATE_INITIALIZED;
+        mic_force_stop();
         ESP_LOGW(TAG, "Disconnected from xiaozhi server");
+        schedule_reconnect_if_needed();  /* Auto-reconnect with exponential backoff */
         if (s_config.event_cb) {
             s_config.event_cb(XIAOZHI_MANAGER_EVENT_DISCONNECTED, NULL, s_config.event_cb_ctx);
         }
@@ -244,7 +398,8 @@ static void xiaozhi_esp_event_handler(void *arg, esp_event_base_t event_base,
     case ESP_XIAOZHI_CHAT_EVENT_AUDIO_CHANNEL_OPENED:
         s_state = XIAOZHI_MANAGER_STATE_LISTENING;
         ESP_LOGI(TAG, "Audio channel opened");
-        mic_start_if_needed();
+        /* mic_task is already running (started in CONNECTED event).
+         * OPUS forwarding enabled by s_state == LISTENING. */
         if (s_config.event_cb) {
             s_config.event_cb(XIAOZHI_MANAGER_EVENT_AUDIO_CHANNEL_OPENED, NULL, s_config.event_cb_ctx);
         }
@@ -253,9 +408,22 @@ static void xiaozhi_esp_event_handler(void *arg, esp_event_base_t event_base,
     case ESP_XIAOZHI_CHAT_EVENT_AUDIO_CHANNEL_CLOSED:
         s_state = XIAOZHI_MANAGER_STATE_CONNECTED;
         ESP_LOGI(TAG, "Audio channel closed");
-        mic_stop_if_needed();
+        /* Do NOT stop mic_task — keep running for wake word detection.
+         * OPUS forwarding disabled by s_state != LISTENING. */
         if (s_config.event_cb) {
             s_config.event_cb(XIAOZHI_MANAGER_EVENT_AUDIO_CHANNEL_CLOSED, NULL, s_config.event_cb_ctx);
+        }
+        xiaozhi_display_notify(XIAOZHI_DISPLAY_EVENT_STATE_CHANGED, (void *)"idle");
+        break;
+    case ESP_XIAOZHI_CHAT_EVENT_SERVER_GOODBYE:
+        ESP_LOGI(TAG, "Server goodbye received — conversation ended");
+        /* Close audio channel cleanly. This will trigger AUDIO_CHANNEL_CLOSED
+         * event which handles mic cleanup and state transition. */
+        if (s_chat_handle) {
+            esp_xiaozhi_chat_close_audio_channel(s_chat_handle);
+        }
+        if (s_config.event_cb) {
+            s_config.event_cb(XIAOZHI_MANAGER_EVENT_SERVER_GOODBYE, NULL, s_config.event_cb_ctx);
         }
         xiaozhi_display_notify(XIAOZHI_DISPLAY_EVENT_STATE_CHANGED, (void *)"idle");
         break;
@@ -390,12 +558,18 @@ esp_err_t xiaozhi_manager_init(const xiaozhi_manager_config_t *config)
 
     memcpy(&s_config, config, sizeof(s_config));
 
+    /* Create mic state protection mutex */
+    s_mic_mutex = xSemaphoreCreateMutex();
+    ESP_RETURN_ON_FALSE(s_mic_mutex, ESP_ERR_NO_MEM, TAG, "Failed to create mic mutex");
+
     esp_err_t ret;
 
     /* Step 0: Initialize sub-modules */
     ret = task_manager_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to init task_manager: %s", esp_err_to_name(ret));
+        vSemaphoreDelete(s_mic_mutex);
+        s_mic_mutex = NULL;
         return ret;
     }
 
@@ -403,12 +577,21 @@ esp_err_t xiaozhi_manager_init(const xiaozhi_manager_config_t *config)
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to init device_controller: %s", esp_err_to_name(ret));
         task_manager_deinit();
+        vSemaphoreDelete(s_mic_mutex);
+        s_mic_mutex = NULL;
         return ret;
     }
 
     /* Step 1: Create MCP engine */
     ret = esp_mcp_create(&s_mcp_engine);
-    ESP_RETURN_ON_ERROR(ret, TAG, "Failed to create MCP engine");
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create MCP engine: %s", esp_err_to_name(ret));
+        device_controller_deinit();
+        task_manager_deinit();
+        vSemaphoreDelete(s_mic_mutex);
+        s_mic_mutex = NULL;
+        return ret;
+    }
 
     s_owns_mcp = true;
 
@@ -418,6 +601,10 @@ esp_err_t xiaozhi_manager_init(const xiaozhi_manager_config_t *config)
         ESP_LOGE(TAG, "Failed to register MCP tools");
         esp_mcp_destroy(s_mcp_engine);
         s_mcp_engine = NULL;
+        device_controller_deinit();
+        task_manager_deinit();
+        vSemaphoreDelete(s_mic_mutex);
+        s_mic_mutex = NULL;
         return ret;
     }
 
@@ -451,6 +638,10 @@ esp_err_t xiaozhi_manager_init(const xiaozhi_manager_config_t *config)
         /* MCP engine is owned by chat now if init succeeded partially, skip destroy */
         s_mcp_engine = NULL;
         s_owns_mcp = false;
+        device_controller_deinit();
+        task_manager_deinit();
+        vSemaphoreDelete(s_mic_mutex);
+        s_mic_mutex = NULL;
         return ret;
     }
 
@@ -479,7 +670,14 @@ esp_err_t xiaozhi_manager_deinit(void)
     }
 
     /* Stop microphone capture first */
-    mic_stop_if_needed();
+    mic_force_stop();
+
+    /* Cancel any pending reconnection */
+    cancel_reconnect();
+    if (s_reconnect_timer != NULL) {
+        esp_timer_delete(s_reconnect_timer);
+        s_reconnect_timer = NULL;
+    }
 
     /* Stop chat if running */
     if (s_chat_handle) {
@@ -491,6 +689,12 @@ esp_err_t xiaozhi_manager_deinit(void)
     /* Deinitialize sub-modules */
     device_controller_deinit();
     task_manager_deinit();
+
+    /* Clean up mic mutex */
+    if (s_mic_mutex) {
+        vSemaphoreDelete(s_mic_mutex);
+        s_mic_mutex = NULL;
+    }
 
     s_mcp_engine = NULL;
     s_owns_mcp = false;
@@ -521,6 +725,9 @@ esp_err_t xiaozhi_manager_stop(void)
 {
     ESP_RETURN_ON_FALSE(s_chat_handle, ESP_ERR_INVALID_STATE, TAG, "Not initialized");
 
+    /* Cancel any pending reconnection before stopping */
+    cancel_reconnect();
+
     esp_err_t ret = esp_xiaozhi_chat_stop(s_chat_handle);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to stop chat: %s", esp_err_to_name(ret));
@@ -541,6 +748,31 @@ esp_err_t xiaozhi_manager_send_wake_word(const char *wake_word)
 {
     ESP_RETURN_ON_FALSE(s_chat_handle, ESP_ERR_INVALID_STATE, TAG, "Not initialized");
     ESP_RETURN_ON_FALSE(wake_word, ESP_ERR_INVALID_ARG, TAG, "Invalid wake word");
+
+    /* If currently speaking (TTS playing), abort speaking first before
+     * sending the new wake word. This prevents overlapping audio streams
+     * and ensures the server processes the new wake word correctly. */
+    if (s_state == XIAOZHI_MANAGER_STATE_SPEAKING) {
+        ESP_LOGI(TAG, "Aborting current TTS for new wake word: %s", wake_word);
+        esp_xiaozhi_chat_send_abort_speaking(s_chat_handle,
+            ESP_XIAOZHI_CHAT_ABORT_SPEAKING_REASON_WAKE_WORD_DETECTED);
+    }
+
+    /* If not in a state where we can send a wake word, open audio channel first.
+     * This handles the case where audio channel was closed after goodbye. */
+    if (s_state == XIAOZHI_MANAGER_STATE_CONNECTED) {
+        esp_err_t ret = xiaozhi_manager_open_audio_channel();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to open audio channel for wake word: %s", esp_err_to_name(ret));
+            return ret;
+        }
+    }
+
+    /* Only send wake word when in LISTENING state (audio channel open) */
+    if (s_state != XIAOZHI_MANAGER_STATE_LISTENING && s_state != XIAOZHI_MANAGER_STATE_SPEAKING) {
+        ESP_LOGW(TAG, "Cannot send wake word in state %d", s_state);
+        return ESP_ERR_INVALID_STATE;
+    }
 
     ESP_LOGI(TAG, "Wake word detected: %s", wake_word);
     return esp_xiaozhi_chat_send_wake_word(s_chat_handle, wake_word);

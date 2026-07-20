@@ -1,0 +1,115 @@
+menu "Wake Word Engine"
+
+    config WAKE_WORD_ENGINE_ENABLE
+        bool "Enable Wake Word Engine"
+        default y
+        help
+            Enable the Wake Word Engine component for ESP-SR MultiNet based
+            custom wake word detection. When disabled, all API functions
+            return ERR_NOT_SUPPORTED.
+
+    choice WAKE_WORD_ENGINE_AFE_MODE
+        prompt "AFE mode"
+        default WAKE_WORD_ENGINE_AFE_MODE_HIGH_PERF
+        depends on WAKE_WORD_ENGINE_ENABLE
+        help
+            AFE (Audio Front-End) processing mode.
+            High performance provides better noise suppression.
+
+        config WAKE_WORD_ENGINE_AFE_MODE_LOW_COST
+            bool "Low cost"
+
+        config WAKE_WORD_ENGINE_AFE_MODE_HIGH_PERF
+            bool "High performance"
+    endchoice
+
+    config WAKE_WORD_ENGINE_AFE_MODE
+        int
+        default 0 if WAKE_WORD_ENGINE_AFE_MODE_LOW_COST
+        default 1 if WAKE_WORD_ENGINE_AFE_MODE_HIGH_PERF
+
+    choice WAKE_WORD_ENGINE_AFE_TYPE
+        prompt "AFE type"
+        default WAKE_WORD_ENGINE_AFE_TYPE_SR
+        depends on WAKE_WORD_ENGINE_ENABLE
+        help
+            AFE type selection.
+            SR mode is for speech recognition (includes linear NS).
+            FD mode is for full duplex (includes nonlinear NS).
+
+        config WAKE_WORD_ENGINE_AFE_TYPE_SR
+            bool "Speech Recognition (SR)"
+
+        config WAKE_WORD_ENGINE_AFE_TYPE_FD
+            bool "Full Duplex (FD)"
+    endchoice
+
+    config WAKE_WORD_ENGINE_AFE_TYPE
+        int
+        default 0 if WAKE_WORD_ENGINE_AFE_TYPE_SR
+        default 3 if WAKE_WORD_ENGINE_AFE_TYPE_FD
+
+    choice WAKE_WORD_ENGINE_DEFAULT_LANG
+        prompt "Default language"
+        default WAKE_WORD_ENGINE_DEFAULT_LANG_CN
+        depends on WAKE_WORD_ENGINE_ENABLE
+        help
+            Default language for MultiNet model.
+
+        config WAKE_WORD_ENGINE_DEFAULT_LANG_CN
+            bool "Chinese (mn7_cn)"
+
+        config WAKE_WORD_ENGINE_DEFAULT_LANG_EN
+            bool "English (mn7_en)"
+    endchoice
+
+    config WAKE_WORD_ENGINE_DEFAULT_LANG
+        int
+        default 0 if WAKE_WORD_ENGINE_DEFAULT_LANG_CN
+        default 1 if WAKE_WORD_ENGINE_DEFAULT_LANG_EN
+
+    config WAKE_WORD_ENGINE_TASK_STACK
+        int "Detection task stack size"
+        default 8192
+        range 4096 32768
+        depends on WAKE_WORD_ENGINE_ENABLE
+        help
+            Stack size for the wake word detection task.
+
+    config WAKE_WORD_ENGINE_TASK_PRIORITY
+        int "Detection task priority"
+        default 5
+        range 1 20
+        depends on WAKE_WORD_ENGINE_ENABLE
+        help
+            FreeRTOS task priority for the wake word detection task.
+
+    config WAKE_WORD_ENGINE_TASK_CORE
+        int "Detection task CPU core"
+        default 0
+        range -1 1
+        depends on WAKE_WORD_ENGINE_ENABLE
+        help
+            CPU core affinity for the detection task.
+            -1 = no affinity, 0 = core 0, 1 = core 1.
+
+    config WAKE_WORD_ENGINE_DET_THRESHOLD
+        int "Detection threshold (x10000)"
+        default 5000
+        range 0 9999
+        depends on WAKE_WORD_ENGINE_ENABLE
+        help
+            MultiNet detection threshold multiplied by 10000.
+            E.g., 5000 means threshold=0.5. Higher values reduce false positives
+            but may miss detections. Range: 0~9999 (0.0~0.9999).
+
+    config WAKE_WORD_ENGINE_DET_TIMEOUT
+        int "Detection timeout (ms)"
+        default 2000
+        range 500 10000
+        depends on WAKE_WORD_ENGINE_ENABLE
+        help
+            Timeout for MultiNet command phrase detection after wake word.
+            Duration in milliseconds the engine waits for a complete phrase.
+
+endmenu

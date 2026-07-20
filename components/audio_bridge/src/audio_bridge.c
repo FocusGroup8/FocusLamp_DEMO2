@@ -92,6 +92,19 @@ static StaticTask_t s_decode_task_tcb;
 static StackType_t s_decode_task_stack[DECODE_TASK_STACK_SIZE];
 
 /*---------------------------------------------------------------
+ * TTS Reference signal ring buffer for AEC
+ *
+ * When AEC is enabled, write_pcm_to_i2s() also pushes the 16-bit PCM
+ * data (after volume scaling) into this ring buffer. The wake word
+ * engine reads from it to feed AFE's reference channel.
+ *
+ * Buffer size: ~1 second of 16kHz mono PCM = 32000 bytes.
+ *-------------------------------------------------------------*/
+#include "freertos/ringbuf.h"
+static RingbufHandle_t s_ref_ringbuf = NULL;
+#define REF_RINGBUF_SIZE  (16000 * 2)  /* 1 second of 16-bit 16kHz mono */
+
+/*---------------------------------------------------------------
  * OPUS decoder helpers
  *-------------------------------------------------------------*/
 static esp_err_t opus_decoder_create(void)
@@ -183,9 +196,19 @@ static esp_err_t write_pcm_to_i2s(const int16_t *pcm_data, size_t sample_count)
     /* 音量缩放因子：0-100% 映射到 0-0x7FFF */
     int32_t vol_scale = (s_volume * 0x7FFF) / 100;
 
+    /* Push volume-scaled 16-bit PCM to reference ring buffer for AEC.
+     * This must be done BEFORE the 32-bit expansion overwrites the buffer. */
+    if (s_ref_ringbuf != NULL) {
+        int16_t ref_buf[960];
+        for (size_t i = 0; i < sample_count; i++) {
+            ref_buf[i] = (int16_t)((int32_t)pcm_data[i] * vol_scale / 0x7FFF);
+        }
+        xRingbufferSend(s_ref_ringbuf, ref_buf, sample_count * sizeof(int16_t), 0);
+    }
+
+    /* 16-bit有符号扩展到32-bit，左移16位对齐到32-bit I2S slot高有效位 */
     for (size_t i = 0; i < sample_count; i++) {
         int32_t sample = (int32_t)pcm_data[i];
-        /* 16-bit有符号扩展到32-bit，左移16位对齐到32-bit I2S slot高有效位 */
         sample = sample * vol_scale / 0x7FFF;
         s_pcm32_buf[i] = sample << 16;
     }
@@ -521,6 +544,17 @@ esp_err_t audio_bridge_init(const audio_bridge_config_t *config)
         goto cleanup_channels;
     }
 
+    // Step 6: Create reference signal ring buffer for AEC
+    // Use RINGBUF_TYPE_BYTEBUF (not NOSPLIT) because xRingbufferReceiveUpTo()
+    // only supports BYTEBUF and RINGBUF types. PCM ref data is a byte stream,
+    // so BYTEBUF is the correct choice (allows partial reads via ReceiveUpTo).
+    s_ref_ringbuf = xRingbufferCreate(REF_RINGBUF_SIZE, RINGBUF_TYPE_BYTEBUF);
+    if (s_ref_ringbuf == NULL) {
+        ESP_LOGW(TAG, "Failed to create AEC ref ringbuf — AEC will be unavailable");
+    } else {
+        ESP_LOGI(TAG, "AEC reference ringbuf created (%d bytes)", REF_RINGBUF_SIZE);
+    }
+
     s_initialized = true;
     ESP_LOGI(TAG, "Audio bridge initialized successfully (dedicated decode task)");
     return ESP_OK;
@@ -557,6 +591,11 @@ esp_err_t audio_bridge_deinit(void)
     if (s_rx_handle) {
         i2s_del_channel(s_rx_handle);
         s_rx_handle = NULL;
+    }
+
+    if (s_ref_ringbuf != NULL) {
+        vRingbufferDelete(s_ref_ringbuf);
+        s_ref_ringbuf = NULL;
     }
 
     s_initialized = false;
@@ -671,6 +710,10 @@ static volatile bool s_mic_task_running = false;
 static audio_bridge_mic_callback_t s_mic_callback = NULL;
 static void *s_mic_callback_ctx = NULL;
 
+/* Raw PCM callback for wake word engine (ESP-SR AFE/MultiNet) */
+static audio_bridge_pcm_callback_t s_pcm_callback = NULL;
+static void *s_pcm_callback_ctx = NULL;
+
 /* OPUS encoder state (created on first mic_start) */
 static void *s_opus_encoder = NULL;
 
@@ -697,9 +740,18 @@ static esp_err_t opus_encoder_create(void)
         return ESP_OK;
     }
 
-    /* Force internal RAM for encoder too (same PSRAM issue as decoder) */
-    size_t saved_limit = CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL;
-    heap_caps_malloc_extmem_enable((size_t)-1);
+    /* OPUS encoder memory allocation diagnostics.
+     * Previous code forced all malloc to internal RAM via
+     * heap_caps_malloc_extmem_enable((size_t)-1), which caused
+     * OPUS_ALLOC_FAIL (-7) when internal RAM was insufficient
+     * (AFE task + wake word engine already consume significant internal RAM).
+     * Now use default allocation strategy (PSRAM-preferred), aligned with
+     * official esp_xiaozhi audio_service.h which does NOT force internal RAM.
+     * OPUS encoder does not use PIE SIMD on its working data (unlike decoder),
+     * so PSRAM allocation is safe here. */
+    ESP_LOGI(TAG, "OPUS encoder create: internal free=%u, PSRAM free=%u",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
     esp_opus_enc_config_t cfg = {
         .sample_rate      = ESP_AUDIO_SAMPLE_RATE_16K,
@@ -708,22 +760,24 @@ static esp_err_t opus_encoder_create(void)
         .bitrate          = ESP_OPUS_BITRATE_AUTO,
         .frame_duration   = ESP_OPUS_ENC_FRAME_DURATION_60_MS,
         .application_mode = ESP_OPUS_ENC_APPLICATION_VOIP,
-        .complexity       = 5,
+        .complexity       = 0,
         .enable_fec       = false,
         .enable_dtx       = true,
         .enable_vbr       = true,
     };
 
     esp_audio_err_t ret = esp_opus_enc_open(&cfg, sizeof(cfg), &s_opus_encoder);
-    heap_caps_malloc_extmem_enable(saved_limit);
 
     if (ret != ESP_AUDIO_ERR_OK || s_opus_encoder == NULL) {
-        ESP_LOGE(TAG, "Failed to open OPUS encoder: %d", ret);
+        ESP_LOGE(TAG, "Failed to open OPUS encoder: %d (internal free=%u, PSRAM free=%u)",
+                 ret,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
         s_opus_encoder = NULL;
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "OPUS encoder created (16kHz, mono, 60ms, VOIP, internal RAM)");
+    ESP_LOGI(TAG, "OPUS encoder created (16kHz, mono, 60ms, VOIP, complexity=0)");
     return ESP_OK;
 }
 
@@ -794,6 +848,11 @@ static void mic_task(void *arg)
         for (int i = 0; i < MIC_FRAME_SAMPLES; i++) {
             /* I2S data is left-shifted by 16 bits, right-shift to get 16-bit */
             pcm16_buf[i] = (int16_t)(i2s_rx_buf[i] >> 16);
+        }
+
+        /* Deliver raw PCM to wake word engine if registered */
+        if (s_pcm_callback != NULL) {
+            s_pcm_callback(pcm16_buf, MIC_FRAME_SAMPLES, s_pcm_callback_ctx);
         }
 
         /* Debug: log first few raw I2S samples and PCM values every 50 frames */
@@ -929,21 +988,86 @@ esp_err_t audio_bridge_mic_stop(void)
 
     s_mic_task_running = false;
 
-    /* Wait for task to exit */
-    vTaskDelay(pdMS_TO_TICKS(200));
-
-    s_mic_task_handle = NULL;
-    s_mic_callback = NULL;
-    s_mic_callback_ctx = NULL;
-
-    /* Disable RX channel when mic stops.
-     * Next mic_start will re-enable with a fresh DMA state. */
+    /* Step 1: Disable RX channel FIRST to unblock any pending i2s_channel_read().
+     * When the RX channel is disabled, pending reads return immediately with
+     * ESP_ERR_INVALID_STATE, allowing the task to check s_mic_task_running
+     * and exit its main loop. The previous order (delay -> NULL handle -> disable)
+     * left the task blocked in i2s_channel_read for up to 1000ms, then
+     * mic_start reused the StaticTask's TCB/stack while the old task was
+     * still running, corrupting AFE ringbuffer state. */
     if (s_rx_handle) {
         i2s_channel_disable(s_rx_handle);
     }
 
+    /* Step 2: Wait for task to actually exit (up to 2000ms).
+     * mic_task sets s_mic_task_handle = NULL in its cleanup path
+     * before calling vTaskDelete(NULL). Polling this variable guarantees
+     * we don't return before the task has fully exited, which would
+     * let mic_start overwrite the StaticTask's memory while the old
+     * task is still running. */
+    int wait_ms = 0;
+    while (s_mic_task_handle != NULL && wait_ms < 2000) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+        wait_ms += 50;
+    }
+
+    if (s_mic_task_handle != NULL) {
+        /* Task did not exit gracefully -- force delete as last resort.
+         * For StaticTask, vTaskDelete only removes the task from the
+         * scheduler lists; it does not free the static TCB/stack.
+         * Safe but may leak resources if the task was holding locks. */
+        ESP_LOGW(TAG, "Mic task did not exit in 2000ms, force deleting");
+        TaskHandle_t handle = s_mic_task_handle;
+        s_mic_task_handle = NULL;
+        vTaskDelete(handle);
+    }
+
+    s_mic_callback = NULL;
+    s_mic_callback_ctx = NULL;
+
     ESP_LOGI(TAG, "Mic task stopped");
     return ESP_OK;
+}
+
+void audio_bridge_register_pcm_callback(audio_bridge_pcm_callback_t callback, void *ctx)
+{
+    s_pcm_callback = callback;
+    s_pcm_callback_ctx = ctx;
+    if (callback) {
+        ESP_LOGI(TAG, "PCM callback registered for wake word engine");
+    } else {
+        ESP_LOGI(TAG, "PCM callback unregistered");
+    }
+}
+
+int audio_bridge_read_ref_pcm(int16_t *out_buf, int samples, uint32_t timeout_ms)
+{
+    if (out_buf == NULL || samples <= 0) {
+        return -1;
+    }
+    if (s_ref_ringbuf == NULL) {
+        memset(out_buf, 0, samples * sizeof(int16_t));
+        return 0;
+    }
+
+    size_t needed = samples * sizeof(int16_t);
+    size_t item_size = 0;
+    char *item = (char *)xRingbufferReceiveUpTo(s_ref_ringbuf, &item_size, pdMS_TO_TICKS(timeout_ms), needed);
+
+    if (item != NULL && item_size > 0) {
+        int samples_read = item_size / sizeof(int16_t);
+        memcpy(out_buf, item, item_size);
+        vRingbufferReturnItem(s_ref_ringbuf, item);
+        /* Zero-fill remaining if we got less than requested */
+        if (samples_read < samples) {
+            memset(&out_buf[samples_read], 0, (samples - samples_read) * sizeof(int16_t));
+        }
+        return samples_read;
+    }
+
+    /* No reference data available — silence (no TTS playing) */
+    memset(out_buf, 0, needed);
+    return 0;
 }
 
 #else /* AUDIO_BRIDGE_ENABLE == 0 */
@@ -1005,6 +1129,20 @@ esp_err_t audio_bridge_mic_start(audio_bridge_mic_callback_t callback, void *ctx
 esp_err_t audio_bridge_mic_stop(void)
 {
     return ESP_ERR_NOT_SUPPORTED;
+}
+
+void audio_bridge_register_pcm_callback(audio_bridge_pcm_callback_t callback, void *ctx)
+{
+    (void)callback;
+    (void)ctx;
+}
+
+int audio_bridge_read_ref_pcm(int16_t *out_buf, int samples, uint32_t timeout_ms)
+{
+    (void)out_buf;
+    (void)samples;
+    (void)timeout_ms;
+    return -1;
 }
 
 #endif /* AUDIO_BRIDGE_ENABLE */

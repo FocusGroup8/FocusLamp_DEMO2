@@ -28,7 +28,7 @@ typedef struct {
 }
 
 /**
- * @brief Microphone audio output callback
+ * @brief Microphone audio output callback (OPUS-encoded)
  *
  * Called by audio_bridge when OPUS-encoded microphone audio is ready.
  * The callee must consume or copy the data before returning.
@@ -38,6 +38,19 @@ typedef struct {
  * @param ctx User context provided in audio_bridge_mic_start()
  */
 typedef void (*audio_bridge_mic_callback_t)(const uint8_t *opus_data, int len, void *ctx);
+
+/**
+ * @brief Raw PCM audio data callback (16-bit, 16kHz, mono)
+ *
+ * Called by audio_bridge when raw PCM microphone data is available,
+ * after I2S 32-bit→16-bit down-sampling but before OPUS encoding.
+ * Used by wake word engine (ESP-SR) to feed AFE/MultiNet.
+ *
+ * @param pcm_data  16-bit signed PCM samples (16kHz mono, 960 samples/frame)
+ * @param sample_count Number of samples in this frame
+ * @param ctx User context provided in audio_bridge_register_pcm_callback()
+ */
+typedef void (*audio_bridge_pcm_callback_t)(const int16_t *pcm_data, int sample_count, void *ctx);
 
 /**
  * @brief Initialize audio bridge (I2S full-duplex)
@@ -95,6 +108,35 @@ esp_err_t audio_bridge_mic_start(audio_bridge_mic_callback_t callback, void *ctx
  * @brief Stop microphone capture
  */
 esp_err_t audio_bridge_mic_stop(void);
+
+/**
+ * @brief Register a raw PCM data callback for wake word engine
+ *
+ * The callback is called from the mic task context each time a PCM frame
+ * is available (960 samples, 16kHz, mono, 60ms). This must be called
+ * BEFORE audio_bridge_mic_start() for the callback to take effect.
+ *
+ * @param callback Function called for each PCM frame (NULL to unregister)
+ * @param ctx User context passed to callback
+ */
+void audio_bridge_register_pcm_callback(audio_bridge_pcm_callback_t callback, void *ctx);
+
+/**
+ * @brief Read TTS reference PCM data for AEC (Acoustic Echo Cancellation)
+ *
+ * Reads 16-bit PCM data that was written to I2S TX (speaker) by the TTS
+ * decode task. This reference signal is fed to ESP-SR AFE's AEC module
+ * alongside microphone input to cancel echo during wake word detection.
+ *
+ * The data is read from an internal ring buffer filled by write_pcm_to_i2s().
+ * If insufficient data is available, the output buffer is zero-filled.
+ *
+ * @param out_buf    Output buffer for 16-bit PCM reference samples
+ * @param samples    Number of samples to read
+ * @param timeout_ms Timeout in ms to wait for data (0 = non-blocking)
+ * @return Number of samples actually read, or -1 on error
+ */
+int audio_bridge_read_ref_pcm(int16_t *out_buf, int samples, uint32_t timeout_ms);
 
 #ifdef __cplusplus
 }

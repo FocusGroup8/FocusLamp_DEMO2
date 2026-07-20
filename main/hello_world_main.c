@@ -216,15 +216,23 @@ void app_main(void)
     /* Step 5: Initialize Wake Word Engine BEFORE xiaozhi_manager_start()
      * so PCM callback is registered before mic_task starts running. */
     wake_word_engine_config_t wake_cfg = WAKE_WORD_ENGINE_DEFAULT_CONFIG();
+#if defined(CONFIG_SR_MN_EN_MULTINET7_QUANT)
+    wake_cfg.default_lang = WAKE_WORD_LANG_EN;
+#else
     wake_cfg.default_lang = WAKE_WORD_LANG_CN;
+#endif
     wake_cfg.detect_cb = wake_word_detect_callback;
     wake_cfg.det_timeout_ms = 2000;
 
     err = wake_word_engine_init(&wake_cfg);
     if (err == ESP_OK) {
-        /* Register custom wake word commands (pinyin for Chinese model) */
+        /* Register custom wake word commands based on compiled model */
+#if defined(CONFIG_SR_MN_EN_MULTINET7_QUANT)
+        wake_word_engine_add_command(1, "focus");
+#elif defined(CONFIG_SR_MN_CN_MULTINET7_QUANT)
         wake_word_engine_add_command(1, "ni hao xiao zhi");  /* 你好小智 */
         wake_word_engine_add_command(2, "xiao zhi xiao zhi"); /* 小智小智 */
+#endif
         void *cmd_err = wake_word_engine_update_commands();
         if (cmd_err != NULL) {
             ESP_LOGW(TAG, "Some wake word commands could not be parsed");
@@ -236,7 +244,11 @@ void app_main(void)
         /* Start wake word detection */
         err = wake_word_engine_start();
         if (err == ESP_OK) {
-            ESP_LOGI(TAG, "Wake word engine started — listening for 'ni hao xiao zhi'");
+#if defined(CONFIG_SR_MN_EN_MULTINET7_QUANT)
+            ESP_LOGI(TAG, "Wake word engine started — listening for 'focus'");
+#elif defined(CONFIG_SR_MN_CN_MULTINET7_QUANT)
+            ESP_LOGI(TAG, "Wake word engine started — listening for 'ni hao xiao zhi', 'xiao zhi xiao zhi'");
+#endif
         } else {
             ESP_LOGE(TAG, "Wake word engine start failed: %s", esp_err_to_name(err));
         }

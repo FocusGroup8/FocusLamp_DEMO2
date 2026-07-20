@@ -24,6 +24,14 @@
 
 #if (WAKE_WORD_ENGINE_ENABLE == 1)
 
+/* Compile-time guard: only one MultiNet model can be enabled at a time.
+ * Enabling both mn7_cn and mn7_en causes G2P conflict in esp_mn_commands_add()
+ * (flite_g2p incorrectly converts Chinese pinyin to English phonemes).
+ * Select only one model in menuconfig: ESP Speech Recognition -> Select MultiNet Model. */
+#if defined(CONFIG_SR_MN_CN_MULTINET7_QUANT) && defined(CONFIG_SR_MN_EN_MULTINET7_QUANT)
+#error "Cannot enable both mn7_cn and mn7_en simultaneously. Please select only one in menuconfig."
+#endif
+
 #include <string.h>
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -39,6 +47,7 @@
 #include "esp_mn_iface.h"
 #include "esp_mn_speech_commands.h"
 #include "model_path.h"
+#include "flite_g2p.h"  /* English G2P for mn7_en command phoneme generation */
 
 /* Audio bridge for PCM callback registration */
 #include "audio_bridge.h"
@@ -88,6 +97,32 @@ static volatile uint32_t s_diag_fetch_count = 0;      /* afe_processing_task fet
 static volatile uint32_t s_diag_detect_count = 0;     /* MultiNet detect invocations */
 static volatile uint32_t s_diag_detecting_count = 0;  /* ESP_MN_STATE_DETECTING count */
 static volatile uint32_t s_diag_timeout_count = 0;    /* ESP_MN_STATE_TIMEOUT count */
+
+/*---------------------------------------------------------------
+ * Stored commands (for re-registration on language switch)
+ *
+ * When wake_word_engine_set_language() is called, all registered
+ * commands are freed (because the MultiNet model is destroyed and
+ * recreated). To support seamless language switching, we store
+ * each command with its language tag. After switching to a new
+ * language, only commands matching the new language are re-added.
+ *-------------------------------------------------------------*/
+#define WAKE_WORD_MAX_STORED_COMMANDS 20
+
+typedef struct {
+    int command_id;
+    char phrase[64];
+    wake_word_lang_t lang;
+    bool active;
+} stored_command_t;
+
+static stored_command_t s_stored_commands[WAKE_WORD_MAX_STORED_COMMANDS];
+static int s_stored_command_count = 0;
+
+/* Forward declaration: used by wake_word_engine_set_language() and
+ * wake_word_engine_add_command() to register commands with the correct
+ * phoneme generation strategy based on language. */
+static esp_err_t register_command_internal(int command_id, const char *phrase, wake_word_lang_t lang);
 
 /*---------------------------------------------------------------
  * Internal helpers
@@ -778,6 +813,32 @@ esp_err_t wake_word_engine_set_language(wake_word_lang_t lang)
     /* Allocate new commands list */
     esp_mn_commands_alloc(s_mn_handle, s_mn_data);
 
+    /* Re-register commands matching the new language.
+     * Commands are stored with their original language tag;
+     * only commands matching the new language are re-added.
+     * This allows users to pre-register commands for both languages
+     * (e.g., CN commands "ni hao xiao zhi" + EN commands "focus")
+     * and switch between them without re-adding each time. */
+    int re_added = 0;
+    for (int i = 0; i < s_stored_command_count; i++) {
+        if (s_stored_commands[i].active && s_stored_commands[i].lang == lang) {
+            esp_err_t cmd_ret = register_command_internal(
+                s_stored_commands[i].command_id,
+                s_stored_commands[i].phrase,
+                lang);
+            if (cmd_ret == ESP_OK) {
+                re_added++;
+            } else {
+                ESP_LOGW(TAG, "Failed to re-add command '%s' after language switch",
+                         s_stored_commands[i].phrase);
+            }
+        }
+    }
+    if (re_added > 0) {
+        esp_mn_commands_update();
+    }
+    ESP_LOGI(TAG, "Re-registered %d command(s) for %s", re_added, lang_to_string(lang));
+
     /* Reset MultiNet input buffer and update chunk size for new model */
     s_mn_input_samples = 0;
     s_mn_chunk_size = s_mn_handle->get_samp_chunksize(s_mn_data);
@@ -801,6 +862,44 @@ wake_word_lang_t wake_word_engine_get_language(void)
     return s_current_lang;
 }
 
+/*---------------------------------------------------------------
+ * Internal: register command with ESP-SR based on language
+ *
+ * Uses esp_mn_commands_phoneme_add() instead of esp_mn_commands_add()
+ * to bypass the compile-time #ifdef in ESP-SR that forces ALL commands
+ * through English flite_g2p() when CONFIG_SR_MN_EN_MULTINET7_QUANT is
+ * defined. This would corrupt Chinese pinyin (e.g., "ni hao xiao zhi"
+ * gets English G2P conversion, producing wrong phonemes that mn7_cn
+ * rejects).
+ *
+ * By calling phoneme_add() directly, we control phoneme generation:
+ *   - CN model: pinyin IS the phoneme unit (pass phrase as phonemes)
+ *   - EN model: call flite_g2p() to convert English text to phonemes
+ *-------------------------------------------------------------*/
+static esp_err_t register_command_internal(int command_id, const char *phrase, wake_word_lang_t lang)
+{
+    esp_err_t ret;
+    if (lang == WAKE_WORD_LANG_EN) {
+        /* English: convert graphemes to phonemes via flite_g2p */
+        char *phonemes = flite_g2p(phrase, 1);
+        if (phonemes == NULL) {
+            ESP_LOGE(TAG, "flite_g2p failed for '%s'", phrase);
+            return ESP_FAIL;
+        }
+        ESP_LOGI(TAG, "Adding EN command: id=%d, phrase='%s', phonemes='%s'",
+                 command_id, phrase, phonemes);
+        ret = esp_mn_commands_phoneme_add(command_id, phrase, phonemes);
+        free(phonemes);
+    } else {
+        /* Chinese: pinyin IS the phoneme unit for mn7_cn.
+         * Pass pinyin as both string and phonemes. */
+        ESP_LOGI(TAG, "Adding CN command: id=%d, phrase='%s' (pinyin as phoneme)",
+                 command_id, phrase);
+        ret = esp_mn_commands_phoneme_add(command_id, phrase, phrase);
+    }
+    return ret;
+}
+
 esp_err_t wake_word_engine_add_command(int command_id, const char *phrase)
 {
     if (!s_initialized) {
@@ -810,7 +909,21 @@ esp_err_t wake_word_engine_add_command(int command_id, const char *phrase)
         return ESP_ERR_INVALID_ARG;
     }
 
-    return esp_mn_commands_add(command_id, phrase);
+    /* Store command for re-registration on language switch.
+     * Each command is tagged with the current language so that
+     * wake_word_engine_set_language() knows which commands to re-add. */
+    if (s_stored_command_count < WAKE_WORD_MAX_STORED_COMMANDS) {
+        s_stored_commands[s_stored_command_count].command_id = command_id;
+        strncpy(s_stored_commands[s_stored_command_count].phrase, phrase, 63);
+        s_stored_commands[s_stored_command_count].phrase[63] = '\0';
+        s_stored_commands[s_stored_command_count].lang = s_current_lang;
+        s_stored_commands[s_stored_command_count].active = true;
+        s_stored_command_count++;
+    } else {
+        ESP_LOGW(TAG, "Command storage full, cannot store '%s' for re-registration", phrase);
+    }
+
+    return register_command_internal(command_id, phrase, s_current_lang);
 }
 
 esp_err_t wake_word_engine_remove_command(const char *phrase)

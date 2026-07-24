@@ -122,7 +122,7 @@ static void xiaozhi_event_callback(xiaozhi_manager_event_t event, void *data, vo
         ESP_LOGI(TAG, "[Xiaozhi] TTS started");
         break;
     case XIAOZHI_MANAGER_EVENT_TTS_STOP:
-        ESP_LOGI(TAG, "[Xiaozhi] TTS stopped — waiting for next wake word");
+        ESP_LOGI(TAG, "[Xiaozhi] TTS stopped — continuing conversation (listening)");
         break;
     case XIAOZHI_MANAGER_EVENT_TTS_SENTENCE:
         ESP_LOGI(TAG, "[Xiaozhi] TTS sentence: %s", data ? (const char *)data : "");

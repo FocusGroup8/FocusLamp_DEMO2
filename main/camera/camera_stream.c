@@ -185,6 +185,16 @@ esp_err_t camera_stream_start(void)
         return ESP_ERR_INVALID_STATE;
     }
 
+    /* DEBT: [High] Camera stop→start causes capture_frame timeout (5s).
+     * The CSI controller's on_get_new_trans + on_trans_finished notification
+     * mechanism does not correctly recover after esp_cam_ctlr_stop() followed
+     * by esp_cam_ctlr_start(). The DMA ISR stops triggering on_trans_finished
+     * callbacks after restart, causing ulTaskNotifyTake() to time out.
+     * Workaround: avoid calling camera_stream_stop() followed by
+     * camera_stream_start() in the same session. If restart is needed,
+     * perform a full deinit/init cycle instead.
+     * Decision: marked as known issue (2026-07-24, user confirmed). */
+
     /* Start camera pipeline */
     esp_err_t ret = camera_controller_start(s_state.config.camera);
     if (ret != ESP_OK) {

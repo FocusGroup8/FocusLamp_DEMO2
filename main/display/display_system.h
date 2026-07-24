@@ -120,6 +120,26 @@ esp_err_t display_system_stop(const display_handles_t *handles);
 display_state_t display_system_get_state(void);
 
 /**
+ * @brief Show black screen (display "off" visual effect)
+ *
+ * Clears the active screen and fills it with black.
+ * Only works in LVGL mode. Can be restored with display_system_show_ui().
+ *
+ * @return ESP_OK on success, ESP_ERR_NOT_SUPPORTED if not in LVGL mode
+ */
+esp_err_t display_system_show_black_screen(void);
+
+/**
+ * @brief Restore demo UI (display "on" visual effect)
+ *
+ * Recreates the demo UI on the active screen.
+ * Only works in LVGL mode.
+ *
+ * @return ESP_OK on success, ESP_ERR_NOT_SUPPORTED if not in LVGL mode
+ */
+esp_err_t display_system_show_ui(void);
+
+/**
  * @brief Deinitialize display system
  *
  * Releases all resources:

@@ -265,6 +265,39 @@ display_state_t display_system_get_state(void)
     return s_state;
 }
 
+esp_err_t display_system_show_black_screen(void)
+{
+    if (s_config.mode != DISPLAY_MODE_LVGL || s_lvgl_ctx.disp == NULL) {
+        ESP_LOGW(TAG, "Show black screen only supported in LVGL mode");
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    lvgl_port_lock(0);
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_clean(scr);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lvgl_port_unlock();
+
+    ESP_LOGI(TAG, "Display: black screen shown");
+    return ESP_OK;
+}
+
+esp_err_t display_system_show_ui(void)
+{
+    if (s_config.mode != DISPLAY_MODE_LVGL || s_lvgl_ctx.disp == NULL) {
+        ESP_LOGW(TAG, "Show UI only supported in LVGL mode");
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    lvgl_port_lock(0);
+    lvgl_display_demo_ui(&s_lvgl_ctx);
+    lvgl_port_unlock();
+
+    ESP_LOGI(TAG, "Display: demo UI restored");
+    return ESP_OK;
+}
+
 void display_system_deinit(display_handles_t *handles)
 {
     ESP_LOGI(TAG, "Deinitializing display system...");

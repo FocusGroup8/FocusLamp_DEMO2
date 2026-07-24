@@ -437,6 +437,7 @@ esp_err_t ws_manager_server_start(void)
 
     httpd_config_t config   = HTTPD_DEFAULT_CONFIG();
     config.server_port      = WS_MANAGER_SERVER_PORT;
+    config.max_uri_handlers = 16;                             /* 4(WebSocket URIs) + 9(REST API) + 3(reserved) */
     config.max_open_sockets = WS_MANAGER_SERVER_MAX_CONN + 2; /* Reserve for HTTP + control */
     config.close_fn         = ws_session_close_cb;
 
@@ -485,6 +486,17 @@ esp_err_t ws_manager_server_stop(void)
 bool ws_manager_server_is_running(void)
 {
     return s_server_running;
+}
+
+esp_err_t ws_manager_server_register_uri(const httpd_uri_t *uri)
+{
+    if (!s_server_running || s_server == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!uri) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return httpd_register_uri_handler(s_server, uri);
 }
 
 esp_err_t ws_manager_server_send_text(int client_fd, const char *data, int len)

@@ -70,7 +70,7 @@ endif()
 
 # Component dependencies
 set(COMP_REQUIRES "esp_driver_ppa" "esp_driver_jpeg" "wifi_manager" "websocket_manager" "task_manager")
-set(COMP_PRIV_REQUIRES "esp_mm" "esp_timer" "json")
+set(COMP_PRIV_REQUIRES "esp_mm" "esp_timer" "json" "esp_http_server")
 
 if(CONFIG_EXAMPLE_ENABLE_CAMERA)
     list(APPEND COMP_REQUIRES "espressif__esp_cam_sensor" "espressif__esp_sccb_intf")

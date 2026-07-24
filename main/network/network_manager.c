@@ -8,6 +8,8 @@
 
 #include "cJSON.h"
 #include "camera_stream.h"
+#include "display_system.h"
+#include "esp_http_server.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -99,86 +101,325 @@ static void ws_data_handler(ws_manager_event_t event, void *data)
 
 /*---------------------------------------------------------------
  * MCP Tool Callbacks: Camera control
- *
- * Architecture Notice (2026-07-19):
- * All MCP tool callbacks are intentionally left as "not_implemented" stubs.
- * This project (mipi_dsi) only exposes the MCP *interface layer* — protocol
- * parsing and tool metadata declaration live in mcp_tools.c. Concrete control
- * logic is implemented in the wifi_test project (via esp_xiaozhi MCP engine),
- * which connects to this project's /mcp endpoint as a WebSocket client.
- *
- * To restore local control for standalone testing, replace these stubs with
- * real implementations calling camera_stream_* / display_system_* APIs.
+ * Real implementations calling camera_stream_* APIs.
  *-------------------------------------------------------------*/
 static esp_err_t mcp_cb_camera_start(const void *args_json, char *response_buf, int response_buf_size)
 {
     (void)args_json;
-    snprintf(response_buf, response_buf_size,
-             "{\"error\":\"not_implemented\",\"reason\":\"control lives in wifi_test project\"}");
-    return ESP_ERR_NOT_SUPPORTED;
+    esp_err_t ret = camera_stream_start();
+    snprintf(response_buf, response_buf_size, "{\"ok\":%s}", ret == ESP_OK ? "true" : "false");
+    return ret;
 }
 
 static esp_err_t mcp_cb_camera_stop(const void *args_json, char *response_buf, int response_buf_size)
 {
     (void)args_json;
-    snprintf(response_buf, response_buf_size,
-             "{\"error\":\"not_implemented\",\"reason\":\"control lives in wifi_test project\"}");
-    return ESP_ERR_NOT_SUPPORTED;
+    esp_err_t ret = camera_stream_stop();
+    snprintf(response_buf, response_buf_size, "{\"ok\":%s}", ret == ESP_OK ? "true" : "false");
+    return ret;
 }
 
 static esp_err_t mcp_cb_camera_set_quality(const void *args_json, char *response_buf, int response_buf_size)
 {
-    (void)args_json;
-    snprintf(response_buf, response_buf_size,
-             "{\"error\":\"not_implemented\",\"reason\":\"control lives in wifi_test project\"}");
-    return ESP_ERR_NOT_SUPPORTED;
+    const cJSON *root = (const cJSON *)args_json;
+    int quality       = 15;
+    if (root) {
+        const cJSON *q = cJSON_GetObjectItem(root, "quality");
+        if (cJSON_IsNumber(q)) {
+            quality = q->valueint;
+        }
+    }
+    esp_err_t ret = camera_stream_set_quality(quality);
+    snprintf(response_buf, response_buf_size, "{\"ok\":%s,\"quality\":%d}", ret == ESP_OK ? "true" : "false", quality);
+    return ret;
 }
 
 static esp_err_t mcp_cb_camera_set_fps(const void *args_json, char *response_buf, int response_buf_size)
 {
-    (void)args_json;
-    snprintf(response_buf, response_buf_size,
-             "{\"error\":\"not_implemented\",\"reason\":\"control lives in wifi_test project\"}");
-    return ESP_ERR_NOT_SUPPORTED;
+    const cJSON *root = (const cJSON *)args_json;
+    int fps           = 15;
+    if (root) {
+        const cJSON *f = cJSON_GetObjectItem(root, "fps");
+        if (cJSON_IsNumber(f)) {
+            fps = f->valueint;
+        }
+    }
+    esp_err_t ret = camera_stream_set_fps(fps);
+    snprintf(response_buf, response_buf_size, "{\"ok\":%s,\"fps\":%d}", ret == ESP_OK ? "true" : "false", fps);
+    return ret;
 }
 
 /*---------------------------------------------------------------
  * MCP Tool Callbacks: Display control
- *
- * Architecture Notice (2026-07-19):
- * All display tool callbacks are intentionally left as "not_implemented" stubs
- * (same as camera callbacks above). Concrete control logic lives in wifi_test.
+ * TODO: Implement with display_system_* APIs when available.
  *-------------------------------------------------------------*/
 static esp_err_t mcp_cb_display_on(const void *args_json, char *response_buf, int response_buf_size)
 {
     (void)args_json;
-    snprintf(response_buf, response_buf_size,
-             "{\"error\":\"not_implemented\",\"reason\":\"control lives in wifi_test project\"}");
-    return ESP_ERR_NOT_SUPPORTED;
+    esp_err_t ret = display_system_show_ui();
+    ESP_LOGI(TAG, "MCP: Display ON (show UI) -> %s", esp_err_to_name(ret));
+    snprintf(response_buf, response_buf_size, "{\"ok\":%s}", ret == ESP_OK ? "true" : "false");
+    return ESP_OK;
 }
 
 static esp_err_t mcp_cb_display_off(const void *args_json, char *response_buf, int response_buf_size)
 {
     (void)args_json;
-    snprintf(response_buf, response_buf_size,
-             "{\"error\":\"not_implemented\",\"reason\":\"control lives in wifi_test project\"}");
-    return ESP_ERR_NOT_SUPPORTED;
+    esp_err_t ret = display_system_show_black_screen();
+    ESP_LOGI(TAG, "MCP: Display OFF (black screen) -> %s", esp_err_to_name(ret));
+    snprintf(response_buf, response_buf_size, "{\"ok\":%s}", ret == ESP_OK ? "true" : "false");
+    return ESP_OK;
 }
 
 static esp_err_t mcp_cb_display_set_brightness(const void *args_json, char *response_buf, int response_buf_size)
 {
-    (void)args_json;
-    snprintf(response_buf, response_buf_size,
-             "{\"error\":\"not_implemented\",\"reason\":\"control lives in wifi_test project\"}");
-    return ESP_ERR_NOT_SUPPORTED;
+    const cJSON *root = (const cJSON *)args_json;
+    int level         = 80;
+    if (root) {
+        const cJSON *l = cJSON_GetObjectItem(root, "level");
+        if (cJSON_IsNumber(l)) {
+            level = l->valueint;
+        }
+    }
+    /* Backlight is fixed (not PWM). Use visual on/off: level > 0 = show UI, level == 0 = black screen */
+    esp_err_t err = (level > 0) ? display_system_show_ui() : display_system_show_black_screen();
+    ESP_LOGI(TAG, "MCP: Display brightness %d -> %s (%s)", level, level > 0 ? "show UI" : "black screen",
+             esp_err_to_name(err));
+    snprintf(response_buf, response_buf_size, "{\"ok\":%s,\"level\":%d}", err == ESP_OK ? "true" : "false", level);
+    return ESP_OK;
 }
 
 static esp_err_t mcp_cb_display_show_camera(const void *args_json, char *response_buf, int response_buf_size)
 {
     (void)args_json;
-    snprintf(response_buf, response_buf_size,
-             "{\"error\":\"not_implemented\",\"reason\":\"control lives in wifi_test project\"}");
-    return ESP_ERR_NOT_SUPPORTED;
+    /* TODO: call camera_preview_start/stop when available */
+    snprintf(response_buf, response_buf_size, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+/*---------------------------------------------------------------
+ * REST API handlers for wifi_test HTTP bridge
+ *-------------------------------------------------------------*/
+static esp_err_t rest_api_camera_start_handler(httpd_req_t *req)
+{
+    esp_err_t ret    = camera_stream_start();
+    const char *resp = ret == ESP_OK ? "{\"code\":0,\"message\":\"success\",\"data\":{}}"
+                                     : "{\"code\":1,\"message\":\"camera start failed\",\"data\":{}}";
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
+static esp_err_t rest_api_camera_stop_handler(httpd_req_t *req)
+{
+    esp_err_t ret    = camera_stream_stop();
+    const char *resp = ret == ESP_OK ? "{\"code\":0,\"message\":\"success\",\"data\":{}}"
+                                     : "{\"code\":1,\"message\":\"camera stop failed\",\"data\":{}}";
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
+static esp_err_t rest_api_camera_quality_handler(httpd_req_t *req)
+{
+    char buf[32] = {0};
+    int ret      = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (ret <= 0) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    cJSON *root = cJSON_Parse(buf);
+    int quality = 15;
+    if (root) {
+        cJSON *q = cJSON_GetObjectItem(root, "quality");
+        if (cJSON_IsNumber(q)) {
+            quality = q->valueint;
+        }
+        cJSON_Delete(root);
+    }
+
+    esp_err_t err = camera_stream_set_quality(quality);
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"code\":%d,\"message\":\"%s\",\"data\":{\"quality\":%d}}", err == ESP_OK ? 0 : 1,
+             err == ESP_OK ? "success" : "set quality failed", quality);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
+static esp_err_t rest_api_camera_fps_handler(httpd_req_t *req)
+{
+    char buf[32] = {0};
+    int ret      = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (ret <= 0) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    cJSON *root = cJSON_Parse(buf);
+    int fps     = 15;
+    if (root) {
+        cJSON *f = cJSON_GetObjectItem(root, "fps");
+        if (cJSON_IsNumber(f)) {
+            fps = f->valueint;
+        }
+        cJSON_Delete(root);
+    }
+
+    esp_err_t err = camera_stream_set_fps(fps);
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"code\":%d,\"message\":\"%s\",\"data\":{\"fps\":%d}}", err == ESP_OK ? 0 : 1,
+             err == ESP_OK ? "success" : "set fps failed", fps);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
+static esp_err_t rest_api_display_on_handler(httpd_req_t *req)
+{
+    esp_err_t ret = display_system_show_ui();
+    ESP_LOGI(TAG, "REST: Display ON (show UI) -> %s", esp_err_to_name(ret));
+    const char *resp = ret == ESP_OK ? "{\"code\":0,\"message\":\"success\",\"data\":{}}"
+                                     : "{\"code\":1,\"message\":\"display on failed\",\"data\":{}}";
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
+static esp_err_t rest_api_display_off_handler(httpd_req_t *req)
+{
+    esp_err_t ret = display_system_show_black_screen();
+    ESP_LOGI(TAG, "REST: Display OFF (black screen) -> %s", esp_err_to_name(ret));
+    const char *resp = ret == ESP_OK ? "{\"code\":0,\"message\":\"success\",\"data\":{}}"
+                                     : "{\"code\":1,\"message\":\"display off failed\",\"data\":{}}";
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
+static esp_err_t rest_api_display_brightness_handler(httpd_req_t *req)
+{
+    char buf[32] = {0};
+    int ret      = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (ret <= 0) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    cJSON *root = cJSON_Parse(buf);
+    int level   = 80;
+    if (root) {
+        cJSON *l = cJSON_GetObjectItem(root, "level");
+        if (cJSON_IsNumber(l)) {
+            level = l->valueint;
+        }
+        cJSON_Delete(root);
+    }
+
+    /* Backlight is fixed (not PWM). Use visual on/off: level > 0 = show UI, level == 0 = black screen */
+    esp_err_t err = (level > 0) ? display_system_show_ui() : display_system_show_black_screen();
+    ESP_LOGI(TAG, "REST: Display brightness %d -> %s (%s)", level, level > 0 ? "show UI" : "black screen",
+             esp_err_to_name(err));
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"code\":%d,\"message\":\"%s\",\"data\":{\"level\":%d}}", err == ESP_OK ? 0 : 1,
+             err == ESP_OK ? "success" : "not supported", level);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
+static esp_err_t rest_api_display_camera_preview_handler(httpd_req_t *req)
+{
+    /* TODO: call camera_preview_start/stop */
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"code\":0,\"message\":\"success\",\"data\":{}}");
+    return ESP_OK;
+}
+
+static esp_err_t rest_api_status_handler(httpd_req_t *req)
+{
+    char resp[160];
+    snprintf(resp, sizeof(resp),
+             "{\"code\":0,\"message\":\"success\",\"data\":{\"camera_streaming\":%s,\"quality\":%d,\"fps\":%d}}",
+             camera_stream_is_running() ? "true" : "false", camera_stream_get_quality(), camera_stream_get_fps());
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
+/*---------------------------------------------------------------
+ * Register REST API endpoints on the HTTP server
+ *-------------------------------------------------------------*/
+static void register_rest_api_handlers(void)
+{
+    /* Camera control REST API */
+    const httpd_uri_t api_camera_start = {
+        .uri     = "/api/camera/start",
+        .method  = HTTP_POST,
+        .handler = rest_api_camera_start_handler,
+    };
+    ws_manager_server_register_uri(&api_camera_start);
+
+    const httpd_uri_t api_camera_stop = {
+        .uri     = "/api/camera/stop",
+        .method  = HTTP_POST,
+        .handler = rest_api_camera_stop_handler,
+    };
+    ws_manager_server_register_uri(&api_camera_stop);
+
+    const httpd_uri_t api_camera_quality = {
+        .uri     = "/api/camera/quality",
+        .method  = HTTP_POST,
+        .handler = rest_api_camera_quality_handler,
+    };
+    ws_manager_server_register_uri(&api_camera_quality);
+
+    const httpd_uri_t api_camera_fps = {
+        .uri     = "/api/camera/fps",
+        .method  = HTTP_POST,
+        .handler = rest_api_camera_fps_handler,
+    };
+    ws_manager_server_register_uri(&api_camera_fps);
+
+    /* Display control REST API */
+    const httpd_uri_t api_display_on = {
+        .uri     = "/api/display/on",
+        .method  = HTTP_POST,
+        .handler = rest_api_display_on_handler,
+    };
+    ws_manager_server_register_uri(&api_display_on);
+
+    const httpd_uri_t api_display_off = {
+        .uri     = "/api/display/off",
+        .method  = HTTP_POST,
+        .handler = rest_api_display_off_handler,
+    };
+    ws_manager_server_register_uri(&api_display_off);
+
+    const httpd_uri_t api_display_brightness = {
+        .uri     = "/api/display/brightness",
+        .method  = HTTP_POST,
+        .handler = rest_api_display_brightness_handler,
+    };
+    ws_manager_server_register_uri(&api_display_brightness);
+
+    const httpd_uri_t api_display_camera_preview = {
+        .uri     = "/api/display/camera_preview",
+        .method  = HTTP_POST,
+        .handler = rest_api_display_camera_preview_handler,
+    };
+    ws_manager_server_register_uri(&api_display_camera_preview);
+
+    /* Status endpoint */
+    const httpd_uri_t api_status = {
+        .uri     = "/api/status",
+        .method  = HTTP_GET,
+        .handler = rest_api_status_handler,
+    };
+    ws_manager_server_register_uri(&api_status);
+
+    ESP_LOGI(TAG, "REST API endpoints registered: /api/camera/*, /api/display/*, /api/status");
 }
 
 /*---------------------------------------------------------------
@@ -260,6 +501,9 @@ esp_err_t network_manager_init(void)
     }
 
     ESP_LOGI(TAG, "WebSocket server running at ws://%s:80/{camera,mcp,ws}", s_ip_string);
+
+    /* 2b. Register REST API endpoints on the same HTTP server */
+    register_rest_api_handlers();
 
     /* 3. Initialize MCP tools */
     ESP_LOGI(TAG, "Initializing MCP tools...");

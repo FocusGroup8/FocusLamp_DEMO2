@@ -58,6 +58,10 @@ static esp_mcp_value_t mcp_tool_display_on(const esp_mcp_property_list_t *proper
 static esp_mcp_value_t mcp_tool_display_off(const esp_mcp_property_list_t *properties);
 static esp_mcp_value_t mcp_tool_display_set_brightness(const esp_mcp_property_list_t *properties);
 static esp_mcp_value_t mcp_tool_display_show_camera(const esp_mcp_property_list_t *properties);
+static esp_mcp_value_t mcp_tool_led_on(const esp_mcp_property_list_t *properties);
+static esp_mcp_value_t mcp_tool_led_off(const esp_mcp_property_list_t *properties);
+static esp_mcp_value_t mcp_tool_led_set_brightness(const esp_mcp_property_list_t *properties);
+static esp_mcp_value_t mcp_tool_led_set_color_temp(const esp_mcp_property_list_t *properties);
 
 /*---------------------------------------------------------------
  * HTTP client helper: send POST to mipi_dsi REST API
@@ -321,6 +325,99 @@ static esp_mcp_value_t mcp_tool_display_show_camera(const esp_mcp_property_list_
 }
 
 /*---------------------------------------------------------------
+ * MCP tool callbacks - LED control
+ *-------------------------------------------------------------*/
+static esp_mcp_value_t mcp_tool_led_on(const esp_mcp_property_list_t *properties)
+{
+    int brightness = esp_mcp_property_list_get_property_int(properties, "brightness");
+    int color_temp = esp_mcp_property_list_get_property_int(properties, "color_temp");
+
+    /* Default: when called without parameters, brightness defaults to 100 (full on).
+     * esp_mcp_property_list_get_property_int returns 0 for unset properties,
+     * so brightness=0 means "not specified" for an "on" command — override to 100. */
+    if (brightness <= 0) {
+        brightness = 100;
+    }
+
+    ESP_LOGI(TAG, "[MCP] mipi_dsi.led.on: brightness=%d, color_temp=%d", brightness, color_temp);
+
+    char body[64];
+    if (color_temp > 0) {
+        snprintf(body, sizeof(body), "{\"brightness\":%d,\"color_temp\":%d}", brightness, color_temp);
+    } else {
+        snprintf(body, sizeof(body), "{\"brightness\":%d}", brightness);
+    }
+
+    char resp[64] = {0};
+    esp_err_t ret = http_post("/api/led/on", body, resp, sizeof(resp));
+
+    if (ret == ESP_OK) {
+        return esp_mcp_value_create_bool(true);
+    }
+    return esp_mcp_value_create_bool(false);
+}
+
+static esp_mcp_value_t mcp_tool_led_off(const esp_mcp_property_list_t *properties)
+{
+    (void)properties;
+    ESP_LOGI(TAG, "[MCP] mipi_dsi.led.off");
+
+    char resp[64] = {0};
+    esp_err_t ret = http_post("/api/led/off", NULL, resp, sizeof(resp));
+
+    if (ret == ESP_OK) {
+        return esp_mcp_value_create_bool(true);
+    }
+    return esp_mcp_value_create_bool(false);
+}
+
+static esp_mcp_value_t mcp_tool_led_set_brightness(const esp_mcp_property_list_t *properties)
+{
+    int brightness = esp_mcp_property_list_get_property_int(properties, "brightness");
+
+    /* Default to 100 if not specified */
+    if (brightness <= 0) {
+        brightness = 100;
+    }
+
+    ESP_LOGI(TAG, "[MCP] mipi_dsi.led.set_brightness: %d", brightness);
+
+    char body[32];
+    snprintf(body, sizeof(body), "{\"brightness\":%d}", brightness);
+
+    char resp[64] = {0};
+    esp_err_t ret = http_post("/api/led/brightness", body, resp, sizeof(resp));
+
+    if (ret == ESP_OK) {
+        return esp_mcp_value_create_bool(true);
+    }
+    return esp_mcp_value_create_bool(false);
+}
+
+static esp_mcp_value_t mcp_tool_led_set_color_temp(const esp_mcp_property_list_t *properties)
+{
+    int color_temp = esp_mcp_property_list_get_property_int(properties, "color_temp");
+
+    /* Default to 50 (neutral) if not specified */
+    if (color_temp <= 0) {
+        color_temp = 50;
+    }
+
+    ESP_LOGI(TAG, "[MCP] mipi_dsi.led.set_color_temp: %d", color_temp);
+
+    char body[32];
+    snprintf(body, sizeof(body), "{\"color_temp\":%d}", color_temp);
+
+    char resp[64] = {0};
+    esp_err_t ret = http_post("/api/led/color_temp", body, resp, sizeof(resp));
+
+    if (ret == ESP_OK) {
+        return esp_mcp_value_create_bool(true);
+    }
+    return esp_mcp_value_create_bool(false);
+}
+
+/*---------------------------------------------------------------
  * MCP tool registration
  *-------------------------------------------------------------*/
 #if (MIPI_DSI_BRIDGE_ENABLE == 1)
@@ -399,7 +496,47 @@ esp_err_t mipi_dsi_bridge_register_mcp_tools(esp_mcp_t *mcp)
     if (!disp_cam) { return ESP_ERR_NO_MEM; }
     esp_mcp_add_tool(mcp, disp_cam);
 
-    ESP_LOGI(TAG, "MIPI-DSI bridge MCP tools registered (8 tools)");
+    /* self.mipi_dsi.led.on */
+    esp_mcp_tool_t *led_on = esp_mcp_tool_create(
+        "self.mipi_dsi.led.on",
+        "开启MIPI-DSI板载LED (可指定亮度和色温)",
+        mcp_tool_led_on);
+    if (!led_on) { return ESP_ERR_NO_MEM; }
+    esp_mcp_property_t *led_bright_prop = esp_mcp_property_create_with_range("brightness", 0, 100);
+    esp_mcp_tool_add_property(led_on, led_bright_prop);
+    esp_mcp_property_t *led_ct_prop = esp_mcp_property_create_with_range("color_temp", 0, 100);
+    esp_mcp_tool_add_property(led_on, led_ct_prop);
+    esp_mcp_add_tool(mcp, led_on);
+
+    /* self.mipi_dsi.led.off */
+    esp_mcp_tool_t *led_off = esp_mcp_tool_create(
+        "self.mipi_dsi.led.off",
+        "关闭MIPI-DSI板载LED",
+        mcp_tool_led_off);
+    if (!led_off) { return ESP_ERR_NO_MEM; }
+    esp_mcp_add_tool(mcp, led_off);
+
+    /* self.mipi_dsi.led.set_brightness */
+    esp_mcp_tool_t *led_set_bright = esp_mcp_tool_create(
+        "self.mipi_dsi.led.set_brightness",
+        "设置MIPI-DSI板载LED亮度 (0-100)",
+        mcp_tool_led_set_brightness);
+    if (!led_set_bright) { return ESP_ERR_NO_MEM; }
+    esp_mcp_property_t *led_sb_prop = esp_mcp_property_create_with_range("brightness", 0, 100);
+    esp_mcp_tool_add_property(led_set_bright, led_sb_prop);
+    esp_mcp_add_tool(mcp, led_set_bright);
+
+    /* self.mipi_dsi.led.set_color_temp */
+    esp_mcp_tool_t *led_set_ct = esp_mcp_tool_create(
+        "self.mipi_dsi.led.set_color_temp",
+        "设置MIPI-DSI板载LED色温 (0=最暖, 100=最冷)",
+        mcp_tool_led_set_color_temp);
+    if (!led_set_ct) { return ESP_ERR_NO_MEM; }
+    esp_mcp_property_t *led_sct_prop = esp_mcp_property_create_with_range("color_temp", 0, 100);
+    esp_mcp_tool_add_property(led_set_ct, led_sct_prop);
+    esp_mcp_add_tool(mcp, led_set_ct);
+
+    ESP_LOGI(TAG, "MIPI-DSI bridge MCP tools registered (12 tools)");
     return ESP_OK;
 }
 

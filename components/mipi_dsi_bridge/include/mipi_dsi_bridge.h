@@ -29,6 +29,10 @@ extern "C" {
  *   self.mipi_dsi.display.off        → POST /api/display/off
  *   self.mipi_dsi.display.set_brightness → POST /api/display/brightness
  *   self.mipi_dsi.display.show_camera    → POST /api/display/camera_preview
+ *   self.mipi_dsi.led.on             → POST /api/led/on
+ *   self.mipi_dsi.led.off            → POST /api/led/off
+ *   self.mipi_dsi.led.set_brightness → POST /api/led/brightness
+ *   self.mipi_dsi.led.set_color_temp → POST /api/led/color_temp
  */
 
 /**

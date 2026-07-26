@@ -219,6 +219,6 @@ direct_dependencies:
 - espressif/esp_wifi_remote
 - espressif/esp_xiaozhi
 - idf
-manifest_hash: 8f05b9db2bf83d1f97a404e8fec14cb18623be4adc14ce0ffe94dec72c7bd539
+manifest_hash: f67b2246a4ec62443c58566ca699159331dc774b3a32afdb0cf460108a7cf337
 target: esp32p4
 version: 2.0.0

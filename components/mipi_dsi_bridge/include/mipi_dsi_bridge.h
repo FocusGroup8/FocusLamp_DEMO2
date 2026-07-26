@@ -33,6 +33,9 @@ extern "C" {
  *   self.mipi_dsi.led.off            → POST /api/led/off
  *   self.mipi_dsi.led.set_brightness → POST /api/led/brightness
  *   self.mipi_dsi.led.set_color_temp → POST /api/led/color_temp
+ *   self.mipi_dsi.touch.wake         → GET  /api/touch/wake
+ *   self.mipi_dsi.touch.brightness   → GET  /api/touch/brightness
+ *   self.mipi_dsi.touch.reset        → POST /api/touch/reset
  */
 
 /**

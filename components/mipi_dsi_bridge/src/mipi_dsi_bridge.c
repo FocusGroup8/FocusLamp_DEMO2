@@ -62,6 +62,9 @@ static esp_mcp_value_t mcp_tool_led_on(const esp_mcp_property_list_t *properties
 static esp_mcp_value_t mcp_tool_led_off(const esp_mcp_property_list_t *properties);
 static esp_mcp_value_t mcp_tool_led_set_brightness(const esp_mcp_property_list_t *properties);
 static esp_mcp_value_t mcp_tool_led_set_color_temp(const esp_mcp_property_list_t *properties);
+static esp_mcp_value_t mcp_tool_touch_wake(const esp_mcp_property_list_t *properties);
+static esp_mcp_value_t mcp_tool_touch_brightness(const esp_mcp_property_list_t *properties);
+static esp_mcp_value_t mcp_tool_touch_reset(const esp_mcp_property_list_t *properties);
 
 /*---------------------------------------------------------------
  * HTTP client helper: send POST to mipi_dsi REST API
@@ -418,6 +421,57 @@ static esp_mcp_value_t mcp_tool_led_set_color_temp(const esp_mcp_property_list_t
 }
 
 /*---------------------------------------------------------------
+ * MCP tool callbacks - Touch control
+ *-------------------------------------------------------------*/
+static esp_mcp_value_t mcp_tool_touch_wake(const esp_mcp_property_list_t *properties)
+{
+    (void)properties;
+    ESP_LOGI(TAG, "[MCP] mipi_dsi.touch.wake");
+
+    char resp[128] = {0};
+    esp_err_t ret = http_get("/api/touch/wake", resp, sizeof(resp));
+
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Touch wake response: %s", resp);
+        /* Parse wake_pending from JSON response */
+        /* Simple string search for "wake_pending":true */
+        bool wake_pending = (strstr(resp, "\"wake_pending\":true") != NULL);
+        return esp_mcp_value_create_bool(wake_pending);
+    }
+    return esp_mcp_value_create_bool(false);
+}
+
+static esp_mcp_value_t mcp_tool_touch_brightness(const esp_mcp_property_list_t *properties)
+{
+    (void)properties;
+    ESP_LOGI(TAG, "[MCP] mipi_dsi.touch.brightness");
+
+    char resp[128] = {0};
+    esp_err_t ret = http_get("/api/touch/brightness", resp, sizeof(resp));
+
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Touch brightness response: %s", resp);
+        return esp_mcp_value_create_bool(true);
+    }
+    return esp_mcp_value_create_bool(false);
+}
+
+static esp_mcp_value_t mcp_tool_touch_reset(const esp_mcp_property_list_t *properties)
+{
+    (void)properties;
+    ESP_LOGI(TAG, "[MCP] mipi_dsi.touch.reset");
+
+    char resp[64] = {0};
+    esp_err_t ret = http_post("/api/touch/reset", NULL, resp, sizeof(resp));
+
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Touch reset response: %s", resp);
+        return esp_mcp_value_create_bool(true);
+    }
+    return esp_mcp_value_create_bool(false);
+}
+
+/*---------------------------------------------------------------
  * MCP tool registration
  *-------------------------------------------------------------*/
 #if (MIPI_DSI_BRIDGE_ENABLE == 1)
@@ -536,7 +590,31 @@ esp_err_t mipi_dsi_bridge_register_mcp_tools(esp_mcp_t *mcp)
     esp_mcp_tool_add_property(led_set_ct, led_sct_prop);
     esp_mcp_add_tool(mcp, led_set_ct);
 
-    ESP_LOGI(TAG, "MIPI-DSI bridge MCP tools registered (12 tools)");
+    /* self.mipi_dsi.touch.wake */
+    esp_mcp_tool_t *touch_wake = esp_mcp_tool_create(
+        "self.mipi_dsi.touch.wake",
+        "查询MIPI-DSI触摸唤醒事件（轮询方式，有唤醒返回true）",
+        mcp_tool_touch_wake);
+    if (!touch_wake) { return ESP_ERR_NO_MEM; }
+    esp_mcp_add_tool(mcp, touch_wake);
+
+    /* self.mipi_dsi.touch.brightness */
+    esp_mcp_tool_t *touch_bright = esp_mcp_tool_create(
+        "self.mipi_dsi.touch.brightness",
+        "查询MIPI-DSI触摸亮度档位信息",
+        mcp_tool_touch_brightness);
+    if (!touch_bright) { return ESP_ERR_NO_MEM; }
+    esp_mcp_add_tool(mcp, touch_bright);
+
+    /* self.mipi_dsi.touch.reset */
+    esp_mcp_tool_t *touch_reset = esp_mcp_tool_create(
+        "self.mipi_dsi.touch.reset",
+        "重置MIPI-DSI触摸配置为默认值",
+        mcp_tool_touch_reset);
+    if (!touch_reset) { return ESP_ERR_NO_MEM; }
+    esp_mcp_add_tool(mcp, touch_reset);
+
+    ESP_LOGI(TAG, "MIPI-DSI bridge MCP tools registered (15 tools)");
     return ESP_OK;
 }
 

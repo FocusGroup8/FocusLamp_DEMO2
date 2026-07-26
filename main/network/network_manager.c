@@ -14,6 +14,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#if CONFIG_EXAMPLE_ENABLE_LED
+#include "led_controller.h"
+#endif
 #include "mcp_tools.h"
 #include "system_manager.h"
 #include "websocket_manager.h"
@@ -349,6 +352,318 @@ static esp_err_t rest_api_status_handler(httpd_req_t *req)
 }
 
 /*---------------------------------------------------------------
+ * REST API handlers for LED control
+ *-------------------------------------------------------------*/
+#if CONFIG_EXAMPLE_ENABLE_LED
+
+static esp_err_t rest_api_led_on_handler(httpd_req_t *req)
+{
+    /* Parse optional JSON body for brightness and color_temp */
+    int brightness = 100;
+    int color_temp = -1; /* -1 means not specified, keep current */
+
+    if (req->content_len > 0 && req->content_len < 128) {
+        char buf[128] = {0};
+        int ret       = httpd_req_recv(req, buf, sizeof(buf) - 1);
+        if (ret > 0) {
+            cJSON *root = cJSON_Parse(buf);
+            if (root) {
+                cJSON *b = cJSON_GetObjectItem(root, "brightness");
+                if (cJSON_IsNumber(b)) {
+                    brightness = b->valueint;
+                }
+                cJSON *ct = cJSON_GetObjectItem(root, "color_temp");
+                if (cJSON_IsNumber(ct)) {
+                    color_temp = ct->valueint;
+                }
+                cJSON_Delete(root);
+            }
+        }
+    }
+
+    /* Clamp brightness to valid range */
+    if (brightness < 0)
+        brightness = 0;
+    if (brightness > 100)
+        brightness = 100;
+
+    esp_err_t err;
+    if (color_temp >= 0) {
+        if (color_temp > 100)
+            color_temp = 100;
+        err = led_set_color_temp((uint8_t)color_temp);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "LED set color_temp failed: %s", esp_err_to_name(err));
+        }
+    }
+    err = led_set_brightness_with_cct((uint8_t)brightness);
+
+    ESP_LOGI(TAG, "REST: LED ON brightness=%d, color_temp=%d -> %s", brightness, color_temp, esp_err_to_name(err));
+
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"code\":%d,\"message\":\"%s\",\"data\":{\"brightness\":%d,\"color_temp\":%d}}",
+             err == ESP_OK ? 0 : 1, err == ESP_OK ? "success" : "led on failed", brightness,
+             color_temp >= 0 ? color_temp : -1);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
+static esp_err_t rest_api_led_off_handler(httpd_req_t *req)
+{
+    esp_err_t err = led_off();
+    ESP_LOGI(TAG, "REST: LED OFF -> %s", esp_err_to_name(err));
+
+    const char *resp = err == ESP_OK ? "{\"code\":0,\"message\":\"success\",\"data\":{}}"
+                                     : "{\"code\":1,\"message\":\"led off failed\",\"data\":{}}";
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
+static esp_err_t rest_api_led_brightness_handler(httpd_req_t *req)
+{
+    char buf[64] = {0};
+    int ret      = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (ret <= 0) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    cJSON *root    = cJSON_Parse(buf);
+    int brightness = 100;
+    if (root) {
+        cJSON *b = cJSON_GetObjectItem(root, "brightness");
+        if (cJSON_IsNumber(b)) {
+            brightness = b->valueint;
+        }
+        cJSON_Delete(root);
+    }
+
+    if (brightness < 0)
+        brightness = 0;
+    if (brightness > 100)
+        brightness = 100;
+
+    esp_err_t err = led_set_brightness_with_cct((uint8_t)brightness);
+    ESP_LOGI(TAG, "REST: LED brightness %d -> %s", brightness, esp_err_to_name(err));
+
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"code\":%d,\"message\":\"%s\",\"data\":{\"brightness\":%d}}", err == ESP_OK ? 0 : 1,
+             err == ESP_OK ? "success" : "set brightness failed", brightness);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
+static esp_err_t rest_api_led_color_temp_handler(httpd_req_t *req)
+{
+    char buf[64] = {0};
+    int ret      = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (ret <= 0) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    cJSON *root    = cJSON_Parse(buf);
+    int color_temp = 50;
+    if (root) {
+        cJSON *ct = cJSON_GetObjectItem(root, "color_temp");
+        if (cJSON_IsNumber(ct)) {
+            color_temp = ct->valueint;
+        }
+        cJSON_Delete(root);
+    }
+
+    if (color_temp < 0)
+        color_temp = 0;
+    if (color_temp > 100)
+        color_temp = 100;
+
+    esp_err_t err = led_set_color_temp((uint8_t)color_temp);
+    ESP_LOGI(TAG, "REST: LED color_temp %d -> %s", color_temp, esp_err_to_name(err));
+
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"code\":%d,\"message\":\"%s\",\"data\":{\"color_temp\":%d}}", err == ESP_OK ? 0 : 1,
+             err == ESP_OK ? "success" : "set color_temp failed", color_temp);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
+static esp_err_t rest_api_led_status_handler(httpd_req_t *req)
+{
+    bool initialized = led_is_initialized();
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"code\":0,\"message\":\"success\",\"data\":{\"initialized\":%s}}",
+             initialized ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
+#else /* CONFIG_EXAMPLE_ENABLE_LED == 0 */
+
+/* Stub handlers when LED is disabled */
+static esp_err_t rest_api_led_on_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"code\":1,\"message\":\"led not supported\",\"data\":{}}");
+    return ESP_ERR_NOT_SUPPORTED;
+}
+static esp_err_t rest_api_led_off_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"code\":1,\"message\":\"led not supported\",\"data\":{}}");
+    return ESP_ERR_NOT_SUPPORTED;
+}
+static esp_err_t rest_api_led_brightness_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"code\":1,\"message\":\"led not supported\",\"data\":{}}");
+    return ESP_ERR_NOT_SUPPORTED;
+}
+static esp_err_t rest_api_led_color_temp_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"code\":1,\"message\":\"led not supported\",\"data\":{}}");
+    return ESP_ERR_NOT_SUPPORTED;
+}
+static esp_err_t rest_api_led_status_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"code\":0,\"message\":\"success\",\"data\":{\"initialized\":false}}");
+    return ESP_OK;
+}
+
+#endif /* CONFIG_EXAMPLE_ENABLE_LED */
+
+/*---------------------------------------------------------------
+ * MCP Tool Callbacks: LED control
+ *-------------------------------------------------------------*/
+#if CONFIG_EXAMPLE_ENABLE_LED
+
+static esp_err_t mcp_cb_led_on(const void *args_json, char *response_buf, int response_buf_size)
+{
+    int brightness = 100;
+    int color_temp = -1;
+
+    const cJSON *root = (const cJSON *)args_json;
+    if (root) {
+        const cJSON *b = cJSON_GetObjectItem(root, "brightness");
+        if (cJSON_IsNumber(b)) {
+            brightness = b->valueint;
+        }
+        const cJSON *ct = cJSON_GetObjectItem(root, "color_temp");
+        if (cJSON_IsNumber(ct)) {
+            color_temp = ct->valueint;
+        }
+    }
+
+    if (brightness < 0)
+        brightness = 0;
+    if (brightness > 100)
+        brightness = 100;
+
+    esp_err_t err;
+    if (color_temp >= 0) {
+        if (color_temp > 100)
+            color_temp = 100;
+        led_set_color_temp((uint8_t)color_temp);
+    }
+    err = led_set_brightness_with_cct((uint8_t)brightness);
+
+    ESP_LOGI(TAG, "MCP: LED ON brightness=%d, color_temp=%d -> %s", brightness, color_temp, esp_err_to_name(err));
+    snprintf(response_buf, response_buf_size, "{\"ok\":%s,\"brightness\":%d,\"color_temp\":%d}",
+             err == ESP_OK ? "true" : "false", brightness, color_temp >= 0 ? color_temp : -1);
+    return err;
+}
+
+static esp_err_t mcp_cb_led_off(const void *args_json, char *response_buf, int response_buf_size)
+{
+    (void)args_json;
+    esp_err_t err = led_off();
+    ESP_LOGI(TAG, "MCP: LED OFF -> %s", esp_err_to_name(err));
+    snprintf(response_buf, response_buf_size, "{\"ok\":%s}", err == ESP_OK ? "true" : "false");
+    return err;
+}
+
+static esp_err_t mcp_cb_led_set_brightness(const void *args_json, char *response_buf, int response_buf_size)
+{
+    int brightness    = 100;
+    const cJSON *root = (const cJSON *)args_json;
+    if (root) {
+        const cJSON *b = cJSON_GetObjectItem(root, "brightness");
+        if (cJSON_IsNumber(b)) {
+            brightness = b->valueint;
+        }
+    }
+
+    if (brightness < 0)
+        brightness = 0;
+    if (brightness > 100)
+        brightness = 100;
+
+    esp_err_t err = led_set_brightness_with_cct((uint8_t)brightness);
+    ESP_LOGI(TAG, "MCP: LED set_brightness %d -> %s", brightness, esp_err_to_name(err));
+    snprintf(response_buf, response_buf_size, "{\"ok\":%s,\"brightness\":%d}", err == ESP_OK ? "true" : "false",
+             brightness);
+    return err;
+}
+
+static esp_err_t mcp_cb_led_set_color_temp(const void *args_json, char *response_buf, int response_buf_size)
+{
+    int color_temp    = 50;
+    const cJSON *root = (const cJSON *)args_json;
+    if (root) {
+        const cJSON *ct = cJSON_GetObjectItem(root, "color_temp");
+        if (cJSON_IsNumber(ct)) {
+            color_temp = ct->valueint;
+        }
+    }
+
+    if (color_temp < 0)
+        color_temp = 0;
+    if (color_temp > 100)
+        color_temp = 100;
+
+    esp_err_t err = led_set_color_temp((uint8_t)color_temp);
+    ESP_LOGI(TAG, "MCP: LED set_color_temp %d -> %s", color_temp, esp_err_to_name(err));
+    snprintf(response_buf, response_buf_size, "{\"ok\":%s,\"color_temp\":%d}", err == ESP_OK ? "true" : "false",
+             color_temp);
+    return err;
+}
+
+#else /* CONFIG_EXAMPLE_ENABLE_LED == 0 */
+
+static esp_err_t mcp_cb_led_on(const void *args_json, char *response_buf, int response_buf_size)
+{
+    (void)args_json;
+    snprintf(response_buf, response_buf_size, "{\"ok\":false}");
+    return ESP_ERR_NOT_SUPPORTED;
+}
+static esp_err_t mcp_cb_led_off(const void *args_json, char *response_buf, int response_buf_size)
+{
+    (void)args_json;
+    snprintf(response_buf, response_buf_size, "{\"ok\":false}");
+    return ESP_ERR_NOT_SUPPORTED;
+}
+static esp_err_t mcp_cb_led_set_brightness(const void *args_json, char *response_buf, int response_buf_size)
+{
+    (void)args_json;
+    snprintf(response_buf, response_buf_size, "{\"ok\":false}");
+    return ESP_ERR_NOT_SUPPORTED;
+}
+static esp_err_t mcp_cb_led_set_color_temp(const void *args_json, char *response_buf, int response_buf_size)
+{
+    (void)args_json;
+    snprintf(response_buf, response_buf_size, "{\"ok\":false}");
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+#endif /* CONFIG_EXAMPLE_ENABLE_LED */
+
+/*---------------------------------------------------------------
  * Register REST API endpoints on the HTTP server
  *-------------------------------------------------------------*/
 static void register_rest_api_handlers(void)
@@ -411,6 +726,42 @@ static void register_rest_api_handlers(void)
     };
     ws_manager_server_register_uri(&api_display_camera_preview);
 
+    /* LED control REST API */
+    const httpd_uri_t api_led_on = {
+        .uri     = "/api/led/on",
+        .method  = HTTP_POST,
+        .handler = rest_api_led_on_handler,
+    };
+    ws_manager_server_register_uri(&api_led_on);
+
+    const httpd_uri_t api_led_off = {
+        .uri     = "/api/led/off",
+        .method  = HTTP_POST,
+        .handler = rest_api_led_off_handler,
+    };
+    ws_manager_server_register_uri(&api_led_off);
+
+    const httpd_uri_t api_led_brightness = {
+        .uri     = "/api/led/brightness",
+        .method  = HTTP_POST,
+        .handler = rest_api_led_brightness_handler,
+    };
+    ws_manager_server_register_uri(&api_led_brightness);
+
+    const httpd_uri_t api_led_color_temp = {
+        .uri     = "/api/led/color_temp",
+        .method  = HTTP_POST,
+        .handler = rest_api_led_color_temp_handler,
+    };
+    ws_manager_server_register_uri(&api_led_color_temp);
+
+    const httpd_uri_t api_led_status = {
+        .uri     = "/api/led/status",
+        .method  = HTTP_GET,
+        .handler = rest_api_led_status_handler,
+    };
+    ws_manager_server_register_uri(&api_led_status);
+
     /* Status endpoint */
     const httpd_uri_t api_status = {
         .uri     = "/api/status",
@@ -419,7 +770,7 @@ static void register_rest_api_handlers(void)
     };
     ws_manager_server_register_uri(&api_status);
 
-    ESP_LOGI(TAG, "REST API endpoints registered: /api/camera/*, /api/display/*, /api/status");
+    ESP_LOGI(TAG, "REST API endpoints registered: /api/camera/*, /api/display/*, /api/led/*, /api/status");
 }
 
 /*---------------------------------------------------------------
@@ -523,6 +874,10 @@ esp_err_t network_manager_init(void)
         .display_off            = mcp_cb_display_off,
         .display_set_brightness = mcp_cb_display_set_brightness,
         .display_show_camera    = mcp_cb_display_show_camera,
+        .led_on                 = mcp_cb_led_on,
+        .led_off                = mcp_cb_led_off,
+        .led_set_brightness     = mcp_cb_led_set_brightness,
+        .led_set_color_temp     = mcp_cb_led_set_color_temp,
     };
     ret = mcp_tools_register_callbacks(&callbacks);
     if (ret != ESP_OK) {

@@ -48,6 +48,16 @@ static const tool_meta_t s_tool_meta[] = {
      "\"required\":[\"level\"]}"},
     {"display.show_camera", "Toggle camera preview on local display",
      "{\"type\":\"object\",\"properties\":{\"enable\":{\"type\":\"boolean\"}},\"required\":[\"enable\"]}"},
+    {"led.on", "Turn on LED with optional brightness and color temperature",
+     "{\"type\":\"object\",\"properties\":{\"brightness\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100},"
+     "\"color_temp\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100}},\"additionalProperties\":false}"},
+    {"led.off", "Turn off LED", "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"},
+    {"led.set_brightness", "Set LED brightness while maintaining color temperature (0-100)",
+     "{\"type\":\"object\",\"properties\":{\"brightness\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100}},"
+     "\"required\":[\"brightness\"]}"},
+    {"led.set_color_temp", "Set LED color temperature (0=warmest, 100=coolest)",
+     "{\"type\":\"object\",\"properties\":{\"color_temp\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100}},"
+     "\"required\":[\"color_temp\"]}"},
 };
 
 #define TOOL_COUNT (sizeof(s_tool_meta) / sizeof(s_tool_meta[0]))
@@ -97,6 +107,14 @@ static mcp_tool_cb_t find_tool_callback(const char *name)
         return s_callbacks.display_set_brightness;
     if (strcmp(name, "display.show_camera") == 0)
         return s_callbacks.display_show_camera;
+    if (strcmp(name, "led.on") == 0)
+        return s_callbacks.led_on;
+    if (strcmp(name, "led.off") == 0)
+        return s_callbacks.led_off;
+    if (strcmp(name, "led.set_brightness") == 0)
+        return s_callbacks.led_set_brightness;
+    if (strcmp(name, "led.set_color_temp") == 0)
+        return s_callbacks.led_set_color_temp;
 
     return NULL;
 }

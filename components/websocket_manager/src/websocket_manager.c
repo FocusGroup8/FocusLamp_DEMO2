@@ -435,9 +435,10 @@ esp_err_t ws_manager_server_start(void)
         return ESP_ERR_NO_MEM;
     }
 
-    httpd_config_t config   = HTTPD_DEFAULT_CONFIG();
-    config.server_port      = WS_MANAGER_SERVER_PORT;
-    config.max_uri_handlers = 16;                             /* 4(WebSocket URIs) + 9(REST API) + 3(reserved) */
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.server_port    = WS_MANAGER_SERVER_PORT;
+    config.max_uri_handlers =
+        24; /* 4(WebSocket URIs) + 14(REST API: camera 4 + display 4 + led 5 + status 1) + 6(reserved) */
     config.max_open_sockets = WS_MANAGER_SERVER_MAX_CONN + 2; /* Reserve for HTTP + control */
     config.close_fn         = ws_session_close_cb;
 

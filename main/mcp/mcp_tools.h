@@ -30,9 +30,10 @@ extern "C" {
  *   - tools.call
  *   - ping
  *
- * Available tools (8 total):
+ * Available tools (12 total):
  *   Camera: camera.start, camera.stop, camera.set_quality, camera.set_fps
  *   Display: display.on, display.off, display.set_brightness, display.show_camera
+ *   LED: led.on, led.off, led.set_brightness, led.set_color_temp
  *
  * ---------------------------------------------------------------------------
  * Architecture Notice (2026-07-19):
@@ -83,6 +84,12 @@ typedef struct {
     mcp_tool_cb_t display_off;            /*!< display.off: no args */
     mcp_tool_cb_t display_set_brightness; /*!< display.set_brightness: {level:int(0-100)} */
     mcp_tool_cb_t display_show_camera;    /*!< display.show_camera: {enable:bool} */
+
+    /* LED control callbacks (4) */
+    mcp_tool_cb_t led_on;             /*!< led.on: {brightness:int(0-100), color_temp:int(0-100)} */
+    mcp_tool_cb_t led_off;            /*!< led.off: no args */
+    mcp_tool_cb_t led_set_brightness; /*!< led.set_brightness: {brightness:int(0-100)} */
+    mcp_tool_cb_t led_set_color_temp; /*!< led.set_color_temp: {color_temp:int(0-100)} */
 } mcp_tools_callbacks_t;
 
 /**

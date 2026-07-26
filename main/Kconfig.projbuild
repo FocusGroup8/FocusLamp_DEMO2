@@ -42,6 +42,17 @@ menu "Example Configuration"
             Enable LED control module with dual PWM channels.
             LED_A (cool white) on GPIO 29, LED_B (warm white) on GPIO 28.
 
+    config EXAMPLE_ENABLE_TOUCH
+        bool "Enable Touch Sensor (TTP223 on GPIO 21)"
+        default n
+        depends on EXAMPLE_BOARD_TYPE_TOP
+        select TOUCH_SENSOR_ENABLE
+        select TOUCH_INTERPRETER_ENABLE
+        help
+            Enable TTP223 touch sensor with gesture recognition.
+            Supports tap (wake), double-tap (brightness), and long-press.
+            Requires enabling TOUCH_SENSOR and TOUCH_INTERPRETER components.
+
     config EXAMPLE_RUN_LED_TEST
         bool "Run LED test on startup"
         default n

@@ -1,0 +1,41 @@
+menu "Touch Sensor"
+
+    config TOUCH_SENSOR_ENABLE
+        bool "Enable Touch Sensor (TTP223)"
+        default n
+        help
+            Enable TTP223 capacitive touch sensor driver.
+            Reads digital output from TTP223 via GPIO interrupt.
+            When disabled, all API functions return ESP_ERR_NOT_SUPPORTED.
+
+    config TOUCH_SENSOR_GPIO
+        int "TTP223 OUT GPIO pin"
+        default 21
+        range 0 54
+        depends on TOUCH_SENSOR_ENABLE
+        help
+            GPIO pin connected to TTP223 OUT pin.
+            TTP223 sync mode: HIGH = touch detected, LOW = released.
+
+    config TOUCH_SENSOR_DEBOUNCE_MS
+        int "Software debounce time (ms)"
+        default 50
+        range 10 200
+        depends on TOUCH_SENSOR_ENABLE
+        help
+            Minimum time between consecutive GPIO interrupt processing.
+            TTP223 has built-in hardware debounce; this adds software-level
+            filtering for additional noise rejection.
+            Lower values = faster response, higher values = more filtering.
+
+    config TOUCH_SENSOR_MIN_INTERVAL_MS
+        int "Minimum touch event interval (ms)"
+        default 100
+        range 50 500
+        depends on TOUCH_SENSOR_ENABLE
+        help
+            Minimum time between two consecutive touch events.
+            Events arriving faster than this are filtered as spam/noise.
+            100ms is recommended for anti-false-trigger protection.
+
+endmenu

@@ -1,5 +1,5 @@
 # Base sources (always compiled)
-set(COMP_SRCS "main.c" "board_init.c" "system_manager.c" "system_monitor.c")
+set(COMP_SRCS "main.c" "board_init.c" "system_manager.c" "system_monitor.c" "touch_handler.c")
 
 # MCP tools sources (always compiled, lightweight JSON-RPC engine)
 list(APPEND COMP_SRCS "mcp/mcp_tools.c")
@@ -69,8 +69,8 @@ if(CONFIG_EXAMPLE_ENABLE_CAMERA)
 endif()
 
 # Component dependencies
-set(COMP_REQUIRES "esp_driver_ppa" "esp_driver_jpeg" "wifi_manager" "websocket_manager" "task_manager")
-set(COMP_PRIV_REQUIRES "esp_mm" "esp_timer" "json" "esp_http_server")
+set(COMP_REQUIRES "esp_driver_ppa" "esp_driver_jpeg" "wifi_manager" "websocket_manager" "task_manager" "touch_sensor" "touch_interpreter")
+set(COMP_PRIV_REQUIRES "esp_mm" "esp_timer" "json" "esp_http_server" "nvs_flash")
 
 if(CONFIG_EXAMPLE_ENABLE_CAMERA)
     list(APPEND COMP_REQUIRES "espressif__esp_cam_sensor" "espressif__esp_sccb_intf")

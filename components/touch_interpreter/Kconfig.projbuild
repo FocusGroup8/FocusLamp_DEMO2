@@ -1,0 +1,78 @@
+menu "Touch Interpreter"
+
+    config TOUCH_INTERPRETER_ENABLE
+        bool "Enable Touch Interpreter (gesture recognition)"
+        default n
+        depends on TOUCH_SENSOR_ENABLE
+        help
+            Enable touch gesture recognition engine.
+            Consumes raw events from touch_sensor and recognizes:
+            TAP, DOUBLE_TAP, LONG_PRESS.
+            When disabled, all API functions return ESP_ERR_NOT_SUPPORTED.
+
+    config TOUCH_INTERPRETER_TAP_MIN_MS
+        int "Minimum tap duration (ms)"
+        default 100
+        range 30 500
+        depends on TOUCH_INTERPRETER_ENABLE
+        help
+            Minimum touch duration to be recognized as a TAP.
+            Touches shorter than this are filtered as noise.
+
+    config TOUCH_INTERPRETER_TAP_MAX_MS
+        int "Maximum tap duration (ms)"
+        default 300
+        range 100 2000
+        depends on TOUCH_INTERPRETER_ENABLE
+        help
+            Maximum touch duration to be recognized as a TAP.
+            Touches longer than this are either LONG_PRESS or ignored.
+
+    config TOUCH_INTERPRETER_DOUBLE_TAP_MIN_MS
+        int "Minimum double-tap interval (ms)"
+        default 50
+        range 20 1000
+        depends on TOUCH_INTERPRETER_ENABLE
+        help
+            Minimum interval between two taps for DOUBLE_TAP recognition.
+            Lower values make double-tap easier to trigger.
+            50ms is recommended for TTP223 sensors with ~60ms response time.
+
+    config TOUCH_INTERPRETER_DOUBLE_TAP_MAX_MS
+        int "Maximum double-tap interval (ms)"
+        default 500
+        range 100 2000
+        depends on TOUCH_INTERPRETER_ENABLE
+        help
+            Maximum interval between two taps for DOUBLE_TAP recognition.
+            If the second tap arrives later than this, the first tap
+            is reported as a single TAP instead.
+
+    config TOUCH_INTERPRETER_LONG_PRESS_MS
+        int "Long press threshold (ms)"
+        default 2000
+        range 500 10000
+        depends on TOUCH_INTERPRETER_ENABLE
+        help
+            Duration threshold for LONG_PRESS recognition.
+            Touch held continuously for longer than this triggers LONG_PRESS.
+
+    config TOUCH_INTERPRETER_VALID_TOUCH_MIN_MS
+        int "Minimum valid touch duration (ms)"
+        default 50
+        range 10 500
+        depends on TOUCH_INTERPRETER_ENABLE
+        help
+            Minimum duration for a touch to be considered valid.
+            Touches shorter than this are filtered as noise/glitch.
+
+    config TOUCH_INTERPRETER_VALID_TOUCH_MAX_MS
+        int "Maximum valid touch duration (ms)"
+        default 300
+        range 100 5000
+        depends on TOUCH_INTERPRETER_ENABLE
+        help
+            Maximum duration for a single tap to be considered valid.
+            Only used as an upper bound for TAP classification.
+
+endmenu

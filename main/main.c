@@ -11,6 +11,10 @@
 #include "network_manager.h"
 #include "system_manager.h"
 
+#if CONFIG_EXAMPLE_ENABLE_TOUCH
+#include "touch_handler.h"
+#endif
+
 #if CONFIG_EXAMPLE_ENABLE_DISPLAY
 #include "app_demos.h"
 #include "board_init.h"
@@ -91,6 +95,15 @@ void app_main(void)
     ESP_LOGI(TAG, "System running on %s board",
              system_manager_is_audio_active() ? "BOTTOM (Audio)" : "TOP (Display/LED/Camera)");
 
+    // Initialize touch handler (requires LED + display initialized above)
+#if CONFIG_EXAMPLE_ENABLE_TOUCH
+    ESP_LOGI(TAG, "Initializing touch handler...");
+    ret = touch_handler_init();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Touch handler init failed: %s (non-fatal)", esp_err_to_name(ret));
+    }
+#endif
+
     // Initialize network subsystem (WiFi + WebSocket + MCP + camera stream)
     // Note: network_manager_init blocks until WiFi connects (up to 30s timeout)
     ESP_LOGI(TAG, "Initializing network subsystem...");
@@ -100,6 +113,11 @@ void app_main(void)
         ESP_LOGE(TAG, "Camera streaming will not be available. Check WiFi config.");
     } else {
         ESP_LOGI(TAG, "Network ready. IP: %s", network_manager_get_ip());
+
+        // Register touch REST API endpoints (requires HTTP server running)
+#if CONFIG_EXAMPLE_ENABLE_TOUCH
+        touch_handler_register_api();
+#endif
 #if CONFIG_EXAMPLE_ENABLE_CAMERA
         // Auto-start camera streaming after network is up
         ret = network_manager_start_camera_stream();

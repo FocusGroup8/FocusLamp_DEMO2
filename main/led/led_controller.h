@@ -114,6 +114,18 @@ esp_err_t led_set_color_temp(uint8_t color_temp);
 esp_err_t led_set_brightness_with_cct(uint8_t brightness);
 
 /**
+ * @brief Set overall brightness with smooth fade transition
+ *
+ * Gradually transitions from current brightness to target brightness
+ * over the specified duration using LEDC fade functionality.
+ *
+ * @param brightness  Target brightness percentage (0-100)
+ * @param fade_ms     Fade duration in milliseconds (0 = immediate)
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG on invalid parameters
+ */
+esp_err_t led_set_brightness_with_cct_fade(uint8_t brightness, uint32_t fade_ms);
+
+/**
  * @brief Turn off both LEDs
  *
  * @return ESP_OK on success

@@ -118,6 +118,13 @@ esp_err_t led_controller_init(void)
         return ret;
     }
 
+    /* Install LEDC fade service (required for ledc_fade_start) */
+    ret = ledc_fade_func_install(0);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "LEDC fade service install failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
     s_initialized = true;
     s_brightness  = 0;
     s_color_temp  = 50;
@@ -213,6 +220,41 @@ esp_err_t led_set_brightness_with_cct(uint8_t brightness)
     s_brightness = brightness;
     ESP_LOGI(TAG, "Brightness set to %d%% (CCT=%d%%)", brightness, s_color_temp);
     return apply_cct_brightness();
+}
+
+esp_err_t led_set_brightness_with_cct_fade(uint8_t brightness, uint32_t fade_ms)
+{
+    if (!s_initialized) {
+        ESP_LOGE(TAG, "Not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (brightness > LED_BRIGHTNESS_MAX) {
+        ESP_LOGE(TAG, "Invalid brightness %d (max %d)", brightness, LED_BRIGHTNESS_MAX);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    s_brightness = brightness;
+
+    if (fade_ms == 0) {
+        return apply_cct_brightness();
+    }
+
+    /* Calculate target duties based on CCT and new brightness */
+    uint8_t warm_ratio     = LED_CCT_MAX - s_color_temp;
+    uint8_t cool_ratio     = s_color_temp;
+    uint8_t brightness_a   = (uint16_t)s_brightness * warm_ratio / LED_CCT_MAX;
+    uint8_t brightness_b   = (uint16_t)s_brightness * cool_ratio / LED_CCT_MAX;
+    uint32_t target_duty_a = percent_to_duty(brightness_a);
+    uint32_t target_duty_b = percent_to_duty(brightness_b);
+
+    /* Use LEDC fade for smooth transition */
+    ledc_set_fade_with_time(LEDC_LOW_SPEED_MODE, s_channels[LED_CHANNEL_A], target_duty_a, fade_ms);
+    ledc_set_fade_with_time(LEDC_LOW_SPEED_MODE, s_channels[LED_CHANNEL_B], target_duty_b, fade_ms);
+    ledc_fade_start(LEDC_LOW_SPEED_MODE, s_channels[LED_CHANNEL_A], LEDC_FADE_NO_WAIT);
+    ledc_fade_start(LEDC_LOW_SPEED_MODE, s_channels[LED_CHANNEL_B], LEDC_FADE_NO_WAIT);
+
+    ESP_LOGI(TAG, "Brightness fading to %d%% over %lums (CCT=%d%%)", brightness, fade_ms, s_color_temp);
+    return ESP_OK;
 }
 
 esp_err_t led_off(void)

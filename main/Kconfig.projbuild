@@ -1,0 +1,176 @@
+# ============================================================
+# FocusLamp - Application Configuration (Z0.5 Refactored)
+# ============================================================
+
+menu "Display Configuration"
+
+    menu "LCD Driver"
+        config PROJECT_LCD_DRIVER_ENABLE
+            bool "Enable LCD Display"
+            default n
+            help
+                Enable LCD display module. If enabled, LCD display task will be started.
+
+        choice PROJECT_LCD_UI_MODE
+            prompt "UI Mode"
+            default PROJECT_LCD_UI_NATIVE
+            depends on PROJECT_LCD_DRIVER_ENABLE
+            help
+                - Native: Use lcd_module with custom drawing.
+                - LVGL: Use LVGL graphics library for rich UI.
+
+            config PROJECT_LCD_UI_NATIVE
+                bool "Native LCD Module"
+            config PROJECT_LCD_UI_LVGL
+                bool "LVGL UI"
+        endchoice
+
+        menu "Hardware Pins"
+            depends on PROJECT_LCD_DRIVER_ENABLE
+            config PROJECT_LCD_SPI_HOST
+                int "SPI Host"
+                default 1
+                range 1 2
+                help
+                    1=SPI2_HOST, 2=SPI3_HOST.
+
+            config PROJECT_LCD_SPI_CLOCK_SPEED
+                int "SPI Clock (MHz)"
+                default 10
+                range 1 80
+
+            config PROJECT_LCD_SPI_MOSI_GPIO
+                int "MOSI GPIO (LCD_SDA)"
+                default 38
+                range 0 63
+
+            config PROJECT_LCD_SPI_SCLK_GPIO
+                int "SCLK GPIO (LCD_SCL)"
+                default 50
+                range 0 63
+
+            config PROJECT_LCD_SPI_CS_GPIO
+                int "CS GPIO"
+                default 34
+                range 0 63
+
+            config PROJECT_LCD_SPI_DC_GPIO
+                int "DC GPIO"
+                default 49
+                range 0 63
+
+            config PROJECT_LCD_BL_GPIO
+                int "Backlight GPIO"
+                default 51
+                range 0 63
+        endmenu
+
+        menu "Display Parameters"
+            depends on PROJECT_LCD_DRIVER_ENABLE
+            config PROJECT_LCD_WIDTH
+                int "Width (pixels)"
+                default 160
+
+            config PROJECT_LCD_HEIGHT
+                int "Height (pixels)"
+                default 60
+
+            config PROJECT_LCD_REFRESH_RATE
+                int "Refresh Rate (Hz)"
+                default 30
+                range 1 60
+
+            config PROJECT_LCD_DEFAULT_BRIGHTNESS
+                int "Default Brightness (%)"
+                default 80
+                range 0 100
+
+            config PROJECT_LCD_PWM_FREQUENCY
+                int "PWM Frequency (Hz)"
+                default 5000
+                range 1000 20000
+        endmenu
+
+        menu "LCD Task (Native UI only)"
+            depends on PROJECT_LCD_DRIVER_ENABLE && PROJECT_LCD_UI_NATIVE
+            config PROJECT_LCD_TASK_STACK_SIZE
+                int "Stack Size (bytes)"
+                default 4096
+                range 2048 8192
+
+            config PROJECT_LCD_TASK_PRIORITY
+                int "Priority"
+                default 5
+                range 1 10
+        endmenu
+    endmenu
+
+    menu "LCD Module Features"
+        depends on PROJECT_LCD_DRIVER_ENABLE
+        config PROJECT_LCD_MODULE_ENABLE_EMOTION
+            bool "Emotion Display"
+            default y
+
+        config PROJECT_LCD_MODULE_ENABLE_INFO
+            bool "Info Display"
+            default y
+    endmenu
+
+endmenu
+
+# ============================================================
+# Radar Configuration (HLK-LD6002)
+# ============================================================
+menu "Radar Configuration"
+
+    config PROJECT_RADAR_DRIVER_ENABLE
+        bool "Enable Radar UART Driver"
+        default y
+        help
+            Enable the radar UART driver (HLK-LD6002).
+            Uses a dedicated UART port (default UART3) that does NOT
+            conflict with the servo buses (UART1=EM3, UART2=LX).
+            When disabled, radar_driver_init() is a no-op.
+
+    menu "Radar UART Pins"
+        depends on PROJECT_RADAR_DRIVER_ENABLE
+
+        config PROJECT_RADAR_UART_PORT
+            int "UART Port"
+            default 3
+            range 0 3
+            help
+                UART port for the radar module. Default 3.
+                UART1 is used by EM3 servo, UART2 by LX servo.
+                Do NOT use 1 or 2 or the radar will conflict with servos.
+
+        config PROJECT_RADAR_UART_BAUD_RATE
+            int "Baud Rate"
+            default 115200
+            range 9600 921600
+            help
+                HLK-LD6002 protocol V1.3 defaults to 115200.
+
+        config PROJECT_RADAR_UART_TX_GPIO
+            int "TX GPIO (ESP32 TX -> radar RX)"
+            default 7
+            range 0 63
+
+        config PROJECT_RADAR_UART_RX_GPIO
+            int "RX GPIO (radar TX -> ESP32 RX)"
+            default 1
+            range 0 63
+    endmenu
+
+    config PROJECT_RADAR_LD6002_ENABLE
+        bool "Enable HLK-LD6002 Radar Reader Task"
+        default y
+        depends on PROJECT_RADAR_DRIVER_ENABLE
+        help
+            Start the self-contained HLK-LD6002 radar reader task at
+            boot. This module is independent from the existing
+            radar_module / radar_frame_handler / event_bus pipeline
+            and does not affect other features. Console command
+            'radar_ld6002' can stop/restart it at runtime.
+
+endmenu

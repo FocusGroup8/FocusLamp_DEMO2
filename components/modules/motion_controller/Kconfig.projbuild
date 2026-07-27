@@ -1,0 +1,145 @@
+menu "Motion Controller Configuration"
+
+    config MOTION_CONTROLLER_ENABLE
+        bool "Enable Motion Controller Module"
+        default y
+        help
+            Enable the motion controller module for unified mechanical arm management.
+
+    if MOTION_CONTROLLER_ENABLE
+
+        menu "Home Position Configuration"
+
+            config MOTION_HOME_EM3_POS
+                int "EM3 Home Position"
+                default 1500
+                help
+                    EM3 servo home position (0-3000).
+
+            config MOTION_HOME_LX1_POS
+                int "LX ID1 Home Position"
+                default 500
+                help
+                    LX servo ID1 home position (0-1000).
+
+            config MOTION_HOME_LX2_POS
+                int "LX ID2 Home Position"
+                default 550
+                help
+                    LX servo ID2 home position (0-1000).
+
+            config MOTION_HOME_LX3_POS
+                int "LX ID3 Home Position"
+                default 700
+                help
+                    LX servo ID3 home position (0-1000).
+
+            config MOTION_HOME_LX5_POS
+                int "LX ID5 Home Position"
+                default 420
+                help
+                    LX servo ID5 home position (0-1000).
+
+            config MOTION_HOME_TIME_MS
+                int "Homing Movement Time (ms)"
+                default 1500
+                help
+                    Time for homing sequence movement in milliseconds.
+
+        endmenu
+
+        menu "Safety Limits Configuration"
+
+            config MOTION_EM3_MIN_POS
+                int "EM3 Minimum Position"
+                default 0
+                help
+                    EM3 servo minimum position limit.
+
+            config MOTION_EM3_MAX_POS
+                int "EM3 Maximum Position"
+                default 3000
+                help
+                    EM3 servo maximum position limit.
+
+            config MOTION_EM3_MAX_SPEED
+                int "EM3 Maximum Speed"
+                default 2000
+                help
+                    EM3 servo maximum speed limit (steps/sec).
+
+            config MOTION_LX_MIN_POS
+                int "LX Minimum Position"
+                default 0
+                help
+                    LX servo minimum position limit.
+
+            config MOTION_LX_MAX_POS
+                int "LX Maximum Position"
+                default 1000
+                help
+                    LX servo maximum position limit.
+
+            config MOTION_LX_MAX_SPEED
+                int "LX Maximum Speed"
+                default 1000
+                help
+                    LX servo maximum speed limit.
+
+        endmenu
+
+        menu "Mode Limits Configuration"
+
+            config MOTION_FOCUS_AMPLITUDE_RATIO
+                int "Focus Mode Amplitude Ratio (%)"
+                default 30
+                help
+                    Amplitude ratio for focus mode (percentage of normal limits).
+                    Lower values mean smaller movement range.
+
+            config MOTION_FOCUS_SPEED_RATIO
+                int "Focus Mode Speed Ratio (%)"
+                default 50
+                help
+                    Speed ratio for focus mode (percentage of normal limits).
+                    Lower values mean slower movements.
+
+            config MOTION_COMPANY_AMPLITUDE_RATIO
+                int "Company Mode Amplitude Ratio (%)"
+                default 50
+                help
+                    Amplitude ratio for company mode.
+
+            config MOTION_COMPANY_SPEED_RATIO
+                int "Company Mode Speed Ratio (%)"
+                default 70
+                help
+                    Speed ratio for company mode.
+
+        endmenu
+
+        menu "Task Configuration"
+
+            config MOTION_TASK_STACK_SIZE
+                int "Motion Task Stack Size"
+                default 4096
+                help
+                    Stack size for motion controller tasks.
+
+            config MOTION_TASK_PRIORITY
+                int "Motion Task Priority"
+                default 5
+                help
+                    Priority for motion controller tasks.
+
+        endmenu
+
+        config MOTION_LOG_ENABLE
+            bool "Enable Motion Controller Logging"
+            default y
+            help
+                Enable detailed logging for motion controller.
+
+    endif
+
+endmenu

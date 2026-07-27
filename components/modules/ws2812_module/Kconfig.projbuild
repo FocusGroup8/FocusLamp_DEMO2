@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+# WS2812 Module Kconfig (STUB)
+# 
+# NOTE: This configuration has been merged into main/Kconfig.projbuild
+# under the "LED Configuration" -> "WS2812 Module" menu.
+# 
+# This file is kept as a stub for backward compatibility.
+# All WS2812 module configuration options are now centralized in:
+#   main/Kconfig.projbuild -> menu "LED Configuration" -> menu "WS2812 Module"
+#
+# Merged on: 2026-06-02 (Z0.5 refactoring cleanup)

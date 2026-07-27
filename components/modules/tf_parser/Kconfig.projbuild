@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+# TF Parser Kconfig (STUB)
+# 
+# NOTE: This configuration has been merged into main/Kconfig.projbuild
+# under the "Radar Configuration" -> "TF Parser" menu.
+# 
+# This file is kept as a stub for backward compatibility.
+# All TF parser configuration options are now centralized in:
+#   main/Kconfig.projbuild -> menu "Radar Configuration" -> menu "TF Parser"
+#
+# Merged on: 2026-06-01 (Z0.5 refactoring)

@@ -1,0 +1,20 @@
+idf_component_register(
+    SRCS "arm_service/src/arm_service.c"
+         "audio_service/src/audio_service.c"
+         "audio_service/src/audio_service_module.cpp"
+         "lcd_service/src/lcd_service.c"
+         "led_service/src/led_service.c"
+         "power_service/src/power_service.c"
+         "sensor_service/src/sensor_service.c"
+         "servo_service/src/servo_service.c"
+         "touch_service/src/touch_service.c"
+    INCLUDE_DIRS "arm_service/include"
+                 "audio_service/include"
+                 "lcd_service/include"
+                 "led_service/include"
+                 "power_service/include"
+                 "sensor_service/include"
+                 "servo_service/include"
+                 "touch_service/include"
+    REQUIRES common event_bus drivers protocol esp_adc esp_hw_support
+)

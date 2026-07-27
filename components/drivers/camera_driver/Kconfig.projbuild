@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+# Camera Driver Kconfig (STUB)
+# 
+# NOTE: Camera hardware configuration has been merged into main/Kconfig.projbuild
+# under the "Camera Configuration" -> "Camera Hardware (MIPI CSI)" menu.
+# 
+# This file is kept as a stub for backward compatibility.
+# All camera driver configuration options are now centralized in:
+#   main/Kconfig.projbuild -> menu "Camera Configuration"
+#
+# Merged on: 2026-06-01 (Z0.5 refactoring)

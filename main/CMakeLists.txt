@@ -1,0 +1,50 @@
+idf_component_register(
+    SRCS "main.c"
+         "app_init.c"
+         "app_tasks.c"
+         "app_state.c"
+         "app_event_handler.c"
+         "app_mcp_handler.c"
+         "console_init.c"
+         "unified_help.c"
+         "app_console_commands.c"
+         "param_registry.c"
+         "tasks/radar_data_task.c"
+         "tasks/radar_decoder.c"
+         "tasks/radar_frame_handler.c"
+         "tasks/radar_breath_handler.c"
+         "tasks/hrv_analyzer.c"
+         "tasks/motion_analyzer.c"
+         "tasks/servo_task.c"
+         "tasks/sensor_task.c"
+         "tasks/touch_task.c"
+         "tasks/led_task.c"
+         "tasks/lcd_task.c"
+         "tasks/app_task.c"
+         "tasks/watchdog_task.c"
+         "tasks/stage1_validation_task.c"
+         "network/network_manager.c"
+    INCLUDE_DIRS "."
+                 "tasks"
+                 "network"
+    REQUIRES common
+            event_bus
+            bsp
+            drivers
+            services
+            apps
+            protocol
+            nvs_flash
+            esp_event
+            console
+    PRIV_REQUIRES radar_module
+                 radar_ld6002
+                 lcd_module
+                 led_module
+                 sys_monitor
+                 websocket_manager
+                 connection_manager
+                 heartbeat_service
+                 message_queue
+                 cjson
+)

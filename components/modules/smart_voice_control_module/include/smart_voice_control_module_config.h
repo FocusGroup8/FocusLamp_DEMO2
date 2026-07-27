@@ -1,0 +1,99 @@
+#ifndef SMART_VOICE_CONTROL_MODULE_CONFIG_H
+#define SMART_VOICE_CONTROL_MODULE_CONFIG_H
+
+#include "sdkconfig.h"
+
+#ifdef __cplusplus
+extern "C"
+{
+#endif
+
+/* Enable smart voice control module by default for dowm project */
+#ifndef SMART_VOICE_CONTROL_MODULE_ENABLE
+#define SMART_VOICE_CONTROL_MODULE_ENABLE 1
+#endif
+
+#if (SMART_VOICE_CONTROL_MODULE_ENABLE == 1)
+
+/* Default configuration for dowm project */
+#ifndef SMART_VOICE_WAKE_WORD
+#define SMART_VOICE_WAKE_WORD "小智小智"
+#endif
+
+#ifndef SMART_VOICE_TASK_STACK_SIZE
+#define SMART_VOICE_TASK_STACK_SIZE 8192
+#endif
+
+#ifndef SMART_VOICE_TASK_PRIORITY
+#define SMART_VOICE_TASK_PRIORITY 10
+#endif
+
+#ifndef SMART_VOICE_ENABLE_AEC
+#define SMART_VOICE_ENABLE_AEC 1
+#endif
+
+#ifndef SMART_VOICE_ENABLE_VAD
+#define SMART_VOICE_ENABLE_VAD 1
+#endif
+
+#ifndef SMART_VOICE_ENABLE_WAKE_WORD
+#define SMART_VOICE_ENABLE_WAKE_WORD 1
+#endif
+
+#ifndef SMART_VOICE_WAKE_WORD_MODEL
+#define SMART_VOICE_WAKE_WORD_MODEL "wn9s_nihaoxiaozhi"
+#endif
+
+#ifndef SMART_VOICE_AUTO_FALLBACK
+#define SMART_VOICE_AUTO_FALLBACK 1
+#endif
+
+#ifndef SMART_VOICE_CLOUD_RETRY_COUNT
+#define SMART_VOICE_CLOUD_RETRY_COUNT 3
+#endif
+
+#ifndef SMART_VOICE_CLOUD_RETRY_DELAY_MS
+#define SMART_VOICE_CLOUD_RETRY_DELAY_MS 1000
+#endif
+
+#ifndef SMART_VOICE_CONFIG_PATH
+#define SMART_VOICE_CONFIG_PATH "/config/voice_commands.json"
+#endif
+
+#ifndef SMART_VOICE_ENABLE_HOT_RELOAD
+#define SMART_VOICE_ENABLE_HOT_RELOAD 0
+#endif
+
+/* Audio configuration */
+#ifndef SMART_VOICE_SAMPLE_RATE
+#define SMART_VOICE_SAMPLE_RATE 16000
+#endif
+
+#ifndef SMART_VOICE_OPUS_BITRATE
+#define SMART_VOICE_OPUS_BITRATE 32000
+#endif
+
+#ifndef SMART_VOICE_OPUS_FRAME_DURATION_MS
+#define SMART_VOICE_OPUS_FRAME_DURATION_MS 60
+#endif
+
+/* Local MultiNet Configuration */
+#ifndef SMART_VOICE_ENABLE_MULTINET
+#define SMART_VOICE_ENABLE_MULTINET 1
+#endif
+
+#ifndef SMART_VOICE_MULTINET_MODEL
+#define SMART_VOICE_MULTINET_MODEL "mn7_cn"
+#endif
+
+#ifndef SMART_VOICE_LOCAL_TIMEOUT_MS
+#define SMART_VOICE_LOCAL_TIMEOUT_MS 3000
+#endif
+
+#endif
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // SMART_VOICE_CONTROL_MODULE_CONFIG_H

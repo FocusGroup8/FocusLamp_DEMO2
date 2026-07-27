@@ -1,0 +1,5 @@
+idf_component_register(
+    SRCS "src/focus_app.c"
+    INCLUDE_DIRS "include"
+    REQUIRES common event_bus led_service lcd_service audio_service
+)

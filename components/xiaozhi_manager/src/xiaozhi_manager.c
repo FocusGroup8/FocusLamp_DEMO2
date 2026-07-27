@@ -404,8 +404,12 @@ static void xiaozhi_event_callback(esp_xiaozhi_chat_event_t event,
       case ESP_XIAOZHI_CHAT_TTS_STATE_START:
         s_state = XIAOZHI_MANAGER_STATE_SPEAKING;
         mic_pause_for_tts();
-        /* Wake word engine stays active — AEC cancels TTS echo.
-         * Only mic (opus→server) is paused to avoid sending echo. */
+        /* Pause wake word engine during TTS to prevent loud echo audio
+         * from crashing MultiNet's RNN-T beam search decoder.
+         * Without AEC, TTS audio leaks into mic (peak ~9000 vs normal
+         * speech ~200-700), causing FST beam search to dereference
+         * invalid pointers and trigger Load access fault. */
+        wake_word_engine_pause();
         if (s_config.event_cb) {
           s_config.event_cb(XIAOZHI_MANAGER_EVENT_TTS_START, NULL,
                             s_config.event_cb_ctx);
@@ -426,10 +430,11 @@ static void xiaozhi_event_callback(esp_xiaozhi_chat_event_t event,
          * after TTS has ended, causing ESP_ERR_TIMEOUT errors. */
         audio_bridge_flush_tts();
         mic_resume_after_tts();
-        /* Wake word engine was never paused — AEC handled echo cancellation.
-         * NOTE: AEC is currently disabled for diagnostic purposes,
-         * so wake word detection may trigger on TTS echo. Monitor
-         * for false triggers and re-enable AEC after tuning. */
+        /* Resume wake word engine after TTS ends.
+         * wake_word_engine_resume() also cleans MultiNet state and
+         * resets input buffer, discarding any TTS echo audio that
+         * accumulated during the pause period. */
+        wake_word_engine_resume();
         if (s_config.event_cb) {
           s_config.event_cb(XIAOZHI_MANAGER_EVENT_TTS_STOP, NULL,
                             s_config.event_cb_ctx);

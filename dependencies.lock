@@ -116,14 +116,14 @@ dependencies:
       type: service
     version: 1.7.0
   espressif/esp_wifi_remote:
-    component_hash: df05028f37207964fc2e54b01d8d71f680d979800d3667802606c9d7b0281c16
+    component_hash: 0a2d59b334144b2f8417b592888b28172d9170f65d52eb4b56e3c99c4f36ec29
     dependencies:
     - name: espressif/esp_hosted
       registry_url: https://components.espressif.com
       require: private
       rules:
       - if: target in [esp32h2, esp32p4]
-      version: '>=2.11'
+      version: '>=2.11,<3.0'
     - name: espressif/wifi_remote_over_eppp
       registry_url: https://components.espressif.com
       require: private
@@ -134,7 +134,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 1.6.2
+    version: 1.6.3
   espressif/esp_xiaozhi:
     component_hash: c11f5874ec2c4abf93128d589eeee560401a8dcaca36968f2868500d3f2cad1c
     dependencies:

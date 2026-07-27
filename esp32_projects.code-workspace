@@ -5,6 +5,9 @@
 		},
 		{
 			"path": "../mipi_dsi"
+		},
+		{
+			"path": "../FocusLamp_Demo2-WakeDetect+PresetCommandsTTS"
 		}
 	],
 	"settings": {

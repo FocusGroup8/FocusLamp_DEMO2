@@ -1,47 +1,196 @@
-# ============================================================
-# FocusLamp dowm - Default SDK Configuration
-# ============================================================
-# This file is applied on first build or after `idf.py fullclean`.
-# Existing sdkconfig values take precedence over defaults.
+# This file was generated using idf.py save-defconfig or menuconfig [D] key. It can be edited manually.
+# Espressif IoT Development Framework (ESP-IDF) 5.5.4 Project Minimal Configuration
+#
+CONFIG_IDF_TARGET="esp32p4"
 
-# ------------------------------------------------------------
-# HTTP Server - WebSocket support (required by websocket_manager)
-# ------------------------------------------------------------
-CONFIG_HTTPD_WS_SUPPORT=y
+#
+# Serial flasher config
+#
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+# end of Serial flasher config
 
-# ------------------------------------------------------------
-# WebSocket Manager (mirrors project 1 / FocusLamp_DEMO2 rules)
-# ------------------------------------------------------------
-CONFIG_WS_MANAGER_ENABLE=y
-CONFIG_WS_MANAGER_SERVER_ENABLE=y
+#
+# Partition Table
+#
+CONFIG_PARTITION_TABLE_CUSTOM=y
+# end of Partition Table
+
+#
+# Display Configuration
+#
+
+#
+# LCD Driver
+#
+CONFIG_PROJECT_LCD_DRIVER_ENABLE=y
+
+#
+# Hardware Pins
+#
+CONFIG_PROJECT_LCD_SPI_CLOCK_SPEED=4
+CONFIG_PROJECT_LCD_SPI_MOSI_GPIO=36
+# end of Hardware Pins
+# end of LCD Driver
+# end of Display Configuration
+
+#
+# Audio Bridge
+#
+CONFIG_AUDIO_BRIDGE_ENABLE=n
+# end of Audio Bridge
+
+#
+# Status Reporter
+#
+CONFIG_STATUS_REPORTER_TARGET_IP="10.132.136.181"
+# end of Status Reporter
+
+#
+# WebSocket Manager Configuration
+#
+
+#
+# Client Configuration
+#
 CONFIG_WS_MANAGER_CLIENT_ENABLE=n
-CONFIG_WS_MANAGER_SERVER_PORT=80
-CONFIG_WS_MANAGER_SERVER_MAX_CONN=4
-CONFIG_WS_MANAGER_BUFFER_SIZE=1024
+# end of Client Configuration
+
+#
+# Server Configuration
+#
 CONFIG_WS_MANAGER_SERVER_ECHO=n
-CONFIG_WS_MANAGER_PING_INTERVAL=10
-CONFIG_WS_MANAGER_RECONNECT_TIMEOUT_MS=10000
-CONFIG_WS_MANAGER_TLS_ENABLE=n
+# end of Server Configuration
+# end of WebSocket Manager Configuration
 
-# ------------------------------------------------------------
-# Connection Manager
-# ------------------------------------------------------------
-CONFIG_CONNECTION_MANAGER_ENABLE=y
-CONFIG_CONNECTION_MANAGER_WIFI_INIT_TIMEOUT_MS=30000
-CONFIG_CONNECTION_MANAGER_WIFI_RECONNECT_MAX_DELAY_MS=60000
-CONFIG_CONNECTION_MANAGER_WS_RECONNECT_MAX_DELAY_MS=60000
-CONFIG_CONNECTION_MANAGER_MONITOR_INTERVAL_MS=5000
+#
+# WiFi Manager Configuration
+#
+CONFIG_WIFI_MANAGER_SSID="RT3"
+CONFIG_WIFI_MANAGER_PASSWORD="10101010"
+# end of WiFi Manager Configuration
 
-# ------------------------------------------------------------
-# Heartbeat Service
-# ------------------------------------------------------------
-CONFIG_HEARTBEAT_SERVICE_ENABLE=y
-CONFIG_HEARTBEAT_SERVICE_PING_INTERVAL_SEC=30
-CONFIG_HEARTBEAT_SERVICE_TIMEOUT_SEC=90
+#
+# Xiaozhi Manager
+#
+CONFIG_XIAOZHI_MANAGER_ENABLE=n
+# end of Xiaozhi Manager
 
-# ------------------------------------------------------------
-# Message Queue (reliable delivery over WebSocket)
-# ------------------------------------------------------------
-CONFIG_MESSAGE_QUEUE_ENABLE=y
-CONFIG_MESSAGE_QUEUE_MAX_PENDING=16
-CONFIG_MESSAGE_QUEUE_MAX_RETRIES=3
+#
+# Component config
+#
+
+#
+# ESP-Driver:GPIO Configurations
+#
+CONFIG_GPIO_CTRL_FUNC_IN_IRAM=y
+# end of ESP-Driver:GPIO Configurations
+
+#
+# ESP-Driver:I2S Configurations
+#
+CONFIG_I2S_ISR_IRAM_SAFE=y
+# end of ESP-Driver:I2S Configurations
+
+#
+# ESP-Driver:UART Configurations
+#
+CONFIG_UART_ISR_IN_IRAM=y
+# end of ESP-Driver:UART Configurations
+
+#
+# Hardware Settings
+#
+
+#
+# Chip revision
+#
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+# end of Chip revision
+# end of Hardware Settings
+
+#
+# ESP PSRAM
+#
+CONFIG_SPIRAM=y
+
+#
+# PSRAM config
+#
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=131072
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+# end of PSRAM config
+# end of ESP PSRAM
+
+#
+# ESP System Settings
+#
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=2048
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_TASK_WDT_PANIC=y
+# end of ESP System Settings
+
+#
+# FreeRTOS
+#
+
+#
+# Kernel
+#
+CONFIG_FREERTOS_HZ=1000
+CONFIG_FREERTOS_QUEUE_REGISTRY_SIZE=10
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+# end of Kernel
+
+#
+# Port
+#
+CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK=y
+# end of Port
+# end of FreeRTOS
+
+#
+# Log
+#
+
+#
+# Format
+#
+CONFIG_LOG_COLORS=y
+# end of Format
+# end of Log
+
+#
+# LWIP
+#
+CONFIG_LWIP_LOCAL_HOSTNAME="FocusLamp"
+# end of LWIP
+
+#
+# mbedTLS
+#
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=4096
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
+# end of mbedTLS
+
+#
+# LibC
+#
+CONFIG_LIBC_OPTIMIZED_MISALIGNED_ACCESS=n
+# end of LibC
+
+#
+# ESP-Hosted config
+#
+CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y
+# end of ESP-Hosted config
+
+#
+# Wi-Fi Remote
+#
+CONFIG_SLAVE_IDF_TARGET_ESP32C5=y
+# end of Wi-Fi Remote
+# end of Component config

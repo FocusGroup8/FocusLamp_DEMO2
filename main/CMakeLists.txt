@@ -46,5 +46,7 @@ idf_component_register(
                  connection_manager
                  heartbeat_service
                  message_queue
+                 rest_api
+                 status_reporter
                  cjson
 )

@@ -23,10 +23,14 @@
 #include "websocket_manager.h"
 #include "connection_manager.h"
 #include "heartbeat_service.h"
+#include "status_reporter.h"
 #include "message_queue.h"
 
 /* MCP handler (dowm's JSON-RPC 2.0 tool dispatcher over /mcp) */
 #include "app_mcp_handler.h"
+
+/* REST API for external HTTP control (Phase A: /api/status) */
+#include "rest_api.h"
 
 static const char *TAG = "net_mgr";
 
@@ -137,7 +141,20 @@ esp_err_t network_manager_init(void)
 
     ESP_LOGI(TAG, "WebSocket server running at ws://%s:80/{ws,mcp}", s_ip_string);
 
-    /* 3. Initialize MCP handler (registers /mcp DATA handler) --------- */
+    /* 3. Initialize REST API (registers /api/ HTTP endpoints) -------- */
+    /* rest_api_init() registers REST URI handlers on the existing HTTP server
+     * via ws_manager_server_register_uri(). Must run after ws_manager_server_start().
+     * Non-fatal: if it fails, REST endpoints won't be available but WS still works. */
+    ESP_LOGI(TAG, "Initializing REST API...");
+    ret = rest_api_init();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "REST API init failed: %s (continuing)", esp_err_to_name(ret));
+        /* Non-fatal: REST endpoints won't work, but WS server still runs */
+    } else {
+        ESP_LOGI(TAG, "REST API available at http://%s/api/status", s_ip_string);
+    }
+
+    /* 4. Initialize MCP handler (registers /mcp DATA handler) --------- */
     /* app_mcp_handler_init() calls ws_manager_register_handler() internally
      * to route /mcp text frames to the JSON-RPC 2.0 engine. Must run after
      * ws_manager_init() + ws_manager_server_start(). Also requires hardware
@@ -185,6 +202,14 @@ esp_err_t network_manager_init(void)
         return ret;
     }
 
+    /* 7. Initialize Status Reporter (sends status to wifi_test) ------ */
+    ESP_LOGI(TAG, "Initializing status reporter...");
+    ret = status_reporter_init();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Status reporter init failed: %s (continuing)", esp_err_to_name(ret));
+        /* Non-fatal: status reporting won't work, but network stack runs */
+    }
+
     s_initialized = true;
     ESP_LOGI(TAG, "Network manager initialized successfully");
     ESP_LOGI(TAG, "  General endpoint: ws://%s/ws", s_ip_string);
@@ -200,6 +225,7 @@ void network_manager_deinit(void)
     }
 
     /* Stop services in reverse init order */
+    status_reporter_deinit();
     message_queue_deinit();
     heartbeat_service_stop();
     connection_manager_stop();

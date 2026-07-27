@@ -36,6 +36,7 @@ typedef enum {
     DISPLAY_MODE_TOUCH_GUI,           /*!< Touch GUI demo (button test) */
     DISPLAY_MODE_DATA_COLLECTOR,      /*!< Gesture data collector for calibration */
     DISPLAY_MODE_LVGL,                /*!< LVGL framework mode (esp_lvgl_port) */
+    DISPLAY_MODE_EXPRESSIVE_EYES,     /*!< Animated expressive eyes (espp/expressive_eyes) */
 } display_mode_t;
 
 /**
@@ -47,6 +48,35 @@ typedef enum {
     DISPLAY_STATE_PAUSED,  /*!< Demo paused (if supported) */
     DISPLAY_STATE_ERROR,   /*!< System error state */
 } display_state_t;
+
+/* Kconfig defines for demo selection (must be after display_mode_t enum) */
+#ifdef CONFIG_EXAMPLE_DEMO_LVGL
+#define DISPLAY_KCONFIG_MODE DISPLAY_MODE_LVGL
+#elif defined(CONFIG_EXAMPLE_DEMO_EXPRESSIVE_EYES)
+#define DISPLAY_KCONFIG_MODE DISPLAY_MODE_EXPRESSIVE_EYES
+#elif defined(CONFIG_EXAMPLE_DEMO_GESTURE_RECOGNITION)
+#define DISPLAY_KCONFIG_MODE DISPLAY_MODE_GESTURE_RECOGNITION
+#elif defined(CONFIG_EXAMPLE_DEMO_TOUCH_GUI)
+#define DISPLAY_KCONFIG_MODE DISPLAY_MODE_TOUCH_GUI
+#elif defined(CONFIG_EXAMPLE_DEMO_DATA_COLLECTOR)
+#define DISPLAY_KCONFIG_MODE DISPLAY_MODE_DATA_COLLECTOR
+#else
+#define DISPLAY_KCONFIG_MODE DISPLAY_MODE_TOUCH_GAME
+#endif
+
+/**
+ * @brief Get display mode from Kconfig (single source of truth)
+ *
+ * Centralizes the Kconfig → display_mode_t mapping. All code that needs
+ * to determine the default display mode from build configuration should
+ * use this function instead of duplicating #if/#elif chains.
+ *
+ * @return Display mode selected via menuconfig
+ */
+static inline display_mode_t display_mode_from_kconfig(void)
+{
+    return DISPLAY_KCONFIG_MODE;
+}
 
 /**
  * @brief Display system configuration
@@ -95,6 +125,7 @@ esp_err_t display_system_init(const display_config_t *config, display_handles_t 
  * - GESTURE_RECOGNITION: runs gesture recognition demo
  * - TOUCH_GUI: runs button test GUI demo
  * - DATA_COLLECTOR: runs gesture data collection for calibration
+ * - EXPRESSIVE_EYES: launches animated eye display
  *
  * @param handles  Display handles from init
  * @return ESP_OK on success

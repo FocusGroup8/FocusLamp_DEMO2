@@ -85,17 +85,7 @@ esp_err_t system_manager_init(system_config_t *config)
 #endif
 
 #if CONFIG_EXAMPLE_ENABLE_DISPLAY
-#if CONFIG_EXAMPLE_DEMO_LVGL
-        s_config.display_config.mode = DISPLAY_MODE_LVGL;
-#elif CONFIG_EXAMPLE_DEMO_GESTURE_RECOGNITION
-        s_config.display_config.mode = DISPLAY_MODE_GESTURE_RECOGNITION;
-#elif CONFIG_EXAMPLE_DEMO_TOUCH_GUI
-        s_config.display_config.mode = DISPLAY_MODE_TOUCH_GUI;
-#elif CONFIG_EXAMPLE_DEMO_DATA_COLLECTOR
-        s_config.display_config.mode = DISPLAY_MODE_DATA_COLLECTOR;
-#else
-        s_config.display_config.mode = DISPLAY_MODE_TOUCH_GAME;
-#endif
+        s_config.display_config.mode                 = display_mode_from_kconfig();
         s_config.display_config.enable_touch         = true;
         s_config.display_config.enable_double_buffer = true;
         s_config.display_config.enable_ppa_accel     = true;

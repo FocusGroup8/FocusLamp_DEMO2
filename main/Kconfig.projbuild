@@ -168,6 +168,12 @@ menu "Example Configuration"
             help
                 Use LVGL 9.x graphics library with esp_lvgl_port for MIPI DSI display.
                 Provides full GUI framework with widgets, animations, and touch support.
+        config EXAMPLE_DEMO_EXPRESSIVE_EYES
+            bool "Expressive Eyes (animated eye display)"
+            help
+                Display animated expressive eyes using the espp/expressive_eyes component.
+                Shows electric blue monochrome eyes on black background with blinking,
+                look direction, and expression changes. Perfect for robot face display.
         config EXAMPLE_DEMO_TOUCH_GAME
             bool "Touch Game (gesture-controlled ball)"
             select EXAMPLE_ENABLE_TOUCH_GAME

@@ -17,6 +17,9 @@
 #if CONFIG_EXAMPLE_ENABLE_LED
 #include "led_controller.h"
 #endif
+#if CONFIG_EXAMPLE_DEMO_EXPRESSIVE_EYES
+#include "expressive_eyes_display.h"
+#endif
 #include "mcp_tools.h"
 #include "system_manager.h"
 #include "websocket_manager.h"
@@ -664,6 +667,260 @@ static esp_err_t mcp_cb_led_set_color_temp(const void *args_json, char *response
 #endif /* CONFIG_EXAMPLE_ENABLE_LED */
 
 /*---------------------------------------------------------------
+ * MCP Tool Callbacks: Expressive Eyes control
+ *-------------------------------------------------------------*/
+#if CONFIG_EXAMPLE_DEMO_EXPRESSIVE_EYES
+
+static const char *s_expression_names[] = {"neutral", "happy", "sad",       "angry",     "surprised",
+                                           "sleepy",  "bored", "wink_left", "wink_right"};
+
+static int expression_from_string(const char *str)
+{
+    for (int i = 0; i < (int)(sizeof(s_expression_names) / sizeof(s_expression_names[0])); i++) {
+        if (strcmp(str, s_expression_names[i]) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static esp_err_t mcp_cb_eyes_set_expression(const void *args_json, char *response_buf, int response_buf_size)
+{
+    const cJSON *root = (const cJSON *)args_json;
+    if (!root) {
+        snprintf(response_buf, response_buf_size, "{\"ok\":false,\"error\":\"missing arguments\"}");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const cJSON *expr_item = cJSON_GetObjectItem(root, "expression");
+    if (!cJSON_IsString(expr_item) || !expr_item->valuestring) {
+        snprintf(response_buf, response_buf_size, "{\"ok\":false,\"error\":\"missing expression\"}");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    int expr = expression_from_string(expr_item->valuestring);
+    if (expr < 0) {
+        snprintf(response_buf, response_buf_size, "{\"ok\":false,\"error\":\"unknown expression: %s\"}",
+                 expr_item->valuestring);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    expressive_eyes_set_expression((expressive_eyes_expression_t)expr);
+    ESP_LOGI(TAG, "MCP: Eyes set_expression -> %s", expr_item->valuestring);
+    snprintf(response_buf, response_buf_size, "{\"ok\":true,\"expression\":\"%s\"}", expr_item->valuestring);
+    return ESP_OK;
+}
+
+static esp_err_t mcp_cb_eyes_look_at(const void *args_json, char *response_buf, int response_buf_size)
+{
+    const cJSON *root = (const cJSON *)args_json;
+    float x = 0.0f, y = 0.0f;
+
+    if (root) {
+        const cJSON *x_item = cJSON_GetObjectItem(root, "x");
+        const cJSON *y_item = cJSON_GetObjectItem(root, "y");
+        if (cJSON_IsNumber(x_item))
+            x = (float)x_item->valuedouble;
+        if (cJSON_IsNumber(y_item))
+            y = (float)y_item->valuedouble;
+    }
+
+    /* Clamp to [-1, 1] */
+    if (x < -1.0f)
+        x = -1.0f;
+    if (x > 1.0f)
+        x = 1.0f;
+    if (y < -1.0f)
+        y = -1.0f;
+    if (y > 1.0f)
+        y = 1.0f;
+
+    expressive_eyes_look_at(x, y);
+    ESP_LOGI(TAG, "MCP: Eyes look_at -> (%.2f, %.2f)", x, y);
+    snprintf(response_buf, response_buf_size, "{\"ok\":true,\"x\":%.2f,\"y\":%.2f}", x, y);
+    return ESP_OK;
+}
+
+static esp_err_t mcp_cb_eyes_blink(const void *args_json, char *response_buf, int response_buf_size)
+{
+    (void)args_json;
+    expressive_eyes_blink();
+    ESP_LOGI(TAG, "MCP: Eyes blink");
+    snprintf(response_buf, response_buf_size, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+static esp_err_t mcp_cb_eyes_get_expression(const void *args_json, char *response_buf, int response_buf_size)
+{
+    (void)args_json;
+    expressive_eyes_expression_t expr = expressive_eyes_get_expression();
+    int idx                           = (int)expr;
+    const char *name = (idx >= 0 && idx < (int)(sizeof(s_expression_names) / sizeof(s_expression_names[0])))
+                           ? s_expression_names[idx]
+                           : "unknown";
+    snprintf(response_buf, response_buf_size, "{\"ok\":true,\"expression\":\"%s\"}", name);
+    return ESP_OK;
+}
+
+#else /* CONFIG_EXAMPLE_DEMO_EXPRESSIVE_EYES == 0 */
+
+static esp_err_t mcp_cb_eyes_set_expression(const void *args_json, char *response_buf, int response_buf_size)
+{
+    (void)args_json;
+    snprintf(response_buf, response_buf_size, "{\"ok\":false}");
+    return ESP_ERR_NOT_SUPPORTED;
+}
+static esp_err_t mcp_cb_eyes_look_at(const void *args_json, char *response_buf, int response_buf_size)
+{
+    (void)args_json;
+    snprintf(response_buf, response_buf_size, "{\"ok\":false}");
+    return ESP_ERR_NOT_SUPPORTED;
+}
+static esp_err_t mcp_cb_eyes_blink(const void *args_json, char *response_buf, int response_buf_size)
+{
+    (void)args_json;
+    snprintf(response_buf, response_buf_size, "{\"ok\":false}");
+    return ESP_ERR_NOT_SUPPORTED;
+}
+static esp_err_t mcp_cb_eyes_get_expression(const void *args_json, char *response_buf, int response_buf_size)
+{
+    (void)args_json;
+    snprintf(response_buf, response_buf_size, "{\"ok\":false}");
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+#endif /* CONFIG_EXAMPLE_DEMO_EXPRESSIVE_EYES */
+
+/*---------------------------------------------------------------
+ * REST API handlers for Expressive Eyes control
+ *-------------------------------------------------------------*/
+static esp_err_t rest_api_eyes_set_expression_handler(httpd_req_t *req)
+{
+    char buf[64] = {0};
+    int ret      = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (ret <= 0) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"code\":1,\"message\":\"invalid json\",\"data\":{}}");
+        return ESP_FAIL;
+    }
+
+    cJSON *expr_item = cJSON_GetObjectItem(root, "expression");
+    if (!cJSON_IsString(expr_item) || !expr_item->valuestring) {
+        cJSON_Delete(root);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"code\":1,\"message\":\"missing expression\",\"data\":{}}");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+#if CONFIG_EXAMPLE_DEMO_EXPRESSIVE_EYES
+    int expr = expression_from_string(expr_item->valuestring);
+    if (expr < 0) {
+        cJSON_Delete(root);
+        char resp[128];
+        snprintf(resp, sizeof(resp), "{\"code\":1,\"message\":\"unknown expression: %s\",\"data\":{}}",
+                 expr_item->valuestring);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, resp);
+        return ESP_ERR_INVALID_ARG;
+    }
+    expressive_eyes_set_expression((expressive_eyes_expression_t)expr);
+    ESP_LOGI(TAG, "REST: Eyes set_expression -> %s", expr_item->valuestring);
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"code\":0,\"message\":\"success\",\"data\":{\"expression\":\"%s\"}}",
+             expr_item->valuestring);
+#else
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"code\":1,\"message\":\"expressive eyes not enabled\",\"data\":{}}");
+#endif
+    cJSON_Delete(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
+static esp_err_t rest_api_eyes_look_at_handler(httpd_req_t *req)
+{
+    char buf[64] = {0};
+    int ret      = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (ret <= 0) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    float x = 0.0f, y = 0.0f;
+    cJSON *root = cJSON_Parse(buf);
+    if (root) {
+        cJSON *x_item = cJSON_GetObjectItem(root, "x");
+        cJSON *y_item = cJSON_GetObjectItem(root, "y");
+        if (cJSON_IsNumber(x_item))
+            x = (float)x_item->valuedouble;
+        if (cJSON_IsNumber(y_item))
+            y = (float)y_item->valuedouble;
+        cJSON_Delete(root);
+    }
+
+    if (x < -1.0f)
+        x = -1.0f;
+    if (x > 1.0f)
+        x = 1.0f;
+    if (y < -1.0f)
+        y = -1.0f;
+    if (y > 1.0f)
+        y = 1.0f;
+
+#if CONFIG_EXAMPLE_DEMO_EXPRESSIVE_EYES
+    expressive_eyes_look_at(x, y);
+    ESP_LOGI(TAG, "REST: Eyes look_at -> (%.2f, %.2f)", x, y);
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"code\":0,\"message\":\"success\",\"data\":{\"x\":%.2f,\"y\":%.2f}}", x, y);
+#else
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"code\":1,\"message\":\"expressive eyes not enabled\",\"data\":{}}");
+#endif
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
+static esp_err_t rest_api_eyes_blink_handler(httpd_req_t *req)
+{
+#if CONFIG_EXAMPLE_DEMO_EXPRESSIVE_EYES
+    expressive_eyes_blink();
+    ESP_LOGI(TAG, "REST: Eyes blink");
+    const char *resp = "{\"code\":0,\"message\":\"success\",\"data\":{}}";
+#else
+    const char *resp = "{\"code\":1,\"message\":\"expressive eyes not enabled\",\"data\":{}}";
+#endif
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
+static esp_err_t rest_api_eyes_get_expression_handler(httpd_req_t *req)
+{
+#if CONFIG_EXAMPLE_DEMO_EXPRESSIVE_EYES
+    expressive_eyes_expression_t expr = expressive_eyes_get_expression();
+    int idx                           = (int)expr;
+    const char *name = (idx >= 0 && idx < (int)(sizeof(s_expression_names) / sizeof(s_expression_names[0])))
+                           ? s_expression_names[idx]
+                           : "unknown";
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"code\":0,\"message\":\"success\",\"data\":{\"expression\":\"%s\"}}", name);
+#else
+    const char *resp = "{\"code\":1,\"message\":\"expressive eyes not enabled\",\"data\":{}}";
+#endif
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
+/*---------------------------------------------------------------
  * Register REST API endpoints on the HTTP server
  *-------------------------------------------------------------*/
 static void register_rest_api_handlers(void)
@@ -770,7 +1027,36 @@ static void register_rest_api_handlers(void)
     };
     ws_manager_server_register_uri(&api_status);
 
-    ESP_LOGI(TAG, "REST API endpoints registered: /api/camera/*, /api/display/*, /api/led/*, /api/status");
+    /* Expressive Eyes control REST API */
+    const httpd_uri_t api_eyes_set_expression = {
+        .uri     = "/api/eyes/expression",
+        .method  = HTTP_POST,
+        .handler = rest_api_eyes_set_expression_handler,
+    };
+    ws_manager_server_register_uri(&api_eyes_set_expression);
+
+    const httpd_uri_t api_eyes_look_at = {
+        .uri     = "/api/eyes/look_at",
+        .method  = HTTP_POST,
+        .handler = rest_api_eyes_look_at_handler,
+    };
+    ws_manager_server_register_uri(&api_eyes_look_at);
+
+    const httpd_uri_t api_eyes_blink = {
+        .uri     = "/api/eyes/blink",
+        .method  = HTTP_POST,
+        .handler = rest_api_eyes_blink_handler,
+    };
+    ws_manager_server_register_uri(&api_eyes_blink);
+
+    const httpd_uri_t api_eyes_get_expression = {
+        .uri     = "/api/eyes/expression",
+        .method  = HTTP_GET,
+        .handler = rest_api_eyes_get_expression_handler,
+    };
+    ws_manager_server_register_uri(&api_eyes_get_expression);
+
+    ESP_LOGI(TAG, "REST API endpoints registered: /api/camera/*, /api/display/*, /api/led/*, /api/eyes/*, /api/status");
 }
 
 /*---------------------------------------------------------------
@@ -878,6 +1164,10 @@ esp_err_t network_manager_init(void)
         .led_off                = mcp_cb_led_off,
         .led_set_brightness     = mcp_cb_led_set_brightness,
         .led_set_color_temp     = mcp_cb_led_set_color_temp,
+        .eyes_set_expression    = mcp_cb_eyes_set_expression,
+        .eyes_look_at           = mcp_cb_eyes_look_at,
+        .eyes_blink             = mcp_cb_eyes_blink,
+        .eyes_get_expression    = mcp_cb_eyes_get_expression,
     };
     ret = mcp_tools_register_callbacks(&callbacks);
     if (ret != ESP_OK) {

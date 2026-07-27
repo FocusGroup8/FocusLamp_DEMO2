@@ -30,10 +30,11 @@ extern "C" {
  *   - tools.call
  *   - ping
  *
- * Available tools (12 total):
+ * Available tools (16 total):
  *   Camera: camera.start, camera.stop, camera.set_quality, camera.set_fps
  *   Display: display.on, display.off, display.set_brightness, display.show_camera
  *   LED: led.on, led.off, led.set_brightness, led.set_color_temp
+ *   Eyes: eyes.set_expression, eyes.look_at, eyes.blink, eyes.get_expression
  *
  * ---------------------------------------------------------------------------
  * Architecture Notice (2026-07-19):
@@ -90,6 +91,12 @@ typedef struct {
     mcp_tool_cb_t led_off;            /*!< led.off: no args */
     mcp_tool_cb_t led_set_brightness; /*!< led.set_brightness: {brightness:int(0-100)} */
     mcp_tool_cb_t led_set_color_temp; /*!< led.set_color_temp: {color_temp:int(0-100)} */
+
+    /* Expressive Eyes control callbacks (4) */
+    mcp_tool_cb_t eyes_set_expression; /*!< eyes.set_expression: {expression:string} */
+    mcp_tool_cb_t eyes_look_at;        /*!< eyes.look_at: {x:float(-1..1), y:float(-1..1)} */
+    mcp_tool_cb_t eyes_blink;          /*!< eyes.blink: no args */
+    mcp_tool_cb_t eyes_get_expression; /*!< eyes.get_expression: no args, returns {expression:string} */
 } mcp_tools_callbacks_t;
 
 /**

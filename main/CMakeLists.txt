@@ -18,6 +18,7 @@ if(CONFIG_EXAMPLE_ENABLE_DISPLAY)
         "display/touch_game.c"
         "display/display_system.c"
         "display/lvgl_display.c"
+        "display/expressive_eyes_display.cpp"
     )
 endif()
 
@@ -79,6 +80,7 @@ endif()
 
 if(CONFIG_EXAMPLE_ENABLE_DISPLAY)
     list(APPEND COMP_PRIV_REQUIRES "espressif__esp_lvgl_port")
+    list(APPEND COMP_REQUIRES "espp__expressive_eyes")
 endif()
 
 idf_component_register(SRCS ${COMP_SRCS}

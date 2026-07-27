@@ -11,6 +11,7 @@
 #include "board_init.h"
 #include "esp_log.h"
 #include "esp_lvgl_port.h"
+#include "expressive_eyes_display.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "gesture_data_collector.h"
@@ -41,17 +42,7 @@ esp_err_t display_system_init(const display_config_t *config, display_handles_t 
 
     // Use default config if NULL
     if (config == NULL) {
-#if CONFIG_EXAMPLE_DEMO_LVGL
-        s_config.mode = DISPLAY_MODE_LVGL;
-#elif CONFIG_EXAMPLE_DEMO_GESTURE_RECOGNITION
-        s_config.mode = DISPLAY_MODE_GESTURE_RECOGNITION;
-#elif CONFIG_EXAMPLE_DEMO_TOUCH_GUI
-        s_config.mode = DISPLAY_MODE_TOUCH_GUI;
-#elif CONFIG_EXAMPLE_DEMO_DATA_COLLECTOR
-        s_config.mode = DISPLAY_MODE_DATA_COLLECTOR;
-#else
-        s_config.mode = DISPLAY_MODE_TOUCH_GAME;
-#endif
+        s_config.mode                 = display_mode_from_kconfig();
         s_config.enable_touch         = true;
         s_config.enable_double_buffer = true;
         s_config.enable_ppa_accel     = true;
@@ -65,7 +56,7 @@ esp_err_t display_system_init(const display_config_t *config, display_handles_t 
     s_handles.panel_handle = s_panel;
     ESP_LOGI(TAG, "LCD panel initialized");
 
-    if (s_config.mode == DISPLAY_MODE_LVGL) {
+    if (s_config.mode == DISPLAY_MODE_LVGL || s_config.mode == DISPLAY_MODE_EXPRESSIVE_EYES) {
         /* LVGL mode: Initialize touch first (without simple_gui), then init LVGL */
         if (s_config.enable_touch) {
             ESP_LOGI(TAG, "Initializing touch controller...");
@@ -202,6 +193,27 @@ esp_err_t display_system_start(const display_handles_t *handles)
         lvgl_display_demo_ui(&s_lvgl_ctx);
         break;
 
+    case DISPLAY_MODE_EXPRESSIVE_EYES:
+        ESP_LOGI(TAG, "Launching Expressive Eyes...");
+        {
+            expressive_eyes_cfg_t eyes_cfg = {
+                .disp                 = s_lvgl_ctx.disp,
+                .screen_width         = BOARD_LCD_H_RES,
+                .screen_height        = BOARD_LCD_V_RES,
+                .blink_duration       = 0.12f,
+                .blink_interval       = 4.0f,
+                .enable_auto_blink    = true,
+                .enable_pupil_physics = true,
+            };
+            esp_err_t eyes_ret = expressive_eyes_display_init(&eyes_cfg);
+            if (eyes_ret != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to init expressive eyes: %s", esp_err_to_name(eyes_ret));
+                s_state = DISPLAY_STATE_ERROR;
+                return eyes_ret;
+            }
+        }
+        break;
+
     case DISPLAY_MODE_TOUCH_GAME:
         ESP_LOGI(TAG, "Launching Touch Game demo...");
         touch_game_demo(&s_gui, s_touch);
@@ -242,7 +254,10 @@ esp_err_t display_system_stop(const display_handles_t *handles)
     }
 
     // Clear screen to indicate stop (mode-dependent)
-    if (s_config.mode == DISPLAY_MODE_LVGL) {
+    if (s_config.mode == DISPLAY_MODE_LVGL || s_config.mode == DISPLAY_MODE_EXPRESSIVE_EYES) {
+        if (s_config.mode == DISPLAY_MODE_EXPRESSIVE_EYES) {
+            expressive_eyes_display_deinit();
+        }
         lvgl_port_lock(0);
         lv_obj_t *scr = lv_screen_active();
         lv_obj_clean(scr);
@@ -267,9 +282,17 @@ display_state_t display_system_get_state(void)
 
 esp_err_t display_system_show_black_screen(void)
 {
-    if (s_config.mode != DISPLAY_MODE_LVGL || s_lvgl_ctx.disp == NULL) {
+    if ((s_config.mode != DISPLAY_MODE_LVGL && s_config.mode != DISPLAY_MODE_EXPRESSIVE_EYES) ||
+        s_lvgl_ctx.disp == NULL) {
         ESP_LOGW(TAG, "Show black screen only supported in LVGL mode");
         return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    // Stop expressive eyes animation task first to prevent it from
+    // calling lv_obj_invalidate on the cleaned canvas, which causes
+    // Task Watchdog timeout (IDLE1 starved on CPU 1).
+    if (s_config.mode == DISPLAY_MODE_EXPRESSIVE_EYES) {
+        expressive_eyes_display_deinit();
     }
 
     lvgl_port_lock(0);
@@ -285,16 +308,35 @@ esp_err_t display_system_show_black_screen(void)
 
 esp_err_t display_system_show_ui(void)
 {
-    if (s_config.mode != DISPLAY_MODE_LVGL || s_lvgl_ctx.disp == NULL) {
+    if ((s_config.mode != DISPLAY_MODE_LVGL && s_config.mode != DISPLAY_MODE_EXPRESSIVE_EYES) ||
+        s_lvgl_ctx.disp == NULL) {
         ESP_LOGW(TAG, "Show UI only supported in LVGL mode");
         return ESP_ERR_NOT_SUPPORTED;
     }
 
-    lvgl_port_lock(0);
-    lvgl_display_demo_ui(&s_lvgl_ctx);
-    lvgl_port_unlock();
+    if (s_config.mode == DISPLAY_MODE_EXPRESSIVE_EYES) {
+        // Re-initialize expressive eyes (was deinitialized when showing black screen)
+        expressive_eyes_cfg_t eyes_cfg = {
+            .disp                 = s_lvgl_ctx.disp,
+            .screen_width         = BOARD_LCD_H_RES,
+            .screen_height        = BOARD_LCD_V_RES,
+            .blink_duration       = 0.12f,
+            .blink_interval       = 4.0f,
+            .enable_auto_blink    = true,
+            .enable_pupil_physics = true,
+        };
+        esp_err_t ret = expressive_eyes_display_init(&eyes_cfg);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to re-init expressive eyes: %s", esp_err_to_name(ret));
+            return ret;
+        }
+    } else {
+        lvgl_port_lock(0);
+        lvgl_display_demo_ui(&s_lvgl_ctx);
+        lvgl_port_unlock();
+    }
 
-    ESP_LOGI(TAG, "Display: demo UI restored");
+    ESP_LOGI(TAG, "Display: UI restored");
     return ESP_OK;
 }
 
@@ -307,8 +349,9 @@ void display_system_deinit(display_handles_t *handles)
         display_system_stop(handles);
     }
 
-    // Step 1: Deinitialize LVGL (if in LVGL mode)
-    if (s_config.mode == DISPLAY_MODE_LVGL && s_lvgl_ctx.disp != NULL) {
+    // Step 1: Deinitialize LVGL (if in LVGL/expressive eyes mode)
+    if ((s_config.mode == DISPLAY_MODE_LVGL || s_config.mode == DISPLAY_MODE_EXPRESSIVE_EYES) &&
+        s_lvgl_ctx.disp != NULL) {
         ESP_LOGI(TAG, "Deinitializing LVGL display...");
         lvgl_display_deinit(&s_lvgl_ctx);
     }

@@ -58,6 +58,16 @@ static const tool_meta_t s_tool_meta[] = {
     {"led.set_color_temp", "Set LED color temperature (0=warmest, 100=coolest)",
      "{\"type\":\"object\",\"properties\":{\"color_temp\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100}},"
      "\"required\":[\"color_temp\"]}"},
+    {"eyes.set_expression",
+     "Set expressive eyes expression (neutral/happy/sad/angry/surprised/sleepy/bored/wink_left/wink_right)",
+     "{\"type\":\"object\",\"properties\":{\"expression\":{\"type\":\"string\",\"enum\":[\"neutral\",\"happy\",\"sad\","
+     "\"angry\",\"surprised\",\"sleepy\",\"bored\",\"wink_left\",\"wink_right\"]}},\"required\":[\"expression\"]}"},
+    {"eyes.look_at", "Set eyes look direction",
+     "{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"number\",\"minimum\":-1,\"maximum\":1},"
+     "\"y\":{\"type\":\"number\",\"minimum\":-1,\"maximum\":1}},\"required\":[\"x\",\"y\"]}"},
+    {"eyes.blink", "Trigger an eye blink", "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"},
+    {"eyes.get_expression", "Get current expressive eyes expression",
+     "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"},
 };
 
 #define TOOL_COUNT (sizeof(s_tool_meta) / sizeof(s_tool_meta[0]))
@@ -115,6 +125,14 @@ static mcp_tool_cb_t find_tool_callback(const char *name)
         return s_callbacks.led_set_brightness;
     if (strcmp(name, "led.set_color_temp") == 0)
         return s_callbacks.led_set_color_temp;
+    if (strcmp(name, "eyes.set_expression") == 0)
+        return s_callbacks.eyes_set_expression;
+    if (strcmp(name, "eyes.look_at") == 0)
+        return s_callbacks.eyes_look_at;
+    if (strcmp(name, "eyes.blink") == 0)
+        return s_callbacks.eyes_blink;
+    if (strcmp(name, "eyes.get_expression") == 0)
+        return s_callbacks.eyes_get_expression;
 
     return NULL;
 }

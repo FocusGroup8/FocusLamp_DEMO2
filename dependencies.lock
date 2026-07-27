@@ -328,8 +328,9 @@ direct_dependencies:
 - espressif/esp_video
 - espressif/esp_websocket_client
 - espressif/esp_wifi_remote
+- idf
 - joltwallet/littlefs
 - lvgl/lvgl
-manifest_hash: 46a4ec53162bffe34e6809b8a239f2bc3d6fda65e6a817bcdf93195362e9dc00
+manifest_hash: d6679d25202dd7d613e18e229bca2bfee15a1cc3331565f3bec75098c4bcec3c
 target: esp32p4
 version: 2.0.0

@@ -19,6 +19,7 @@ typedef enum {
     WS_MANAGER_EVENT_ERROR,             /*!< Error occurred */
     WS_MANAGER_EVENT_SERVER_CONNECT,    /*!< New client connected to server */
     WS_MANAGER_EVENT_SERVER_DISCONNECT, /*!< Client disconnected from server */
+    WS_MANAGER_EVENT_CLIENT_TIMEOUT,    /*!< Server client heartbeat timeout */
 } ws_manager_event_t;
 
 /**

@@ -8,12 +8,14 @@
 
 #include "cJSON.h"
 #include "camera_stream.h"
+#include "connection_manager.h"
 #include "display_system.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "heartbeat_service.h"
 #if CONFIG_EXAMPLE_ENABLE_LED
 #include "led_controller.h"
 #endif
@@ -21,6 +23,7 @@
 #include "expressive_eyes_display.h"
 #endif
 #include "mcp_tools.h"
+#include "message_queue.h"
 #include "system_manager.h"
 #include "websocket_manager.h"
 #include "wifi_manager.h"
@@ -29,7 +32,7 @@
 
 static const char *TAG = "net_mgr";
 
-#define MCP_RESPONSE_BUF_SIZE 1024
+#define MCP_RESPONSE_BUF_SIZE 4096
 #define WIFI_CONNECT_TIMEOUT_MS 30000
 
 static bool s_initialized                     = false;
@@ -96,11 +99,11 @@ static void ws_data_handler(ws_manager_event_t event, void *data)
         return;
     }
 
-    /* Send response back to client */
+    /* Send response back to client via message queue for reliable delivery */
     if (msg->client_fd >= 0 && response_buf[0] != '\0') {
-        ret = ws_manager_server_send_text(msg->client_fd, response_buf, strlen(response_buf));
+        ret = message_queue_enqueue(msg->client_fd, response_buf, strlen(response_buf), MSG_QUEUE_TYPE_TEXT);
         if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "MCP response send failed: %s", esp_err_to_name(ret));
+            ESP_LOGW(TAG, "MCP response enqueue failed: %s", esp_err_to_name(ret));
         }
     }
 }
@@ -1197,6 +1200,42 @@ esp_err_t network_manager_init(void)
     }
 #endif
 
+    /* 5. Initialize Connection Manager (WiFi + WebSocket health monitoring) */
+    ESP_LOGI(TAG, "Initializing connection manager...");
+    conn_mgr_config_t conn_cfg = {
+        .wifi_init_timeout_ms        = WIFI_CONNECT_TIMEOUT_MS,
+        .wifi_reconnect_max_delay_ms = 60000,
+        .ws_reconnect_max_delay_ms   = 60000,
+        .monitor_interval_ms         = 5000,
+    };
+    ret = connection_manager_init(&conn_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Connection manager init failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ret = connection_manager_start();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Connection manager start failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    /* 6. Initialize Heartbeat Service (WebSocket server client liveness) */
+    ESP_LOGI(TAG, "Starting heartbeat service...");
+    ret = heartbeat_service_start_server(30, 90);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Heartbeat service start failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    /* 7. Initialize Message Queue (reliable WebSocket message delivery) */
+    ESP_LOGI(TAG, "Initializing message queue...");
+    ret = message_queue_init(16, 3);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Message queue init failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
     s_initialized = true;
     ESP_LOGI(TAG, "Network manager initialized successfully");
     ESP_LOGI(TAG, "Open http://%s/ in browser or use tools/web_ui/index.html", s_ip_string);
@@ -1208,6 +1247,12 @@ void network_manager_deinit(void)
     if (!s_initialized) {
         return;
     }
+
+    /* Stop enhanced services in reverse init order */
+    message_queue_deinit();
+    heartbeat_service_stop();
+    connection_manager_stop();
+    connection_manager_deinit();
 
 #if CONFIG_EXAMPLE_ENABLE_CAMERA
     camera_stream_deinit();

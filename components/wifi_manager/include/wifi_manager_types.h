@@ -12,10 +12,12 @@ extern "C" {
  * @brief WiFi Manager event types
  */
 typedef enum {
-    WIFI_MANAGER_EVENT_CONNECTED,    /*!< WiFi connected to AP */
-    WIFI_MANAGER_EVENT_DISCONNECTED, /*!< WiFi disconnected from AP */
-    WIFI_MANAGER_EVENT_GOT_IP,       /*!< Got IP address */
-    WIFI_MANAGER_EVENT_SCAN_DONE,    /*!< WiFi scan completed */
+    WIFI_MANAGER_EVENT_CONNECTED,      /*!< WiFi connected to AP */
+    WIFI_MANAGER_EVENT_DISCONNECTED,   /*!< WiFi disconnected from AP */
+    WIFI_MANAGER_EVENT_GOT_IP,         /*!< Got IP address */
+    WIFI_MANAGER_EVENT_SCAN_DONE,      /*!< WiFi scan completed */
+    WIFI_MANAGER_EVENT_RECONNECTING,   /*!< WiFi reconnecting with backoff */
+    WIFI_MANAGER_EVENT_HOSTED_TIMEOUT, /*!< ESP-Hosted heartbeat timeout */
 } wifi_manager_event_t;
 
 /**

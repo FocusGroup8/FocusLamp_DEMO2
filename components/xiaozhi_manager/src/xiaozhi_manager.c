@@ -50,6 +50,11 @@ static bool s_reconnect_canceled = false;
 /* MCP reconnect verification state */
 static int s_mcp_reconnect_count = 0;
 
+/* Saved chat config for reconnect — needed because chat_deinit destroys
+ * the chat session and MCP engine, requiring full reinit on reconnect. */
+static esp_xiaozhi_chat_config_t s_chat_config = {0};
+static bool s_chat_config_saved = false;
+
 /* Microphone state: tracks whether mic capture is active.
  * Mic is started when audio channel opens, stopped when it closes.
  * During TTS playback, mic is paused to avoid echo feedback.
@@ -76,6 +81,9 @@ mcp_tool_test_echo(const esp_mcp_property_list_t *properties);
  *-------------------------------------------------------------*/
 static void schedule_reconnect_if_needed(void);
 static void cancel_reconnect(void);
+static esp_err_t register_mcp_tools(void);
+static void xiaozhi_esp_event_handler(void *arg, esp_event_base_t event_base,
+                                      int32_t event_id, void *event_data);
 
 static void reconnect_timer_callback(void *arg) {
   (void)arg;
@@ -88,7 +96,87 @@ static void reconnect_timer_callback(void *arg) {
   }
   ESP_LOGI(TAG, "Auto-reconnecting (attempt %d)...", s_reconnect_count);
   s_state = XIAOZHI_MANAGER_STATE_CONNECTING;
-  esp_err_t ret = esp_xiaozhi_chat_start(s_chat_handle);
+
+  /* Full deinit + reinit cycle to ensure MCP engine state is clean.
+   * The previous approach of just calling chat_start() was insufficient
+   * because: (1) the MCP engine retained stale session state from the
+   * prior connection, causing ESP_ERR_INVALID_STATE on re-initialize;
+   * (2) the mcp_chat_handle was cleared by chat_stop_runtime, making
+   * connected_handler fail with "Invalid handle".
+   *
+   * By doing a full deinit/reinit, we create a fresh MCP engine and
+   * transport, avoiding all stale state issues. */
+  if (s_chat_handle != 0) {
+    /* Unregister event handler before deinit to avoid receiving events
+     * from the dying chat instance during the reinit process. */
+    esp_event_handler_unregister(ESP_XIAOZHI_CHAT_EVENTS, ESP_EVENT_ANY_ID,
+                                 xiaozhi_esp_event_handler);
+    esp_xiaozhi_chat_stop(s_chat_handle);
+    esp_xiaozhi_chat_deinit(s_chat_handle);
+    s_chat_handle = 0;
+    s_mcp_engine = NULL;
+    s_owns_mcp = false;
+  }
+
+  /* Re-register MCP tools (needed because chat_deinit destroyed the
+   * MCP engine that owned all registered tools) */
+  esp_err_t ret = esp_mcp_create(&s_mcp_engine);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to re-create MCP engine: %s", esp_err_to_name(ret));
+    s_state = XIAOZHI_MANAGER_STATE_ERROR;
+    schedule_reconnect_if_needed();
+    return;
+  }
+  s_owns_mcp = true;
+
+  ret = register_mcp_tools();
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to re-register MCP tools: %s", esp_err_to_name(ret));
+    esp_mcp_destroy(s_mcp_engine);
+    s_mcp_engine = NULL;
+    s_owns_mcp = false;
+    s_state = XIAOZHI_MANAGER_STATE_ERROR;
+    schedule_reconnect_if_needed();
+    return;
+  }
+
+  /* Re-init chat with saved config (transfer MCP engine ownership) */
+  if (!s_chat_config_saved) {
+    ESP_LOGE(TAG, "No saved chat config for reconnect");
+    esp_mcp_destroy(s_mcp_engine);
+    s_mcp_engine = NULL;
+    s_owns_mcp = false;
+    s_state = XIAOZHI_MANAGER_STATE_ERROR;
+    schedule_reconnect_if_needed();
+    return;
+  }
+
+  esp_xiaozhi_chat_config_t new_config = s_chat_config;
+  new_config.mcp_engine = s_mcp_engine;
+  new_config.owns_mcp_engine = true;
+
+  ret = esp_xiaozhi_chat_init(&new_config, &s_chat_handle);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to re-init chat: %s", esp_err_to_name(ret));
+    esp_mcp_destroy(s_mcp_engine);
+    s_mcp_engine = NULL;
+    s_owns_mcp = false;
+    s_state = XIAOZHI_MANAGER_STATE_ERROR;
+    schedule_reconnect_if_needed();
+    return;
+  }
+  s_owns_mcp = false; /* chat owns MCP engine now */
+
+  /* Re-register event handler */
+  ret = esp_event_handler_register(ESP_XIAOZHI_CHAT_EVENTS, ESP_EVENT_ANY_ID,
+                                   xiaozhi_esp_event_handler, NULL);
+  if (ret != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to re-register event handler: %s",
+             esp_err_to_name(ret));
+  }
+
+  /* Start new chat session */
+  ret = esp_xiaozhi_chat_start(s_chat_handle);
   if (ret != ESP_OK) {
     ESP_LOGW(TAG, "Reconnect attempt %d failed: %s", s_reconnect_count,
              esp_err_to_name(ret));
@@ -101,9 +189,15 @@ static void reconnect_timer_callback(void *arg) {
 }
 
 static void schedule_reconnect_if_needed(void) {
-  if (!s_config.auto_reconnect || s_chat_handle == 0) {
+  if (!s_config.auto_reconnect) {
     return;
   }
+  /* Allow reconnect even if s_chat_handle == 0 (after deinit cycle)
+   * as long as we have saved config to reinit from. */
+  if (s_chat_handle == 0 && !s_chat_config_saved) {
+    return;
+  }
+
   if (s_reconnect_timer == NULL) {
     const esp_timer_create_args_t timer_args = {
         .callback = reconnect_timer_callback, .name = "xiaozhi_reconnect"};
@@ -327,6 +421,10 @@ static void xiaozhi_event_callback(esp_xiaozhi_chat_event_t event,
          * word again. Conversation ends only on SERVER_GOODBYE or
          * AUDIO_CHANNEL_CLOSED. */
         s_state = XIAOZHI_MANAGER_STATE_LISTENING;
+        /* Flush any stale OPUS frames from the decode queue.
+         * Without this, leftover frames continue writing to I2S
+         * after TTS has ended, causing ESP_ERR_TIMEOUT errors. */
+        audio_bridge_flush_tts();
         mic_resume_after_tts();
         /* Wake word engine was never paused — AEC handled echo cancellation.
          * NOTE: AEC is currently disabled for diagnostic purposes,
@@ -543,8 +641,7 @@ mcp_tool_test_ping(const esp_mcp_property_list_t *properties) {
            s_mcp_reconnect_count);
   /* Return structured info for verification */
   char result[64];
-  snprintf(result, sizeof(result),
-           "{\"status\":\"ok\",\"reconnects\":%d}",
+  snprintf(result, sizeof(result), "{\"status\":\"ok\",\"reconnects\":%d}",
            s_mcp_reconnect_count);
   return esp_mcp_value_create_string(result);
 }
@@ -785,6 +882,15 @@ esp_err_t xiaozhi_manager_init(const xiaozhi_manager_config_t *config) {
     return ret;
   }
 
+  /* Save chat config for reconnect (must be after chat_init succeeds).
+   * Note: mcp_engine and owns_mcp_engine are NOT saved here because
+   * they change on each reconnect — reconnect_timer_callback sets them
+   * dynamically based on the newly created MCP engine. */
+  s_chat_config = chat_config;
+  s_chat_config.mcp_engine = NULL;       /* Will be set during reconnect */
+  s_chat_config.owns_mcp_engine = false; /* Will be set during reconnect */
+  s_chat_config_saved = true;
+
   /* After chat_init with owns_mcp_engine=true, chat owns the MCP engine */
   s_owns_mcp = false;
 
@@ -839,6 +945,7 @@ esp_err_t xiaozhi_manager_deinit(void) {
 
   s_mcp_engine = NULL;
   s_owns_mcp = false;
+  s_chat_config_saved = false;
   s_state = XIAOZHI_MANAGER_STATE_IDLE;
   s_display_cb = NULL;
 
@@ -916,7 +1023,26 @@ esp_err_t xiaozhi_manager_send_wake_word(const char *wake_word) {
   }
 
   ESP_LOGI(TAG, "Wake word detected: %s", wake_word);
-  return esp_xiaozhi_chat_send_wake_word(s_chat_handle, wake_word);
+  esp_err_t ret = esp_xiaozhi_chat_send_wake_word(s_chat_handle, wake_word);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to send wake word: %s", esp_err_to_name(ret));
+    return ret;
+  }
+
+  /* After sending wake word detection, tell the server to start listening
+   * for user voice input. Without this, the server only knows a wake word
+   * was detected but does not begin processing incoming audio frames.
+   * This aligns with the official esp_xiaozhi state machine:
+   *   detect -> start listening (auto mode) */
+  ret = esp_xiaozhi_chat_send_start_listening(
+      s_chat_handle, ESP_XIAOZHI_CHAT_LISTENING_MODE_AUTO);
+  if (ret != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to send start_listening after wake word: %s",
+             esp_err_to_name(ret));
+    /* Non-fatal: server may still process audio based on detect message */
+  }
+
+  return ESP_OK;
 }
 
 esp_err_t xiaozhi_manager_open_audio_channel(void) {
@@ -957,7 +1083,8 @@ esp_err_t xiaozhi_manager_speak(const char *text, int priority) {
    * NOTE: esp_mcp_notify_log_message() is not supported by xiaozhi
    * transport (no emit_message in vtable). Log locally only. */
   if (s_mcp_engine) {
-    ESP_LOGI(TAG, "Speak request logged locally (MCP emit unsupported): \"%s\"", text);
+    ESP_LOGI(TAG, "Speak request logged locally (MCP emit unsupported): \"%s\"",
+             text);
   }
 
   return ESP_OK;

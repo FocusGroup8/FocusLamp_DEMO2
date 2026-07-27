@@ -36,6 +36,10 @@ extern "C" {
  *   self.mipi_dsi.touch.wake         → GET  /api/touch/wake
  *   self.mipi_dsi.touch.brightness   → GET  /api/touch/brightness
  *   self.mipi_dsi.touch.reset        → POST /api/touch/reset
+ *   self.mipi_dsi.eyes.set_expression → POST /api/eyes/expression
+ *   self.mipi_dsi.eyes.look_at       → POST /api/eyes/look_at
+ *   self.mipi_dsi.eyes.blink         → POST /api/eyes/blink
+ *   self.mipi_dsi.eyes.get_expression → GET  /api/eyes/expression
  */
 
 /**
@@ -56,7 +60,7 @@ void mipi_dsi_bridge_deinit(void);
 /**
  * @brief Register MCP tools for mipi_dsi control
  *
- * Registers 8 MCP tools that forward commands to mipi_dsi
+ * Registers 19 MCP tools that forward commands to mipi_dsi
  * via HTTP REST API. Must be called after mipi_dsi_bridge_init()
  * and with a valid MCP engine instance.
  *

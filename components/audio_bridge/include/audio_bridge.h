@@ -12,20 +12,21 @@ typedef struct audio_bridge_s audio_bridge_t;
  * @brief Audio bridge configuration
  */
 typedef struct {
-    int sample_rate;         /*!< I2S sample rate (default 16000) */
-    int bclk_gpio;           /*!< BCLK GPIO number */
-    int ws_gpio;             /*!< WS GPIO number */
-    int dout_gpio;           /*!< DOUT GPIO (→ amplifier) */
-    int din_gpio;            /*!< DIN GPIO (← microphone) */
+  int sample_rate; /*!< I2S sample rate (default 16000) */
+  int bclk_gpio;   /*!< BCLK GPIO number */
+  int ws_gpio;     /*!< WS GPIO number */
+  int dout_gpio;   /*!< DOUT GPIO (→ amplifier) */
+  int din_gpio;    /*!< DIN GPIO (← microphone) */
 } audio_bridge_config_t;
 
-#define AUDIO_BRIDGE_DEFAULT_CONFIG() { \
-    .sample_rate = 16000, \
-    .bclk_gpio = 32, \
-    .ws_gpio = 33, \
-    .dout_gpio = 31, \
-    .din_gpio = 30, \
-}
+#define AUDIO_BRIDGE_DEFAULT_CONFIG()                                          \
+  {                                                                            \
+      .sample_rate = 16000,                                                    \
+      .bclk_gpio = 32,                                                         \
+      .ws_gpio = 33,                                                           \
+      .dout_gpio = 31,                                                         \
+      .din_gpio = 30,                                                          \
+  }
 
 /**
  * @brief Microphone audio output callback (OPUS-encoded)
@@ -37,7 +38,8 @@ typedef struct {
  * @param len Frame length in bytes
  * @param ctx User context provided in audio_bridge_mic_start()
  */
-typedef void (*audio_bridge_mic_callback_t)(const uint8_t *opus_data, int len, void *ctx);
+typedef void (*audio_bridge_mic_callback_t)(const uint8_t *opus_data, int len,
+                                            void *ctx);
 
 /**
  * @brief Raw PCM audio data callback (16-bit, 16kHz, mono)
@@ -50,7 +52,8 @@ typedef void (*audio_bridge_mic_callback_t)(const uint8_t *opus_data, int len, v
  * @param sample_count Number of samples in this frame
  * @param ctx User context provided in audio_bridge_register_pcm_callback()
  */
-typedef void (*audio_bridge_pcm_callback_t)(const int16_t *pcm_data, int sample_count, void *ctx);
+typedef void (*audio_bridge_pcm_callback_t)(const int16_t *pcm_data,
+                                            int sample_count, void *ctx);
 
 /**
  * @brief Initialize audio bridge (I2S full-duplex)
@@ -65,12 +68,14 @@ esp_err_t audio_bridge_deinit(void);
 /**
  * @brief Write PCM data to I2S TX (speaker playback)
  */
-esp_err_t audio_bridge_write_pcm(const void *data, size_t len, size_t *bytes_written, uint32_t timeout_ms);
+esp_err_t audio_bridge_write_pcm(const void *data, size_t len,
+                                 size_t *bytes_written, uint32_t timeout_ms);
 
 /**
  * @brief Read PCM data from I2S RX (microphone capture)
  */
-esp_err_t audio_bridge_read_pcm(void *data, size_t len, size_t *bytes_read, uint32_t timeout_ms);
+esp_err_t audio_bridge_read_pcm(void *data, size_t len, size_t *bytes_read,
+                                uint32_t timeout_ms);
 
 /**
  * @brief Feed OPUS-encoded audio data for TTS playback
@@ -84,6 +89,16 @@ void audio_bridge_tts_callback(const uint8_t *data, int len, void *ctx);
  * @brief Set TTS playback volume
  */
 esp_err_t audio_bridge_set_volume(int volume_percent);
+
+/**
+ * @brief Flush pending TTS OPUS frames from decode queue
+ *
+ * Called when TTS playback stops to discard any stale OPUS frames
+ * still queued for decoding. Without this, leftover frames continue
+ * to write to I2S after TTS has ended, causing ESP_ERR_TIMEOUT
+ * errors as the DMA buffers drain slowly.
+ */
+void audio_bridge_flush_tts(void);
 
 /**
  * @brief Get current volume
@@ -102,7 +117,8 @@ int audio_bridge_get_volume(void);
  * @param ctx User context passed to callback
  * @return ESP_OK on success
  */
-esp_err_t audio_bridge_mic_start(audio_bridge_mic_callback_t callback, void *ctx);
+esp_err_t audio_bridge_mic_start(audio_bridge_mic_callback_t callback,
+                                 void *ctx);
 
 /**
  * @brief Stop microphone capture
@@ -119,7 +135,8 @@ esp_err_t audio_bridge_mic_stop(void);
  * @param callback Function called for each PCM frame (NULL to unregister)
  * @param ctx User context passed to callback
  */
-void audio_bridge_register_pcm_callback(audio_bridge_pcm_callback_t callback, void *ctx);
+void audio_bridge_register_pcm_callback(audio_bridge_pcm_callback_t callback,
+                                        void *ctx);
 
 /**
  * @brief Read TTS reference PCM data for AEC (Acoustic Echo Cancellation)
@@ -136,7 +153,8 @@ void audio_bridge_register_pcm_callback(audio_bridge_pcm_callback_t callback, vo
  * @param timeout_ms Timeout in ms to wait for data (0 = non-blocking)
  * @return Number of samples actually read, or -1 on error
  */
-int audio_bridge_read_ref_pcm(int16_t *out_buf, int samples, uint32_t timeout_ms);
+int audio_bridge_read_ref_pcm(int16_t *out_buf, int samples,
+                              uint32_t timeout_ms);
 
 #ifdef __cplusplus
 }

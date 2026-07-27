@@ -472,7 +472,7 @@
  */
 #define BOARD_JPEG_QUALITY 80 /*!< JPEG encoding quality (1-100). 80 = high quality, ~50-100KB/frame */
 #define BOARD_JPEG_SUB_SAMPLE \
-    JPEG_DOWN_SAMPLING_YUV422 /*!< JPEG chroma subsampling (YUV422: good quality/compression balance) */
+    JPEG_DOWN_SAMPLING_YUV420 /*!< JPEG chroma subsampling (YUV420: smaller size, ~30% less bandwidth than YUV422) */
 #define BOARD_JPEG_OUT_BUF_SIZE \
     (200 * 1024) /*!< JPEG output buffer size in bytes (200KB, sufficient for 800x640 Q=80) */
 /** @} */

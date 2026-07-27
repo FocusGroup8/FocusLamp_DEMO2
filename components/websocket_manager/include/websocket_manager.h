@@ -173,6 +173,25 @@ esp_err_t ws_manager_server_broadcast_binary(const char *data, int len);
  */
 int ws_manager_server_get_client_count(void);
 
+/**
+ * @brief Get WebSocket server send statistics
+ *
+ * Provides congestion signals (failure count, send duration, pool exhaustion)
+ * for adaptive streaming algorithms to detect network conditions.
+ *
+ * @param stats  Pointer to ws_send_stats_t to fill
+ * @return ESP_OK on success, error code on failure
+ */
+esp_err_t ws_manager_server_get_send_stats(ws_send_stats_t *stats);
+
+/**
+ * @brief Reset send statistics counters
+ *
+ * Useful for periodic sampling: read stats, reset, wait interval, read again
+ * to compute delta-based metrics (e.g., failures per second).
+ */
+void ws_manager_server_reset_send_stats(void);
+
 #endif /* WS_MANAGER_SERVER_ENABLE */
 
 #else /* WS_MANAGER_ENABLE == 0 */

@@ -10,13 +10,18 @@
 #if (WS_MANAGER_ENABLE == 1)
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include <errno.h>
+#include <netinet/tcp.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 /* Callback storage */
@@ -24,6 +29,104 @@ static ws_manager_cb_t s_callbacks[WS_MANAGER_EVENT_CLIENT_TIMEOUT + 1] = {NULL}
 
 /* TAG used by both client and server code */
 static const char *TAG = "ws_mgr";
+
+/*---------------------------------------------------------------
+ * Async WS send completion callback & frame buffer pool
+ *-------------------------------------------------------------*/
+#if WS_MANAGER_SERVER_ENABLE
+
+#define WS_FRAME_POOL_SIZE 4          /* Number of pre-allocated frame buffers (2 clients × 2 in-flight) */
+#define WS_FRAME_BUF_SIZE (32 * 1024) /* 32KB per buffer, sufficient for Q=15 YUV420 @ 800x640 */
+
+/* EWMA smoothing factor for send duration (α=0.2, ~5 samples time constant) */
+#define WS_SEND_DURATION_EWMA_ALPHA 0.2f
+
+typedef struct {
+    uint8_t data[WS_FRAME_BUF_SIZE];
+    int len;
+    atomic_bool in_use;
+    int64_t start_time_us; /* Timestamp when send was initiated (for duration tracking) */
+} ws_frame_buf_t;
+
+static ws_frame_buf_t s_frame_pool[WS_FRAME_POOL_SIZE];
+
+/* Send statistics: updated by httpd worker thread (ws_async_send_complete_cb)
+ * and read by cam_stream task. Uses atomic operations for thread safety. */
+static struct {
+    uint32_t total_sent;           /* Total frames successfully sent */
+    uint32_t total_failed;         /* Total frames failed to send */
+    uint32_t consecutive_failures; /* Current consecutive failure count */
+    uint32_t pool_exhausted;       /* Frame buffer pool exhausted count */
+    int last_error;                /* Last error code (errno value) */
+    int64_t last_send_duration_us; /* Last send duration (queue to completion) */
+    int64_t avg_send_duration_us;  /* EWMA of send duration */
+} s_send_stats;
+
+/* Called by httpd worker thread after httpd_ws_send_data_async completes.
+ * Returns the frame buffer to the pool.
+ * On send failure, log a warning to help diagnose connection issues.
+ * TCP keepalive (idle=3s, interval=2s, count=2) ensures broken
+ * connections are detected within ~7 seconds, at which point httpd
+ * calls ws_session_close_cb to clean up s_camera_client_fd. */
+static void ws_async_send_complete_cb(esp_err_t err, int socket, void *arg)
+{
+    ws_frame_buf_t *buf = (ws_frame_buf_t *)arg;
+
+    /* Calculate send duration (from queue to completion) */
+    int64_t now_us      = esp_timer_get_time();
+    int64_t duration_us = now_us - buf->start_time_us;
+
+    if (err != ESP_OK) {
+        /* Map ESP error codes to errno-like values for congestion classification:
+         * - ESP_ERR_TIMEOUT / ESP_FAIL with EAGAIN: transient congestion (buffer full)
+         * - ESP_ERR_INVALID_STATE / ESP_ERR_INVALID_ARG: connection broken
+         * The actual errno is logged but not directly accessible here;
+         * we use the ESP error code as a proxy. */
+        s_send_stats.total_failed++;
+        s_send_stats.consecutive_failures++;
+        s_send_stats.last_error = (int)err;
+
+        /* Classify error for logging: transient vs fatal */
+        if (err == ESP_ERR_TIMEOUT || err == ESP_FAIL) {
+            /* EAGAIN (errno 11) equivalent: transient congestion, buffer full */
+            ESP_LOGD(TAG, "Transient send failure on fd=%d: %s (congestion)", socket, esp_err_to_name(err));
+        } else {
+            /* ECONNRESET (errno 104) or other: connection-level error */
+            ESP_LOGW(TAG, "Async WS send failed on fd=%d: %s", socket, esp_err_to_name(err));
+        }
+    } else {
+        s_send_stats.total_sent++;
+        s_send_stats.consecutive_failures = 0;
+        s_send_stats.last_error           = 0;
+
+        /* Update send duration statistics (EWMA) */
+        s_send_stats.last_send_duration_us = duration_us;
+        if (s_send_stats.avg_send_duration_us == 0) {
+            s_send_stats.avg_send_duration_us = duration_us;
+        } else {
+            float new_avg = WS_SEND_DURATION_EWMA_ALPHA * (float)duration_us +
+                            (1.0f - WS_SEND_DURATION_EWMA_ALPHA) * (float)s_send_stats.avg_send_duration_us;
+            s_send_stats.avg_send_duration_us = (int64_t)new_avg;
+        }
+    }
+
+    atomic_store(&buf->in_use, false); /* Return buffer to pool */
+}
+
+/* Acquire a free buffer from the pool. Returns NULL if all in use. */
+static ws_frame_buf_t *ws_frame_pool_acquire(void)
+{
+    for (int i = 0; i < WS_FRAME_POOL_SIZE; i++) {
+        bool expected = false;
+        if (atomic_compare_exchange_strong(&s_frame_pool[i].in_use, &expected, true)) {
+            s_frame_pool[i].start_time_us = esp_timer_get_time();
+            return &s_frame_pool[i];
+        }
+    }
+    s_send_stats.pool_exhausted++;
+    return NULL; /* All buffers busy — drop this frame */
+}
+#endif
 
 static void dispatch_event(ws_manager_event_t event, void *data)
 {
@@ -248,6 +351,12 @@ static int s_client_fds[WS_MANAGER_SERVER_MAX_CONN];
 static int s_client_count               = 0;
 static SemaphoreHandle_t s_server_mutex = NULL;
 
+/* Camera stream client limit: only 1 concurrent /camera connection allowed.
+ * Camera streaming is bandwidth-intensive; multiple clients would exceed
+ * WiFi capacity and cause frame congestion / disconnection oscillation. */
+#define WS_CAMERA_MAX_CLIENTS 1
+static int s_camera_client_fd = -1;
+
 /* Pre-allocated receive buffer to avoid frequent malloc/free */
 static uint8_t s_recv_buf[WS_MANAGER_BUFFER_SIZE];
 
@@ -291,6 +400,11 @@ static void track_client_remove(int fd)
             break;
         }
     }
+    /* Also clear camera client tracking */
+    if (s_camera_client_fd == fd) {
+        s_camera_client_fd = -1;
+        ESP_LOGI(TAG, "Server: /camera client slot released (fd=%d)", fd);
+    }
     if (s_server_mutex) {
         xSemaphoreGive(s_server_mutex);
     }
@@ -304,12 +418,79 @@ static void ws_session_close_cb(httpd_handle_t hd, int sockfd)
     close(sockfd);
 }
 
+/* Session open callback: optimize socket for WebSocket streaming */
+static esp_err_t ws_session_open_cb(httpd_handle_t hd, int sockfd)
+{
+    /* Set TCP_NODELAY: disable Nagle's algorithm for lower latency.
+     * Critical for WebSocket streaming where small header frames
+     * should be sent immediately without waiting for more data. */
+    int nodelay = 1;
+    if (setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay)) < 0) {
+        ESP_LOGW(TAG, "Failed to set TCP_NODELAY on fd=%d (errno=%d)", sockfd, errno);
+    }
+
+    /* Override SO_SNDTIMEO to 500ms (from httpd default of 1s).
+     * When the TCP send buffer is full, send() blocks for SO_SNDTIMEO
+     * before returning EAGAIN. The httpd worker thread is single-threaded,
+     * so a very long block stalls ALL WebSocket processing.
+     * 500ms provides enough time for the TCP buffer to drain on slow
+     * WiFi while keeping the httpd thread responsive. The previous 100ms
+     * was too aggressive and caused frequent send timeouts on weak networks. */
+    struct timeval tv = {
+        .tv_sec  = 0,
+        .tv_usec = 500000, /* 500ms */
+    };
+    if (setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0) {
+        ESP_LOGW(TAG, "Failed to set SO_SNDTIMEO on fd=%d (errno=%d)", sockfd, errno);
+    }
+
+    /* Enable TCP keepalive to detect dead connections quickly.
+     * Without keepalive, a half-open connection (e.g., client lost WiFi)
+     * can persist for 30+ seconds before TCP detects it. During this time,
+     * s_camera_client_fd still holds the old fd, and new connections are
+     * rejected with 403, making auto-reconnect appear broken.
+     * With keepalive idle=3s, interval=2s, count=2, a dead connection
+     * is detected in ~7 seconds. */
+    int keepalive = 1;
+    if (setsockopt(sockfd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive)) < 0) {
+        ESP_LOGW(TAG, "Failed to set SO_KEEPALIVE on fd=%d (errno=%d)", sockfd, errno);
+    }
+    int idle = 3; /* Start probing after 3 seconds of idle */
+    if (setsockopt(sockfd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle)) < 0) {
+        ESP_LOGW(TAG, "Failed to set TCP_KEEPIDLE on fd=%d (errno=%d)", sockfd, errno);
+    }
+    int interval = 2; /* Send probe every 2 seconds */
+    if (setsockopt(sockfd, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof(interval)) < 0) {
+        ESP_LOGW(TAG, "Failed to set TCP_KEEPINTVL on fd=%d (errno=%d)", sockfd, errno);
+    }
+    int count = 2; /* Close after 2 failed probes */
+    if (setsockopt(sockfd, IPPROTO_TCP, TCP_KEEPCNT, &count, sizeof(count)) < 0) {
+        ESP_LOGW(TAG, "Failed to set TCP_KEEPCNT on fd=%d (errno=%d)", sockfd, errno);
+    }
+
+    return ESP_OK;
+}
+
 static esp_err_t ws_server_handler(httpd_req_t *req)
 {
     if (req->method == HTTP_GET) {
         /* Handshake complete - new client connected */
         int fd = httpd_req_to_sockfd(req);
-        ESP_LOGI(TAG, "Server: new client connected, fd=%d", fd);
+
+        /* Camera stream client limit: reject if /camera already occupied */
+        if (strcmp(req->uri, "/camera") == 0) {
+            if (s_camera_client_fd >= 0) {
+                ESP_LOGW(TAG, "Server: rejecting /camera client fd=%d (already occupied by fd=%d)", fd,
+                         s_camera_client_fd);
+                httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "Camera stream already in use");
+                return ESP_FAIL;
+            }
+            s_camera_client_fd = fd;
+            ESP_LOGI(TAG, "Server: new /camera client connected, fd=%d", fd);
+        } else {
+            ESP_LOGI(TAG, "Server: new client connected, fd=%d", fd);
+        }
+
         track_client_add(fd);
         dispatch_event(WS_MANAGER_EVENT_SERVER_CONNECT, NULL);
         return ESP_OK;
@@ -445,11 +626,15 @@ esp_err_t ws_manager_server_start(void)
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.server_port    = WS_MANAGER_SERVER_PORT;
+    config.stack_size     = 16384; /* Increased from default 4096 to accommodate 32KB TCP send buffer */
+    config.send_wait_timeout =
+        1; /* Reduced from default 5s: fail fast on slow networks instead of blocking httpd worker */
+    config.server_port = WS_MANAGER_SERVER_PORT;
     config.max_uri_handlers =
         24; /* 4(WebSocket URIs) + 14(REST API: camera 4 + display 4 + led 5 + status 1) + 6(reserved) */
     config.max_open_sockets = WS_MANAGER_SERVER_MAX_CONN + 2; /* Reserve for HTTP + control */
     config.close_fn         = ws_session_close_cb;
+    config.open_fn          = ws_session_open_cb;
 
     ESP_LOGI(TAG, "Starting WebSocket server on port %d", config.server_port);
 
@@ -480,10 +665,11 @@ esp_err_t ws_manager_server_stop(void)
     }
 
     ESP_LOGI(TAG, "Stopping WebSocket server");
-    esp_err_t err    = httpd_stop(s_server);
-    s_server         = NULL;
-    s_server_running = false;
-    s_client_count   = 0;
+    esp_err_t err      = httpd_stop(s_server);
+    s_server           = NULL;
+    s_server_running   = false;
+    s_client_count     = 0;
+    s_camera_client_fd = -1;
 
     if (s_server_mutex) {
         vSemaphoreDelete(s_server_mutex);
@@ -530,13 +716,36 @@ esp_err_t ws_manager_server_send_binary(int client_fd, const char *data, int len
         return ESP_ERR_INVALID_STATE;
     }
 
+    if (len > WS_FRAME_BUF_SIZE) {
+        ESP_LOGW(TAG, "Frame too large (%d > %d), dropping", len, WS_FRAME_BUF_SIZE);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    /* Acquire a buffer from the pre-allocated pool (no malloc per frame) */
+    ws_frame_buf_t *buf = ws_frame_pool_acquire();
+    if (buf == NULL) {
+        /* All pool buffers are in-flight — drop this frame (backpressure) */
+        return ESP_ERR_NO_MEM;
+    }
+
+    memcpy(buf->data, data, len);
+    buf->len = len;
+
     httpd_ws_frame_t ws_pkt = {
-        .payload = (uint8_t *)data,
+        .payload = buf->data,
         .len     = len,
         .type    = HTTPD_WS_TYPE_BINARY,
         .final   = true,
     };
-    return httpd_ws_send_frame_async(s_server, client_fd, &ws_pkt);
+
+    /* Use httpd_ws_send_data_async (true async via httpd_queue_work)
+     * instead of httpd_ws_send_frame_async (blocking send_fn call).
+     * Completion callback returns the buffer to the pool. */
+    esp_err_t err = httpd_ws_send_data_async(s_server, client_fd, &ws_pkt, ws_async_send_complete_cb, buf);
+    if (err != ESP_OK) {
+        atomic_store(&buf->in_use, false); /* Return buffer on queue failure */
+    }
+    return err;
 }
 
 esp_err_t ws_manager_server_broadcast_text(const char *data, int len)
@@ -567,16 +776,18 @@ esp_err_t ws_manager_server_broadcast_binary(const char *data, int len)
         return ESP_ERR_INVALID_STATE;
     }
 
+    /* Only send to the /camera client — binary JPEG frames are only
+     * meaningful for camera streaming. Sending to /mcp or /ws clients
+     * wastes bandwidth and causes them to disconnect on unexpected frames. */
+    if (s_camera_client_fd < 0) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
     esp_err_t ret = ESP_OK;
     if (s_server_mutex) {
         xSemaphoreTake(s_server_mutex, portMAX_DELAY);
     }
-    for (int i = 0; i < s_client_count; i++) {
-        esp_err_t err = ws_manager_server_send_binary(s_client_fds[i], data, len);
-        if (err != ESP_OK) {
-            ret = err;
-        }
-    }
+    ret = ws_manager_server_send_binary(s_camera_client_fd, data, len);
     if (s_server_mutex) {
         xSemaphoreGive(s_server_mutex);
     }
@@ -586,6 +797,39 @@ esp_err_t ws_manager_server_broadcast_binary(const char *data, int len)
 int ws_manager_server_get_client_count(void)
 {
     return s_client_count;
+}
+
+esp_err_t ws_manager_server_get_send_stats(ws_send_stats_t *stats)
+{
+    if (stats == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_server_running) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Copy statistics atomically. Individual fields are read non-atomically,
+     * but the values are monotonic counters or approximately stable EWMA values,
+     * so brief inconsistency between fields is acceptable for congestion detection. */
+    stats->total_sent            = s_send_stats.total_sent;
+    stats->total_failed          = s_send_stats.total_failed;
+    stats->consecutive_failures  = s_send_stats.consecutive_failures;
+    stats->pool_exhausted        = s_send_stats.pool_exhausted;
+    stats->last_error            = s_send_stats.last_error;
+    stats->last_send_duration_us = s_send_stats.last_send_duration_us;
+    stats->avg_send_duration_us  = s_send_stats.avg_send_duration_us;
+    return ESP_OK;
+}
+
+void ws_manager_server_reset_send_stats(void)
+{
+    s_send_stats.total_sent            = 0;
+    s_send_stats.total_failed          = 0;
+    s_send_stats.consecutive_failures  = 0;
+    s_send_stats.pool_exhausted        = 0;
+    s_send_stats.last_error            = 0;
+    s_send_stats.last_send_duration_us = 0;
+    s_send_stats.avg_send_duration_us  = 0;
 }
 
 #endif /* WS_MANAGER_SERVER_ENABLE */

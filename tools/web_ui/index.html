@@ -290,6 +290,21 @@
         let lastFpsFrameCount = 0;
         let currentObjectUrl = null;
 
+        /* Auto-reconnect state */
+        let camReconnectTimer = null;
+        let camReconnectDelay = 1000;      /* Initial reconnect delay: 1s */
+        const CAM_RECONNECT_MAX_DELAY = 10000; /* Max reconnect delay: 10s */
+        let mcpReconnectTimer = null;
+        let mcpReconnectDelay = 1000;
+        const MCP_RECONNECT_MAX_DELAY = 10000;
+        let deviceIp = '';                  /* Remember IP for reconnect */
+        let userDisconnected = false;       /* True when user explicitly clicks "Disconnect" */
+
+        /* Add jitter to reconnect delay to avoid thundering herd */
+        function jitterDelay(baseMs) {
+            return baseMs + Math.floor(Math.random() * 500); /* +0~500ms jitter */
+        }
+
         /* Logging */
         function log(msg, level = 'info') {
             const now = new Date();
@@ -312,11 +327,24 @@
                 log('请输入设备IP', 'error');
                 return;
             }
+            deviceIp = ip;
+            userDisconnected = false; /* User explicitly connected */
+            /* Clear any pending reconnect timers */
+            if (camReconnectTimer) { clearTimeout(camReconnectTimer); camReconnectTimer = null; }
+            if (mcpReconnectTimer) { clearTimeout(mcpReconnectTimer); mcpReconnectTimer = null; }
+            /* Reset reconnect delays */
+            camReconnectDelay = 1000;
+            mcpReconnectDelay = 1000;
             connectCamera(ip);
             connectMcp(ip);
         }
 
         function disconnectAll() {
+            userDisconnected = true; /* Prevent auto-reconnect */
+            /* Cancel auto-reconnect before closing */
+            if (camReconnectTimer) { clearTimeout(camReconnectTimer); camReconnectTimer = null; }
+            if (mcpReconnectTimer) { clearTimeout(mcpReconnectTimer); mcpReconnectTimer = null; }
+            deviceIp = '';
             if (camWs) { camWs.close(); }
             if (mcpWs) { mcpWs.close(); }
         }
@@ -332,6 +360,7 @@
                 document.getElementById('videoPlaceholder').style.display = 'none';
                 document.getElementById('videoImg').style.display = 'block';
                 document.getElementById('videoOverlay').style.display = 'block';
+                camReconnectDelay = 1000; /* Reset reconnect delay on successful connection */
                 log('摄像头流已连接', 'info');
             };
 
@@ -362,17 +391,30 @@
                 }
             };
 
-            camWs.onclose = () => {
+            camWs.onclose = (event) => {
                 document.getElementById('camStatus').className = 'status-dot disconnected';
                 document.getElementById('videoPlaceholder').style.display = 'block';
                 document.getElementById('videoImg').style.display = 'none';
                 document.getElementById('videoOverlay').style.display = 'none';
-                log('摄像头流已断开', 'warn');
                 camWs = null;
+                /* Auto-reconnect with exponential backoff + jitter.
+                 * Skip reconnect if user explicitly clicked "Disconnect". */
+                if (deviceIp && !userDisconnected) {
+                    const delay = jitterDelay(camReconnectDelay);
+                    log(`摄像头流已断开 (code=${event.code})，${(delay/1000).toFixed(1)}秒后重连...`, 'warn');
+                    camReconnectTimer = setTimeout(() => {
+                        log('摄像头流自动重连中...', 'info');
+                        connectCamera(deviceIp);
+                    }, delay);
+                    camReconnectDelay = Math.min(camReconnectDelay * 2, CAM_RECONNECT_MAX_DELAY);
+                } else {
+                    log(`摄像头流已断开 (code=${event.code})`, 'warn');
+                }
             };
 
             camWs.onerror = (err) => {
-                log(`摄像头流错误: ${JSON.stringify(err)}`, 'error');
+                /* onerror is always followed by onclose, which handles reconnect */
+                log('摄像头流连接错误', 'error');
             };
         }
 
@@ -383,6 +425,7 @@
 
             mcpWs.onopen = () => {
                 document.getElementById('mcpStatus').className = 'status-dot connected';
+                mcpReconnectDelay = 1000; /* Reset reconnect delay on successful connection */
                 log('MCP控制已连接', 'info');
                 sendInitialize();
             };
@@ -391,14 +434,27 @@
                 log(`MCP响应: ${event.data}`, 'recv');
             };
 
-            mcpWs.onclose = () => {
+            mcpWs.onclose = (event) => {
                 document.getElementById('mcpStatus').className = 'status-dot disconnected';
-                log('MCP控制已断开', 'warn');
                 mcpWs = null;
+                /* Auto-reconnect with exponential backoff + jitter.
+                 * Skip reconnect if user explicitly clicked "Disconnect". */
+                if (deviceIp && !userDisconnected) {
+                    const delay = jitterDelay(mcpReconnectDelay);
+                    log(`MCP控制已断开 (code=${event.code})，${(delay/1000).toFixed(1)}秒后重连...`, 'warn');
+                    mcpReconnectTimer = setTimeout(() => {
+                        log('MCP控制自动重连中...', 'info');
+                        connectMcp(deviceIp);
+                    }, delay);
+                    mcpReconnectDelay = Math.min(mcpReconnectDelay * 2, MCP_RECONNECT_MAX_DELAY);
+                } else {
+                    log(`MCP控制已断开 (code=${event.code})`, 'warn');
+                }
             };
 
             mcpWs.onerror = (err) => {
-                log(`MCP错误: ${JSON.stringify(err)}`, 'error');
+                /* onerror is always followed by onclose, which handles reconnect */
+                log('MCP连接错误', 'error');
             };
         }
 

@@ -429,26 +429,20 @@ esp_err_t camera_controller_init(const camera_config_t *config, camera_handles_t
         ESP_LOGW(TAG, "ISP HIST new controller failed: %s", esp_err_to_name(ret));
         handles->hist_ctlr = NULL;
     } else {
-        ret = esp_isp_hist_controller_enable(handles->hist_ctlr);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "ISP HIST enable failed: %s", esp_err_to_name(ret));
-            esp_isp_del_hist_controller(handles->hist_ctlr);
-            handles->hist_ctlr = NULL;
-        } else {
-            ret = esp_isp_hist_controller_start_continuous_statistics(handles->hist_ctlr);
-            if (ret != ESP_OK) {
-                ESP_LOGW(TAG, "ISP HIST start continuous stats failed: %s", esp_err_to_name(ret));
-                esp_isp_hist_controller_disable(handles->hist_ctlr);
-                esp_isp_del_hist_controller(handles->hist_ctlr);
-                handles->hist_ctlr = NULL;
-            } else {
-                ESP_LOGI(TAG, "ISP HIST controller enabled (YUV_Y mode, continuous stats)");
-            }
-        }
+        /* HIST controller enable and continuous statistics start are deferred to
+         * camera_stream_start() to allow callback registration while controller
+         * is in init state (ESP-IDF API requirement: register before enable).
+         * Callback registration requires fsm==INIT, but enable() transitions
+         * fsm to ENABLE, so we must not enable here. */
+        ESP_LOGI(TAG, "ISP HIST controller created (YUV_Y mode, enable+start deferred)");
     }
 
     /*--- Step 8: Create JPEG hardware encoder ---*/
-    ESP_LOGI(TAG, "Creating JPEG encoder (RGB565->JPEG, Q=%d, subsampling=YUV422)...", BOARD_JPEG_QUALITY);
+    ESP_LOGI(TAG, "Creating JPEG encoder (RGB565->JPEG, Q=%d, subsampling=%s)...", BOARD_JPEG_QUALITY,
+             BOARD_JPEG_SUB_SAMPLE == JPEG_DOWN_SAMPLING_YUV420   ? "YUV420"
+             : BOARD_JPEG_SUB_SAMPLE == JPEG_DOWN_SAMPLING_YUV422 ? "YUV422"
+             : BOARD_JPEG_SUB_SAMPLE == JPEG_DOWN_SAMPLING_YUV444 ? "YUV444"
+                                                                  : "UNKNOWN");
     jpeg_encode_engine_cfg_t jpeg_eng_cfg = {
         .intr_priority = 0,
         .timeout_ms    = 100,

@@ -30,18 +30,27 @@ static const char *TAG = "wifi_mgr";
 
 /* Module state */
 static bool s_initialized = false;
-static bool s_connected = false;
+static volatile bool s_connected = false;
 static SemaphoreHandle_t s_sem_hosted_up = NULL;
 static EventGroupHandle_t s_event_group = NULL;
 static int s_retry_num = 0;
 
+/* Exponential backoff reconnect state */
+static int s_retry_delay_ms = 0;
+#define WIFI_MANAGER_INITIAL_RETRY_DELAY_MS 1000
+#define WIFI_MANAGER_MAX_RETRY_DELAY_MS     60000
+
+/* ESP-Hosted heartbeat timeout detection */
+static int s_heartbeat_miss_count = 0;
+#define WIFI_MANAGER_HEARTBEAT_TIMEOUT_COUNT 3 /* 3 missed heartbeats = 30s */
+
 /* Callback storage (one per event type) */
-static wifi_manager_cb_t s_callbacks[WIFI_MANAGER_EVENT_SCAN_DONE + 1] = { NULL };
+static wifi_manager_cb_t s_callbacks[WIFI_MANAGER_EVENT_HOSTED_TIMEOUT + 1] = { NULL };
 
 /* Internal: dispatch event to registered callback */
 static void dispatch_event(wifi_manager_event_t event, void *data)
 {
-    if (event <= WIFI_MANAGER_EVENT_SCAN_DONE && s_callbacks[event]) {
+    if (event <= WIFI_MANAGER_EVENT_HOSTED_TIMEOUT && s_callbacks[event]) {
         s_callbacks[event](event, data);
     }
 }
@@ -75,6 +84,7 @@ static void esp_hosted_event_handler(void *arg, esp_event_base_t event_base,
     case ESP_HOSTED_EVENT_CP_HEARTBEAT: {
         esp_hosted_event_heartbeat_t *event = (esp_hosted_event_heartbeat_t *)event_data;
         ESP_LOGD(TAG, "Co-processor heartbeat: %" PRIu32, event->heartbeat);
+        s_heartbeat_miss_count = 0; /* Reset on successful heartbeat */
         break;
     }
     default:
@@ -95,10 +105,21 @@ static void wifi_remote_event_handler(void *arg, esp_event_base_t event_base,
         case WIFI_EVENT_STA_DISCONNECTED:
             s_connected = false;
             if (WIFI_MANAGER_AUTO_RECONNECT && s_retry_num < WIFI_MANAGER_MAX_RETRY) {
+                /* Exponential backoff: delay before reconnect */
+                if (s_retry_delay_ms == 0) {
+                    s_retry_delay_ms = WIFI_MANAGER_INITIAL_RETRY_DELAY_MS;
+                } else {
+                    s_retry_delay_ms *= 2;
+                    if (s_retry_delay_ms > WIFI_MANAGER_MAX_RETRY_DELAY_MS) {
+                        s_retry_delay_ms = WIFI_MANAGER_MAX_RETRY_DELAY_MS;
+                    }
+                }
+                ESP_LOGI(TAG, "Retry connecting (%d/%d) after %dms backoff",
+                         s_retry_num + 1, WIFI_MANAGER_MAX_RETRY, s_retry_delay_ms);
+                vTaskDelay(pdMS_TO_TICKS(s_retry_delay_ms));
                 esp_wifi_remote_connect();
                 s_retry_num++;
-                ESP_LOGI(TAG, "Retry connecting (%d/%d)", s_retry_num, WIFI_MANAGER_MAX_RETRY);
-                /* Don't notify during retries - will either reconnect or fail */
+                dispatch_event(WIFI_MANAGER_EVENT_RECONNECTING, NULL);
             } else {
                 /* Max retries reached or auto-reconnect disabled */
                 ESP_LOGW(TAG, "Disconnected from AP (no more retries)");
@@ -120,6 +141,7 @@ static void wifi_remote_event_handler(void *arg, esp_event_base_t event_base,
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_num = 0;
+        s_retry_delay_ms = 0;
         s_connected = true;
         if (s_event_group) {
             xEventGroupSetBits(s_event_group, WIFI_CONNECTED_BIT);
@@ -262,15 +284,19 @@ esp_err_t wifi_manager_init(void)
 
     ESP_LOGI(TAG, "[5/5] WiFi Remote STA initialized, connecting to SSID:%s", WIFI_MANAGER_SSID);
 
-    /* Wait for connection result */
+    /* Wait for connection result with timeout (instead of portMAX_DELAY) */
     EventBits_t bits = xEventGroupWaitBits(s_event_group, WIFI_BITS,
-                                            pdFALSE, pdFALSE, portMAX_DELAY);
+                                            pdFALSE, pdFALSE, pdMS_TO_TICKS(30000));
 
     if (bits & WIFI_CONNECTED_BIT) {
         ESP_LOGI(TAG, "Connected to AP SSID:%s", WIFI_MANAGER_SSID);
     } else if (bits & WIFI_FAIL_BIT) {
         ESP_LOGE(TAG, "Failed to connect to AP SSID:%s after %d retries",
                  WIFI_MANAGER_SSID, WIFI_MANAGER_MAX_RETRY);
+        /* Don't return error - module is initialized but not connected */
+    } else {
+        ESP_LOGE(TAG, "Timeout waiting for WiFi connection to SSID:%s (30s)",
+                 WIFI_MANAGER_SSID);
         /* Don't return error - module is initialized but not connected */
     }
 
@@ -339,6 +365,8 @@ esp_err_t wifi_manager_deinit(void)
     s_connected = false;
     s_initialized = false;
     s_retry_num = 0;
+    s_retry_delay_ms = 0;
+    s_heartbeat_miss_count = 0;
     memset(s_callbacks, 0, sizeof(s_callbacks));
 
     ESP_LOGI(TAG, "WiFi Manager deinitialized");
@@ -456,7 +484,7 @@ esp_err_t wifi_manager_get_info(wifi_manager_info_t *info)
 
 esp_err_t wifi_manager_register_handler(wifi_manager_event_t event, wifi_manager_cb_t cb)
 {
-    if (event > WIFI_MANAGER_EVENT_SCAN_DONE) {
+    if (event > WIFI_MANAGER_EVENT_HOSTED_TIMEOUT) {
         return ESP_ERR_INVALID_ARG;
     }
     if (cb == NULL) {

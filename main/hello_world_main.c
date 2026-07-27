@@ -9,6 +9,9 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "connection_manager.h"
+#include "heartbeat_service.h"
+#include "message_queue.h"
 #include "wifi_manager.h"
 #include "websocket_manager.h"
 #include "xiaozhi_manager.h"
@@ -38,6 +41,12 @@ static void wifi_event_callback(wifi_manager_event_t event, void *data)
     }
     case WIFI_MANAGER_EVENT_SCAN_DONE:
         ESP_LOGI(TAG, "[WiFi] Scan done");
+        break;
+    case WIFI_MANAGER_EVENT_RECONNECTING:
+        ESP_LOGI(TAG, "[WiFi] Reconnecting with backoff");
+        break;
+    case WIFI_MANAGER_EVENT_HOSTED_TIMEOUT:
+        ESP_LOGW(TAG, "[WiFi] ESP-Hosted heartbeat timeout");
         break;
     }
 }
@@ -71,6 +80,9 @@ static void ws_data_callback(ws_manager_event_t event, void *data)
         break;
     case WS_MANAGER_EVENT_SERVER_DISCONNECT:
         ESP_LOGI(TAG, "[WS] Server client disconnected");
+        break;
+    case WS_MANAGER_EVENT_CLIENT_TIMEOUT:
+        ESP_LOGW(TAG, "[WS] Server client heartbeat timeout");
         break;
     }
 }
@@ -193,6 +205,43 @@ void app_main(void)
             ESP_LOGI(TAG, "WebSocket server running at ws://%s:%d/ws",
                      wifi_info.ip, WS_MANAGER_SERVER_PORT);
         }
+    }
+#endif
+
+    /* Step 2b: Initialize Connection Manager (WiFi + WebSocket health monitoring) */
+    conn_mgr_config_t conn_cfg = {
+        .wifi_init_timeout_ms        = 30000,
+        .wifi_reconnect_max_delay_ms = 60000,
+        .ws_reconnect_max_delay_ms   = 60000,
+        .monitor_interval_ms         = 5000,
+    };
+    err = connection_manager_init(&conn_cfg);
+    if (err == ESP_OK) {
+        err = connection_manager_start();
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "Connection manager started");
+        } else {
+            ESP_LOGW(TAG, "Connection manager start failed: %s", esp_err_to_name(err));
+        }
+    } else {
+        ESP_LOGW(TAG, "Connection manager init failed: %s", esp_err_to_name(err));
+    }
+
+#if (WS_MANAGER_SERVER_ENABLE == 1)
+    /* Step 2c: Initialize Heartbeat Service (WebSocket server client liveness) */
+    err = heartbeat_service_start_server(30, 90);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Heartbeat service started");
+    } else {
+        ESP_LOGW(TAG, "Heartbeat service start failed: %s", esp_err_to_name(err));
+    }
+
+    /* Step 2d: Initialize Message Queue (reliable WebSocket message delivery) */
+    err = message_queue_init(16, 3);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Message queue initialized");
+    } else {
+        ESP_LOGW(TAG, "Message queue init failed: %s", esp_err_to_name(err));
     }
 #endif
 

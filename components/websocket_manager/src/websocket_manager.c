@@ -19,11 +19,11 @@
 #include "freertos/semphr.h"
 
 /* Callback storage */
-static ws_manager_cb_t s_callbacks[WS_MANAGER_EVENT_SERVER_DISCONNECT + 1] = { NULL };
+static ws_manager_cb_t s_callbacks[WS_MANAGER_EVENT_CLIENT_TIMEOUT + 1] = { NULL };
 
 static void dispatch_event(ws_manager_event_t event, void *data)
 {
-    if (event <= WS_MANAGER_EVENT_SERVER_DISCONNECT && s_callbacks[event]) {
+    if (event <= WS_MANAGER_EVENT_CLIENT_TIMEOUT && s_callbacks[event]) {
         s_callbacks[event](event, data);
     }
 }
@@ -37,7 +37,7 @@ static void dispatch_event(ws_manager_event_t event, void *data)
 static const char *TAG = "ws_mgr";
 
 static esp_websocket_client_handle_t s_ws_client = NULL;
-static bool s_client_connected = false;
+static volatile bool s_client_connected = false;
 static SemaphoreHandle_t s_client_sem = NULL;
 
 /* Exponential backoff reconnect state */
@@ -253,6 +253,9 @@ static uint8_t s_recv_buf[WS_MANAGER_BUFFER_SIZE];
 /* Memory water level: reject new connections below this threshold */
 #define WS_MANAGER_MEM_WATERMARK  (32 * 1024)  /* 32KB */
 
+/* Maximum frame size: reject frames larger than this */
+#define WS_MANAGER_MAX_FRAME_SIZE (16 * 1024)  /* 16KB */
+
 static void track_client_add(int fd)
 {
     if (s_server_mutex) {
@@ -325,6 +328,13 @@ static esp_err_t ws_server_handler(httpd_req_t *req)
     }
 
     if (ws_pkt.len > 0) {
+        /* Frame size limit check */
+        if (ws_pkt.len > WS_MANAGER_MAX_FRAME_SIZE) {
+            ESP_LOGE(TAG, "Server: frame too large (%d bytes, max=%d)",
+                     ws_pkt.len, WS_MANAGER_MAX_FRAME_SIZE);
+            return ESP_ERR_NO_MEM;
+        }
+
         /* Use pre-allocated buffer if fits, otherwise allocate */
         uint8_t *buf;
         bool dynamic_alloc = false;
@@ -570,7 +580,7 @@ esp_err_t ws_manager_deinit(void)
 
 esp_err_t ws_manager_register_handler(ws_manager_event_t event, ws_manager_cb_t cb)
 {
-    if (event > WS_MANAGER_EVENT_SERVER_DISCONNECT) {
+    if (event > WS_MANAGER_EVENT_CLIENT_TIMEOUT) {
         return ESP_ERR_INVALID_ARG;
     }
     if (cb == NULL) {

@@ -17,6 +17,8 @@
 #include "xiaozhi_manager.h"
 #include "audio_bridge.h"
 #include "wake_word_engine.h"
+#include "focuslamp_bridge.h"
+#include "status_receiver.h"
 
 static const char *TAG = "MAIN";
 
@@ -205,8 +207,31 @@ void app_main(void)
             ESP_LOGI(TAG, "WebSocket server running at ws://%s:%d/ws",
                      wifi_info.ip, WS_MANAGER_SERVER_PORT);
         }
+        /* Initialize status receiver on the same HTTP server */
+        err = status_receiver_init();
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "Status receiver initialized (POST /api/status/report)");
+        } else {
+            ESP_LOGW(TAG, "Status receiver init failed: %s", esp_err_to_name(err));
+        }
     }
 #endif
+
+    /* Step 2a: Initialize FocusLamp Bridge (HTTP REST client to FocusLamp_DEMO2) */
+    err = focuslamp_bridge_init();
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "FocusLamp bridge initialized");
+        /* Verify connectivity with a ping (non-fatal if it fails) */
+        esp_err_t ping_ret = focuslamp_bridge_ping();
+        if (ping_ret == ESP_OK) {
+            ESP_LOGI(TAG, "FocusLamp device reachable");
+        } else {
+            ESP_LOGW(TAG, "FocusLamp ping failed: %s (will retry on next call)",
+                     esp_err_to_name(ping_ret));
+        }
+    } else {
+        ESP_LOGW(TAG, "FocusLamp bridge init failed: %s", esp_err_to_name(err));
+    }
 
     /* Step 2b: Initialize Connection Manager (WiFi + WebSocket health monitoring) */
     conn_mgr_config_t conn_cfg = {
@@ -260,6 +285,19 @@ void app_main(void)
     err = xiaozhi_manager_init(&xiaozhi_cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Xiaozhi Manager init failed: %s", esp_err_to_name(err));
+    }
+
+    /* Step 4b: Register FocusLamp MCP tools (enables voice control of FocusLamp) */
+    esp_mcp_t *mcp_engine = xiaozhi_manager_get_mcp_engine();
+    if (mcp_engine != NULL) {
+        err = focuslamp_bridge_register_mcp_tools(mcp_engine);
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "FocusLamp MCP tools registered to Xiaozhi engine");
+        } else {
+            ESP_LOGW(TAG, "FocusLamp MCP tools registration failed: %s", esp_err_to_name(err));
+        }
+    } else {
+        ESP_LOGW(TAG, "MCP engine not available, skipping FocusLamp MCP tools registration");
     }
 
     /* Step 5: Initialize Wake Word Engine BEFORE xiaozhi_manager_start()

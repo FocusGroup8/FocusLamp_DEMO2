@@ -3,6 +3,7 @@
 
 #include "websocket_manager_config.h"
 #include "websocket_manager_types.h"
+#include "esp_http_server.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -115,6 +116,17 @@ esp_err_t ws_manager_server_stop(void);
  * @return true if running, false otherwise
  */
 bool ws_manager_server_is_running(void);
+
+/**
+ * @brief Register a custom URI handler on the HTTP server
+ *
+ * Allows external components to register REST API endpoints on the same
+ * httpd instance that serves WebSocket connections.
+ *
+ * @param uri_desc  URI descriptor (method, uri, handler, etc.)
+ * @return ESP_OK on success, ESP_ERR_INVALID_STATE if server not running
+ */
+esp_err_t ws_manager_server_register_uri(const httpd_uri_t *uri_desc);
 
 /**
  * @brief Send text data to a specific client

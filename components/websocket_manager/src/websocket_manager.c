@@ -470,6 +470,17 @@ bool ws_manager_server_is_running(void)
     return s_server_running;
 }
 
+esp_err_t ws_manager_server_register_uri(const httpd_uri_t *uri_desc)
+{
+    if (!s_server_running || s_server == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (uri_desc == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return httpd_register_uri_handler(s_server, uri_desc);
+}
+
 esp_err_t ws_manager_server_send_text(int client_fd, const char *data, int len)
 {
     if (!s_server_running || s_server == NULL) {

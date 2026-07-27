@@ -8,6 +8,8 @@
 
 #include "esp_err.h"
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -72,6 +74,40 @@ esp_err_t network_manager_stop_camera_stream(void);
  * @return IP address string (e.g. "192.168.1.100"), or empty string if not connected
  */
 const char *network_manager_get_ip(void);
+
+/**
+ * @brief Algorithm result state (latest values received via algorithm.result tool)
+ *
+ * Populated by the MCP `algorithm.result` tool callback when main-client pushes
+ * algorithm detection results to the /algo WebSocket endpoint. Fields are
+ * updated under a mutex; `last_update_us` is zero until first update.
+ *
+ * NOTE: Execution logic (LED/display/eyes actuation based on these values) is
+ * intentionally NOT implemented in this revision — consumers may read this
+ * state and decide actions locally.
+ */
+typedef struct {
+    char emotion[32];            /*!< Emotion type string, e.g. "Happiness" */
+    int fatigue;                 /*!< Fatigue rating integer */
+    char focus_level_name[32];   /*!< Focus level name, e.g. "Medium" */
+    char engage_level_name[32];  /*!< Engagement level name, e.g. "Engaged" */
+    float focus_score;           /*!< Focus score 0..1 */
+    char gesture[32];            /*!< Gesture name, e.g. "Thumb_Up" */
+    char vlm_judgment[16];       /*!< VLM game detector judgment: 是/否/不确定/等待检测 */
+    char vlm_trigger_source[16]; /*!< VLM trigger source: None/手机/电脑 */
+    char vlm_reason[128];        /*!< VLM detection reason text */
+    int64_t last_update_us;      /*!< esp_timer_get_time() of last update, 0 if never */
+} algo_result_state_t;
+
+/**
+ * @brief Get pointer to the latest algorithm result state (read-only snapshot)
+ *
+ * The returned pointer is to a static internal buffer; caller must not free it
+ * or write through it. Fields are updated atomically under an internal mutex.
+ *
+ * @return Pointer to internal algo_result_state_t (always non-NULL)
+ */
+const algo_result_state_t *network_manager_get_algo_result_state(void);
 
 #ifdef __cplusplus
 }

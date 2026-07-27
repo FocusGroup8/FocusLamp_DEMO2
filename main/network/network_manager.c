@@ -12,6 +12,7 @@
 #include "display_system.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -38,6 +39,11 @@ static const char *TAG = "net_mgr";
 static bool s_initialized                     = false;
 static SemaphoreHandle_t s_wifi_connected_sem = NULL;
 static char s_ip_string[16]                   = {0};
+
+/* Latest algorithm result state (written by algorithm.result tool callback,
+ * read by network_manager_get_algo_result_state()). */
+static algo_result_state_t s_algo_state = {0};
+static SemaphoreHandle_t s_algo_mutex   = NULL;
 
 /*---------------------------------------------------------------
  * Internal: WiFi event callback
@@ -73,12 +79,12 @@ static void ws_data_handler(ws_manager_event_t event, void *data)
 
     ws_manager_data_t *msg = (ws_manager_data_t *)data;
 
-    /* Only handle text messages on /mcp path */
+    /* Only handle text messages on /mcp or /algo path */
     if (msg->type != WS_DATA_TYPE_TEXT || !msg->uri) {
         return;
     }
 
-    if (strcmp(msg->uri, "/mcp") != 0) {
+    if (strcmp(msg->uri, "/mcp") != 0 && strcmp(msg->uri, "/algo") != 0) {
         return;
     }
 
@@ -795,6 +801,88 @@ static esp_err_t mcp_cb_eyes_get_expression(const void *args_json, char *respons
 #endif /* CONFIG_EXAMPLE_DEMO_EXPRESSIVE_EYES */
 
 /*---------------------------------------------------------------
+ * MCP Tool Callback: Algorithm result ingestion (algorithm.result)
+ * Parses detection results pushed by main-client on /algo endpoint and
+ * stores them into s_algo_state under mutex. Execution logic is left as
+ * TODO — consumers read state via network_manager_get_algo_result_state().
+ *-------------------------------------------------------------*/
+
+/* Copy a cJSON string field into a fixed buffer with truncation + NUL guard. */
+static void algo_copy_str(cJSON *parent, const char *key, char *dst, size_t dst_size)
+{
+    if (dst_size == 0) {
+        return;
+    }
+    dst[0]      = '\0';
+    cJSON *item = cJSON_GetObjectItem(parent, key);
+    if (cJSON_IsString(item) && item->valuestring) {
+        snprintf(dst, dst_size, "%s", item->valuestring);
+    }
+}
+
+static esp_err_t mcp_cb_algo_result(const void *args_json, char *response_buf, int response_buf_size)
+{
+    const cJSON *root = (const cJSON *)args_json;
+    if (!root) {
+        snprintf(response_buf, response_buf_size, "{\"ok\":false}");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Snapshot to fill, then publish under mutex to minimize lock hold time. */
+    algo_result_state_t snap = {0};
+
+    /* focus sub-object */
+    cJSON *focus = cJSON_GetObjectItem(root, "focus");
+    if (cJSON_IsObject(focus)) {
+        algo_copy_str(focus, "engage_level_name", snap.engage_level_name, sizeof(snap.engage_level_name));
+        algo_copy_str(focus, "focus_level_name", snap.focus_level_name, sizeof(snap.focus_level_name));
+        cJSON *score = cJSON_GetObjectItem(focus, "focus_score");
+        if (cJSON_IsNumber(score)) {
+            snap.focus_score = (float)score->valuedouble;
+        }
+    }
+
+    /* scalar fields */
+    cJSON *fatigue = cJSON_GetObjectItem(root, "fatigue");
+    if (cJSON_IsNumber(fatigue)) {
+        snap.fatigue = fatigue->valueint;
+    }
+    algo_copy_str(root, "emotion", snap.emotion, sizeof(snap.emotion));
+    algo_copy_str(root, "gesture", snap.gesture, sizeof(snap.gesture));
+
+    /* vlm_game_detector sub-object */
+    cJSON *vlm = cJSON_GetObjectItem(root, "vlm_game_detector");
+    if (cJSON_IsObject(vlm)) {
+        algo_copy_str(vlm, "judgment", snap.vlm_judgment, sizeof(snap.vlm_judgment));
+        algo_copy_str(vlm, "trigger_source", snap.vlm_trigger_source, sizeof(snap.vlm_trigger_source));
+        algo_copy_str(vlm, "reason", snap.vlm_reason, sizeof(snap.vlm_reason));
+    }
+
+    snap.last_update_us = esp_timer_get_time();
+
+    /* Publish */
+    if (s_algo_mutex && xSemaphoreTake(s_algo_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        memcpy(&s_algo_state, &snap, sizeof(s_algo_state));
+        xSemaphoreGive(s_algo_mutex);
+    } else {
+        ESP_LOGW(TAG, "algo_result: mutex unavailable, state not updated");
+    }
+
+    ESP_LOGI(TAG, "algo_result: emotion=%s fatigue=%d focus=%s score=%.2f gesture=%s vlm=%s|%s",
+             snap.emotion[0] ? snap.emotion : "-", snap.fatigue, snap.focus_level_name[0] ? snap.focus_level_name : "-",
+             snap.focus_score, snap.gesture[0] ? snap.gesture : "-", snap.vlm_judgment[0] ? snap.vlm_judgment : "-",
+             snap.vlm_trigger_source[0] ? snap.vlm_trigger_source : "-");
+
+    snprintf(response_buf, response_buf_size, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+const algo_result_state_t *network_manager_get_algo_result_state(void)
+{
+    return &s_algo_state;
+}
+
+/*---------------------------------------------------------------
  * REST API handlers for Expressive Eyes control
  *-------------------------------------------------------------*/
 static esp_err_t rest_api_eyes_set_expression_handler(httpd_req_t *req)
@@ -1140,13 +1228,23 @@ esp_err_t network_manager_init(void)
         return ret;
     }
 
-    ESP_LOGI(TAG, "WebSocket server running at ws://%s:80/{camera,mcp,ws}", s_ip_string);
+    ESP_LOGI(TAG, "WebSocket server running at ws://%s:80/{camera,mcp,ws,algo}", s_ip_string);
 
     /* 2b. Register REST API endpoints on the same HTTP server */
     register_rest_api_handlers();
 
     /* 3. Initialize MCP tools */
     ESP_LOGI(TAG, "Initializing MCP tools...");
+
+    /* Create mutex guarding algorithm result state (used by algo_result callback) */
+    if (s_algo_mutex == NULL) {
+        s_algo_mutex = xSemaphoreCreateMutex();
+        if (s_algo_mutex == NULL) {
+            ESP_LOGE(TAG, "Failed to create algo_state mutex");
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
     ret = mcp_tools_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "MCP tools init failed: %s", esp_err_to_name(ret));
@@ -1171,6 +1269,7 @@ esp_err_t network_manager_init(void)
         .eyes_look_at           = mcp_cb_eyes_look_at,
         .eyes_blink             = mcp_cb_eyes_blink,
         .eyes_get_expression    = mcp_cb_eyes_get_expression,
+        .algo_result            = mcp_cb_algo_result,
     };
     ret = mcp_tools_register_callbacks(&callbacks);
     if (ret != ESP_OK) {

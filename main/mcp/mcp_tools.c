@@ -68,6 +68,14 @@ static const tool_meta_t s_tool_meta[] = {
     {"eyes.blink", "Trigger an eye blink", "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"},
     {"eyes.get_expression", "Get current expressive eyes expression",
      "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"},
+    {"algorithm.result", "Receive algorithm detection results from main-client",
+     "{\"type\":\"object\",\"properties\":{\"focus\":{\"type\":\"object\",\"properties\":{"
+     "\"engage_level_name\":{\"type\":\"string\"},\"focus_level_name\":{\"type\":\"string\"},"
+     "\"focus_score\":{\"type\":\"number\"}},\"additionalProperties\":true},"
+     "\"emotion\":{\"type\":\"string\"},\"fatigue\":{\"type\":\"integer\"},"
+     "\"gesture\":{\"type\":\"string\"},\"vlm_game_detector\":{\"type\":\"object\",\"properties\":{"
+     "\"judgment\":{\"type\":\"string\"},\"trigger_source\":{\"type\":\"string\"},"
+     "\"reason\":{\"type\":\"string\"}},\"additionalProperties\":true}},\"additionalProperties\":true}"},
 };
 
 #define TOOL_COUNT (sizeof(s_tool_meta) / sizeof(s_tool_meta[0]))
@@ -133,6 +141,8 @@ static mcp_tool_cb_t find_tool_callback(const char *name)
         return s_callbacks.eyes_blink;
     if (strcmp(name, "eyes.get_expression") == 0)
         return s_callbacks.eyes_get_expression;
+    if (strcmp(name, "algorithm.result") == 0)
+        return s_callbacks.algo_result;
 
     return NULL;
 }

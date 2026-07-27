@@ -591,8 +591,17 @@ mcp_tool_notification_speak(const esp_mcp_property_list_t *properties) {
   ESP_LOGI(TAG, "[MCP] notification.speak: \"%s\" (priority=%d)",
            message ? message : "null", priority);
 
-  /* The chat module will handle TTS synthesis automatically
-   * when the server calls this tool with text content */
+  /* Trigger proactive TTS injection via xiaozhi_manager_speak().
+   * When the server calls this MCP tool, we treat the message as
+   * a command text to be spoken, using the direct text injection
+   * mechanism (listen detect + start listening). */
+  if (message && strlen(message) > 0) {
+    esp_err_t ret = xiaozhi_manager_speak(message, priority);
+    if (ret != ESP_OK) {
+      ESP_LOGW(TAG, "[MCP] notification.speak failed: %s", esp_err_to_name(ret));
+    }
+  }
+
   return esp_mcp_value_create_bool(true);
 }
 
@@ -625,7 +634,35 @@ mcp_tool_audio_speaker_play_tts(const esp_mcp_property_list_t *properties) {
   ESP_LOGI(TAG, "[MCP] audio_speaker.play_tts: text=\"%s\" preset_id=\"%s\"",
            text ? text : "null", preset_id ? preset_id : "null");
 
-  /* TODO: integrate with TTS playback when audio hardware available */
+  /* Trigger proactive TTS injection for the provided text.
+   * If text is provided, use it directly; otherwise, preset_id maps
+   * to predefined reminder texts (e.g., "sedentary" -> "久坐提醒"). */
+  const char *speak_text = text;
+  if (!speak_text || strlen(speak_text) == 0) {
+    /* Map preset_id to predefined text */
+    if (preset_id && strcmp(preset_id, "sedentary") == 0) {
+      speak_text = "提醒我休息";
+    } else if (preset_id && strcmp(preset_id, "posture") == 0) {
+      speak_text = "提醒我调整坐姿";
+    } else if (preset_id && strcmp(preset_id, "focus") == 0) {
+      speak_text = "提醒我集中注意力";
+    } else if (preset_id && strcmp(preset_id, "hydration") == 0) {
+      speak_text = "提醒我喝水";
+    } else if (preset_id) {
+      ESP_LOGW(TAG, "[MCP] play_tts: unknown preset_id \"%s\"", preset_id);
+      return esp_mcp_value_create_bool(false);
+    } else {
+      ESP_LOGW(TAG, "[MCP] play_tts: no text or preset_id provided");
+      return esp_mcp_value_create_bool(false);
+    }
+  }
+
+  esp_err_t ret = xiaozhi_manager_speak(speak_text, 2);
+  if (ret != ESP_OK) {
+    ESP_LOGW(TAG, "[MCP] play_tts failed: %s", esp_err_to_name(ret));
+    return esp_mcp_value_create_bool(false);
+  }
+
   return esp_mcp_value_create_bool(true);
 }
 
@@ -1074,20 +1111,104 @@ esp_mcp_t *xiaozhi_manager_get_mcp_engine(void) { return s_mcp_engine; }
 
 esp_err_t xiaozhi_manager_speak(const char *text, int priority) {
   ESP_RETURN_ON_FALSE(text, ESP_ERR_INVALID_ARG, TAG, "Invalid text");
+  ESP_RETURN_ON_FALSE(s_chat_handle, ESP_ERR_INVALID_STATE, TAG,
+                      "Not initialized");
 
   ESP_LOGI(TAG, "Speak request: \"%s\" (priority=%d)", text, priority);
 
-  /* Use the notification.speak MCP tool mechanism.
-   * In the xiaozhi protocol, proactive TTS injection is done
-   * through the server-side tool call mechanism.
-   * NOTE: esp_mcp_notify_log_message() is not supported by xiaozhi
-   * transport (no emit_message in vtable). Log locally only. */
-  if (s_mcp_engine) {
-    ESP_LOGI(TAG, "Speak request logged locally (MCP emit unsupported): \"%s\"",
-             text);
+  /* Proactive TTS injection — direct text injection without wake word.
+   *
+   * Send the command text directly as a listen detect message.
+   * The server's textHandle.py processes non-wake-word detect messages by
+   * calling startToChat(original_text) directly, which sends it to the LLM
+   * and returns TTS — without the wake word greeting.
+   *
+   * This means the user only hears the preset broadcast content (e.g.
+   * "该喝水啦！") without the preceding wake word acknowledgment.
+   *
+   * Requirements:
+   *   - Audio channel must be open (LISTENING state)
+   *   - If not open, open it first
+   *   - If currently speaking, abort first
+   */
+
+  /* If currently speaking, abort first and wait for TTS_STOP event
+   * to transition state back to LISTENING. The abort is asynchronous —
+   * the server sends TTS stop after processing the abort request. */
+  if (s_state == XIAOZHI_MANAGER_STATE_SPEAKING) {
+    ESP_LOGI(TAG, "Aborting current TTS for speak request");
+    esp_xiaozhi_chat_send_abort_speaking(
+        s_chat_handle,
+        ESP_XIAOZHI_CHAT_ABORT_SPEAKING_REASON_WAKE_WORD_DETECTED);
+    /* Wait for TTS_STOP event to set state back to LISTENING.
+     * Typical abort->TTS_STOP latency is 100-500ms. */
+    int wait_ms = 0;
+    while (s_state == XIAOZHI_MANAGER_STATE_SPEAKING && wait_ms < 3000) {
+      vTaskDelay(pdMS_TO_TICKS(50));
+      wait_ms += 50;
+    }
+    if (s_state != XIAOZHI_MANAGER_STATE_LISTENING) {
+      ESP_LOGW(TAG, "TTS abort not processed after %d ms (state=%d)", wait_ms,
+               s_state);
+      return ESP_ERR_INVALID_STATE;
+    }
   }
 
+  /* If not connected or audio channel not open, open it first */
+  if (s_state == XIAOZHI_MANAGER_STATE_CONNECTED) {
+    esp_err_t ret = xiaozhi_manager_open_audio_channel();
+    if (ret != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to open audio channel for speak: %s",
+               esp_err_to_name(ret));
+      return ret;
+    }
+    /* Wait for audio channel to fully open and MCP initialization to complete.
+     * MCP init + tools/list takes ~1s, so we need a longer delay here.
+     * During this wait, the audio channel open callback will set state to
+     * LISTENING. */
+    int wait_ms = 0;
+    while (s_state != XIAOZHI_MANAGER_STATE_LISTENING && wait_ms < 3000) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+      wait_ms += 100;
+    }
+    if (s_state != XIAOZHI_MANAGER_STATE_LISTENING) {
+      ESP_LOGW(TAG, "Audio channel not ready after %d ms (state=%d)", wait_ms,
+               s_state);
+      return ESP_ERR_INVALID_STATE;
+    }
+  }
+
+  /* Only proceed when in LISTENING state (audio channel open) */
+  if (s_state != XIAOZHI_MANAGER_STATE_LISTENING) {
+    ESP_LOGW(TAG, "Cannot speak in state %d, need LISTENING state", s_state);
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  /* Send command text directly as listen detect — server processes it as
+   * startToChat(text) without wake word greeting. This is the key change:
+   * no wake word means no "你好小智" TTS response, so the user only
+   * hears the actual broadcast content. */
+  esp_err_t ret = esp_xiaozhi_chat_send_wake_word(s_chat_handle, text);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to send command text: %s", esp_err_to_name(ret));
+    return ret;
+  }
+
+  /* Start listening so server processes the detect message */
+  ret = esp_xiaozhi_chat_send_start_listening(
+      s_chat_handle, ESP_XIAOZHI_CHAT_LISTENING_MODE_AUTO);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to start listening: %s", esp_err_to_name(ret));
+    return ret;
+  }
+
+  ESP_LOGI(TAG, "Direct text inject: \"%s\" (no wake word)", text);
   return ESP_OK;
+}
+
+esp_err_t xiaozhi_manager_send_text(const char *text) {
+  ESP_RETURN_ON_FALSE(text, ESP_ERR_INVALID_ARG, TAG, "Invalid text");
+  return xiaozhi_manager_speak(text, 2);
 }
 
 esp_err_t xiaozhi_manager_start_listening(int mode) {
@@ -1140,6 +1261,10 @@ esp_mcp_t *xiaozhi_manager_get_mcp_engine(void) { return NULL; }
 esp_err_t xiaozhi_manager_speak(const char *text, int priority) {
   (void)text;
   (void)priority;
+  return ESP_ERR_NOT_SUPPORTED;
+}
+esp_err_t xiaozhi_manager_send_text(const char *text) {
+  (void)text;
   return ESP_ERR_NOT_SUPPORTED;
 }
 esp_err_t xiaozhi_manager_start_listening(int mode) {

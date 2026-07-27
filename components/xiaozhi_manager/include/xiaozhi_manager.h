@@ -178,16 +178,36 @@ esp_err_t xiaozhi_manager_send_audio(const char *data, size_t data_len);
 esp_mcp_t *xiaozhi_manager_get_mcp_engine(void);
 
 /**
- * @brief  Inject text for TTS playback via MCP notification.speak tool
+ * @brief  Inject text for TTS playback via proactive injection mechanism
  *
  * Used for proactive TTS injection (e.g., posture reminder, focus reminder).
- * The text will be sent to the server and TTS audio will be returned.
+ * The text will be sent as a short command to the xiaozhi server,
+ * which processes it through LLM and returns TTS audio.
  *
- * @param text      Text to speak
+ * Implementation: direct text as listen detect message without wake word.
+ * The server treats the text as ASR input and responds with TTS only.
+ *
+ * @param text      Short command text to speak (e.g., "提醒我休息")
  * @param priority  Priority level (0-3, higher = can interrupt lower)
  * @return ESP_OK on success
  */
 esp_err_t xiaozhi_manager_speak(const char *text, int priority);
+
+/**
+ * @brief  Send preset text for TTS playback (high-level API)
+ *
+ * High-level API for the "预设文本转化语音（主动注入机制）" requirement.
+ * Sends a short preset text to the xiaozhi server which returns TTS audio.
+ *
+ * The text should be a short command/phrase (not a long sentence).
+ * Examples: "提醒我休息", "久坐提醒", "专注提醒"
+ *
+ * Internally calls xiaozhi_manager_speak() with priority=2.
+ *
+ * @param text  Preset text for TTS playback
+ * @return ESP_OK on success
+ */
+esp_err_t xiaozhi_manager_send_text(const char *text);
 
 /**
  * @brief  Start listening for voice input

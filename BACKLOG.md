@@ -5,11 +5,11 @@
 
 ## 高优先级任务
 
-### 1. 修复 status_reporter 目标 IP 配置
-- **问题**: FocusLamp_DEMO2 的 `CONFIG_STATUS_REPORTER_TARGET_IP` 仍为 10.132.136.143,实际 wifi_test IP 为 10.132.136.181
-- **影响**: FocusLamp 状态上报连接失败(ESP_ERR_HTTP_CONNECT)
-- **解决方案**: 在 FocusLamp_DEMO2 menuconfig 中修改为目标 IP 10.132.136.181
-- **状态**: 待处理
+### 1. ~~修复 status_reporter 目标 IP 配置~~ (已完成)
+- **问题**: FocusLamp_DEMO2 的 `CONFIG_STATUS_REPORTER_TARGET_IP` 曾为 10.132.136.143,实际 wifi_test IP 为 10.132.136.181
+- **解决**: 已在 FocusLamp_DEMO2 menuconfig 中修改为目标 IP,通信已恢复
+- **状态**: 已完成
+- **备注**: 若后续无法通信,首要排查 IP 配置是否匹配(DHCP 可能分配不同 IP)
 
 ### 2. 完成 status_receiver 端到端测试
 - **目标**: 验证 wifi_test 能正确接收并解析 FocusLamp 上报的状态数据

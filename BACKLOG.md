@@ -5,11 +5,11 @@
 
 ## 高优先级任务
 
-### 1. 修复 status_reporter 目标 IP 配置
-- **问题**: `CONFIG_STATUS_REPORTER_TARGET_IP` 当前为 "10.132.136.143",实际 wifi_test IP 为 "10.132.136.181"
-- **影响**: 状态上报连接失败(ESP_ERR_HTTP_CONNECT),wifi_test 无法接收状态数据
-- **解决方案**: 在 menuconfig 中修改 Component config -> status_reporter -> Target IP 为 10.132.136.181
-- **状态**: 待处理
+### 1. ~~修复 status_reporter 目标 IP 配置~~ (已完成)
+- **问题**: `CONFIG_STATUS_REPORTER_TARGET_IP` 曾为 "10.132.136.143",实际 wifi_test IP 为 "10.132.136.181"
+- **解决**: 已在 menuconfig 中修改 Component config -> status_reporter -> Target IP,通信已恢复
+- **状态**: 已完成
+- **备注**: 若后续无法通信,首要排查 IP 配置是否匹配(DHCP 可能分配不同 IP)
 
 ### 2. 完成状态上报端到端测试
 - **目标**: 验证 FocusLamp 能成功向 wifi_test 上报状态数据

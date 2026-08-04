@@ -1,0 +1,7 @@
+# Name,   Type, SubType, Offset,  Size, Flags
+# Custom partition table for wifi_test project
+# 16MB Flash layout: factory(3MB) + model(6MB for ESP-SR mn7_cn+mn7_en) + remaining(~7MB)
+nvs,      data, nvs,     ,        0x6000,
+phy_init, data, phy,     ,        0x1000,
+factory,  app,  factory, ,        0x300000,
+model,    data, spiffs,  ,        0x600000,

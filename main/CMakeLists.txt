@@ -1,0 +1,2 @@
+idf_component_register(SRCS "hello_world_main.c" "tts_http_api.c"
+                       REQUIRES wifi_manager websocket_manager xiaozhi_manager audio_bridge wake_word_engine connection_manager heartbeat_service message_queue focuslamp_bridge status_receiver)

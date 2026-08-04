@@ -1,0 +1,11 @@
+menu "Device Controller"
+
+    config DEVICE_CONTROLLER_ENABLE
+        bool "Enable Device Controller"
+        default y
+        help
+            Enable the Device Controller component for simulated device control
+            (lights, robotic arm, speaker). When disabled, all API functions
+            return ERR_NOT_SUPPORTED.
+
+endmenu

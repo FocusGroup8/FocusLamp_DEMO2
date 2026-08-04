@@ -1,0 +1,39 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../mipi_dsi"
+		},
+		{
+			"path": "../FocusLamp_DEMO2"
+		}
+	],
+	"settings": {
+		"files.exclude": {
+			"**/.git": true,
+			"**/.svn": true,
+			"**/.hg": true,
+			"**/CVS": true,
+			"**/.DS_Store": true,
+			"**/build": true,
+			"**/dependencies.lock": true
+		},
+		"search.exclude": {
+			"**/build": true,
+			"**/dependencies": true,
+			"**/.git": true
+		},
+		"C_Cpp.default.intelliSenseMode": "gcc-x64",
+		"C_Cpp.default.compilerPath": "",
+		"editor.formatOnSave": true,
+		"editor.tabSize": 4
+	},
+	"extensions": {
+		"recommendations": [
+			"ms-vscode.cpptools",
+			"espressif.esp-idf-extension"
+		]
+	}
+}

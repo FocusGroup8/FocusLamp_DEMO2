@@ -1,0 +1,20 @@
+menu "MIPI-DSI Bridge"
+
+    config MIPI_DSI_BRIDGE_ENABLE
+        bool "Enable MIPI-DSI Bridge"
+        default y
+        help
+            Enable the MIPI-DSI Bridge component for controlling mipi_dsi
+            device from wifi_test via HTTP REST API. When disabled, all API
+            functions return ERR_NOT_SUPPORTED.
+
+    config MIPI_DSI_BRIDGE_TARGET_IP
+        string "MIPI-DSI Device IP Address"
+        default "0.0.0.0"
+        depends on MIPI_DSI_BRIDGE_ENABLE
+        help
+            IP address (with optional port) of the mipi_dsi device.
+            Example: "192.168.1.100" or "192.168.1.100:80".
+            Set to "0.0.0.0" to disable HTTP requests (bridge init will warn).
+
+endmenu

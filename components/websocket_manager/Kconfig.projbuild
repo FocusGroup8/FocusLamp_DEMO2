@@ -1,0 +1,100 @@
+menu "WebSocket Manager Configuration"
+
+    config WS_MANAGER_ENABLE
+        bool "Enable WebSocket Manager"
+        default y
+        help
+            Enable the WebSocket Manager component. When disabled, all API
+            functions return ERR_NOT_SUPPORTED.
+
+    menu "Client Configuration"
+        depends on WS_MANAGER_ENABLE
+
+        config WS_MANAGER_CLIENT_ENABLE
+            bool "Enable WebSocket Client"
+            default y
+            help
+                Enable WebSocket client functionality.
+
+        config WS_MANAGER_PING_INTERVAL
+            int "Ping interval (seconds)"
+            default 10
+            depends on WS_MANAGER_CLIENT_ENABLE
+            help
+                WebSocket Ping/Pong keep-alive interval in seconds.
+
+        config WS_MANAGER_RECONNECT_TIMEOUT_MS
+            int "Reconnect timeout (milliseconds)"
+            default 10000
+            depends on WS_MANAGER_CLIENT_ENABLE
+            help
+                Time to wait before reconnecting after disconnection.
+                The actual reconnect uses exponential backoff starting from this value.
+
+        config WS_MANAGER_BUFFER_SIZE
+            int "WebSocket buffer size (bytes)"
+            default 1024
+            depends on WS_MANAGER_CLIENT_ENABLE
+            help
+                Size of the WebSocket send/receive buffer.
+                Also used as the server's pre-allocated receive buffer.
+                For text-only usage, 512-1024 is sufficient.
+                For binary data or large payloads, increase to 2048-4096.
+
+        config WS_MANAGER_CLIENT_URI
+            string "Default client URI"
+            default ""
+            depends on WS_MANAGER_CLIENT_ENABLE
+            help
+                Default WebSocket server URI for the client to connect to on startup.
+                Leave empty to skip auto-connect. Example: ws://echo.websocket.org
+
+    endmenu
+
+    menu "Server Configuration"
+        depends on WS_MANAGER_ENABLE
+
+        config WS_MANAGER_SERVER_ENABLE
+            bool "Enable WebSocket Server"
+            default y
+            select HTTPD_WS_SUPPORT
+            help
+                Enable WebSocket server functionality based on esp_http_server.
+
+        config WS_MANAGER_SERVER_PORT
+            int "Server port"
+            default 80
+            depends on WS_MANAGER_SERVER_ENABLE
+            help
+                HTTP/WebSocket server listen port.
+
+        config WS_MANAGER_SERVER_MAX_CONN
+            int "Maximum concurrent connections"
+            default 4
+            depends on WS_MANAGER_SERVER_ENABLE
+            help
+                Maximum number of simultaneous WebSocket client connections.
+
+        config WS_MANAGER_SERVER_ECHO
+            bool "Enable server echo mode"
+            default y
+            depends on WS_MANAGER_SERVER_ENABLE
+            help
+                When enabled, the server echoes received messages back to the sender.
+                When disabled, received messages are only dispatched via the DATA callback.
+
+    endmenu
+
+    menu "TLS Configuration"
+        depends on WS_MANAGER_ENABLE
+
+        config WS_MANAGER_TLS_ENABLE
+            bool "Enable TLS support (wss://)"
+            default n
+            help
+                Enable WebSocket over TLS. When enabled, the client can connect
+                to wss:// URIs. Server TLS support requires certificate configuration.
+
+    endmenu
+
+endmenu

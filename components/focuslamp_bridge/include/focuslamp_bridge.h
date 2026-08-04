@@ -101,6 +101,10 @@ esp_err_t focuslamp_bridge_servo_go_home(int time_ms);
 esp_err_t focuslamp_bridge_focus_start(int duration_minutes);
 esp_err_t focuslamp_bridge_focus_stop(void);
 
+/* Companion mode control */
+esp_err_t focuslamp_bridge_companion_start(int duration);
+esp_err_t focuslamp_bridge_companion_stop(void);
+
 /* Motion/arm control */
 esp_err_t focuslamp_bridge_motion_wave(void);
 esp_err_t focuslamp_bridge_motion_nod(void);

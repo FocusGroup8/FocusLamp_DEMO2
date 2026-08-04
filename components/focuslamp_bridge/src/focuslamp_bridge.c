@@ -293,6 +293,20 @@ esp_err_t focuslamp_bridge_focus_stop(void) {
   return http_post("/api/focus/stop", NULL, resp, sizeof(resp));
 }
 
+/* Companion mode control */
+esp_err_t focuslamp_bridge_companion_start(int duration) {
+  if (duration < 0) duration = 0;
+  char body[32];
+  snprintf(body, sizeof(body), "{\"duration\":%d}", duration);
+  char resp[64] = {0};
+  return http_post("/api/companion/start", body, resp, sizeof(resp));
+}
+
+esp_err_t focuslamp_bridge_companion_stop(void) {
+  char resp[64] = {0};
+  return http_post("/api/companion/stop", NULL, resp, sizeof(resp));
+}
+
 /* Motion control */
 esp_err_t focuslamp_bridge_motion_wave(void) {
   char resp[64] = {0};
@@ -454,6 +468,20 @@ mcp_tool_focus_stop(const esp_mcp_property_list_t *properties) {
 }
 
 static esp_mcp_value_t
+mcp_tool_companion_start(const esp_mcp_property_list_t *properties) {
+  (void)properties;
+  ESP_LOGI(TAG, "[MCP] focuslamp.companion.start");
+  return esp_mcp_value_create_bool(focuslamp_bridge_companion_start(0) == ESP_OK);
+}
+
+static esp_mcp_value_t
+mcp_tool_companion_stop(const esp_mcp_property_list_t *properties) {
+  (void)properties;
+  ESP_LOGI(TAG, "[MCP] focuslamp.companion.stop");
+  return esp_mcp_value_create_bool(focuslamp_bridge_companion_stop() == ESP_OK);
+}
+
+static esp_mcp_value_t
 mcp_tool_motion_wave(const esp_mcp_property_list_t *properties) {
   (void)properties;
   ESP_LOGI(TAG, "[MCP] focuslamp.arm.wave");
@@ -569,6 +597,13 @@ esp_err_t focuslamp_bridge_register_mcp_tools(esp_mcp_t *mcp) {
   t = esp_mcp_tool_create("self.focuslamp.focus.stop", "停止底部台灯专注模式", mcp_tool_focus_stop);
   if (t) esp_mcp_add_tool(mcp, t);
 
+  /* Companion mode tools (2) */
+  t = esp_mcp_tool_create("self.focuslamp.companion.start", "开启底部台灯陪伴模式（聊天陪伴，机械臂活动+表情）", mcp_tool_companion_start);
+  if (t) esp_mcp_add_tool(mcp, t);
+
+  t = esp_mcp_tool_create("self.focuslamp.companion.stop", "关闭底部台灯陪伴模式", mcp_tool_companion_stop);
+  if (t) esp_mcp_add_tool(mcp, t);
+
   /* Motion/arm tools (6) */
   t = esp_mcp_tool_create("self.focuslamp.arm.wave", "底部台灯机械臂挥手", mcp_tool_motion_wave);
   if (t) esp_mcp_add_tool(mcp, t);
@@ -588,7 +623,7 @@ esp_err_t focuslamp_bridge_register_mcp_tools(esp_mcp_t *mcp) {
   t = esp_mcp_tool_create("self.focuslamp.arm.home", "底部台灯机械臂回零位", mcp_tool_motion_home);
   if (t) esp_mcp_add_tool(mcp, t);
 
-  ESP_LOGI(TAG, "FocusLamp bridge MCP tools registered (22 tools)");
+  ESP_LOGI(TAG, "FocusLamp bridge MCP tools registered (24 tools)");
   return ESP_OK;
 }
 

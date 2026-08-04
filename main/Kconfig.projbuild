@@ -1,0 +1,294 @@
+menu "Example Configuration"
+
+    #===========================================================================#
+    # Board Type Selection (Mutually Exclusive Top/Bottom)                     #
+    #===========================================================================#
+
+    choice EXAMPLE_BOARD_TYPE
+        prompt "Board Type (Mutually Exclusive)"
+        default EXAMPLE_BOARD_TYPE_TOP
+        help
+            Select the board type. Top and Bottom boards are mutually exclusive
+            to avoid resource conflicts.
+
+            - Top Board: Display, LED, and Camera subsystems (individually selectable)
+              Use this for visual output, lighting control, and image capture.
+            - Bottom Board: Audio subsystem (individually selectable)
+              Use this for audio recording and playback.
+
+        config EXAMPLE_BOARD_TYPE_TOP
+            bool "Top Board (Display + LED + Camera)"
+        config EXAMPLE_BOARD_TYPE_BOTTOM
+            bool "Bottom Board (Audio)"
+    endchoice
+
+    #===========================================================================#
+    # Top Board Configuration                                                   #
+    #===========================================================================#
+
+    config EXAMPLE_ENABLE_DISPLAY
+        bool "Enable Display subsystem"
+        default y
+        depends on EXAMPLE_BOARD_TYPE_TOP
+        help
+            Enable LCD display subsystem with ST7701S MIPI DSI panel and GT911 touch.
+            This includes LVGL graphics library and related demos.
+
+    config EXAMPLE_ENABLE_LED
+        bool "Enable LED control"
+        default n
+        depends on EXAMPLE_BOARD_TYPE_TOP
+        help
+            Enable LED control module with dual PWM channels.
+            LED_A (cool white) on GPIO 29, LED_B (warm white) on GPIO 28.
+
+    config EXAMPLE_ENABLE_TOUCH
+        bool "Enable Touch Sensor (TTP223 on GPIO 21)"
+        default n
+        depends on EXAMPLE_BOARD_TYPE_TOP
+        select TOUCH_SENSOR_ENABLE
+        select TOUCH_INTERPRETER_ENABLE
+        help
+            Enable TTP223 touch sensor with gesture recognition.
+            Supports tap (wake), double-tap (brightness), and long-press.
+            Requires enabling TOUCH_SENSOR and TOUCH_INTERPRETER components.
+
+    config EXAMPLE_RUN_LED_TEST
+        bool "Run LED test on startup"
+        default n
+        depends on EXAMPLE_ENABLE_LED
+        help
+            Execute LED controller test sequence at startup.
+            Tests brightness ramp, color temperature sweep, and on/off control.
+
+    config EXAMPLE_ENABLE_CAMERA
+        bool "Enable Camera (OV5647)"
+        default n
+        depends on EXAMPLE_BOARD_TYPE_TOP
+        help
+            Enable OV5647 camera module via MIPI-CSI interface.
+            Requires esp_cam_sensor and esp_video components.
+
+    config EXAMPLE_RUN_CAMERA_TEST
+        bool "Run Camera test on startup"
+        default n
+        depends on EXAMPLE_ENABLE_CAMERA
+        help
+            Execute camera controller test at startup.
+            Initializes camera pipeline, captures 5 frames, prints frame info,
+            then releases resources. Useful for hardware verification.
+
+    config EXAMPLE_ENABLE_CAMERA_PREVIEW
+        bool "Enable camera preview on display (screen echo)"
+        default n
+        depends on EXAMPLE_ENABLE_CAMERA && EXAMPLE_ENABLE_DISPLAY
+        help
+            Start camera_preview_task that down-scales camera frames (via PPA)
+            and renders them on the LVGL canvas. Disable this when the camera
+            stream is delivered over WebSocket/network instead of the local
+            display, to save PPA/CPU resources and avoid high-frequency logs.
+
+    #===========================================================================#
+    # Bottom Board Configuration                                                #
+    #===========================================================================#
+
+    config EXAMPLE_ENABLE_AUDIO
+        bool "Enable Audio subsystem (I2S microphone + speaker)"
+        default n
+        depends on EXAMPLE_BOARD_TYPE_BOTTOM
+        help
+            Enable I2S audio subsystem with INMP441 microphone and MAX98357A amplifier.
+            This adds I2S driver, LittleFS storage, and audio codec dependencies.
+
+    #===========================================================================#
+    # Display System Configuration                                              #
+    #===========================================================================#
+
+    config EXAMPLE_USE_DMA2D_COPY_FRAME
+        bool "Use DMA2D to copy draw buffer to frame buffer"
+        default y
+        depends on EXAMPLE_ENABLE_DISPLAY
+        help
+            Enable this option, DMA2D will be used to copy the LVGL draw buffer to the target frame buffer.
+            This can save some CPU time and improve the performance.
+
+    config EXAMPLE_MONITOR_REFRESH_BY_GPIO
+        bool "Monitor Refresh Rate by GPIO"
+        default y
+        depends on EXAMPLE_ENABLE_DISPLAY
+        help
+            Enable this option, you can visualize the refresh rate by attaching a logic analyzer to a specific GPIO.
+            The GPIO will output a square wave with the frequency equals to half of the refresh rate.
+
+    config EXAMPLE_LCD_USE_ST7701S
+        bool "Use ST7701S LCD controller"
+        default y
+        depends on EXAMPLE_ENABLE_DISPLAY
+        help
+            ST7701S driver IC for KD034WXFID001 3.4 inch 480x480 MIPI DSI panel.
+
+    config EXAMPLE_TOUCH_USE_GT911
+        bool "Use GT911 touch controller"
+        default y
+        depends on EXAMPLE_ENABLE_DISPLAY
+        help
+            GT911 capacitive touch controller connected via I2C.
+
+    config EXAMPLE_ENABLE_GESTURE_RECOGNITION
+        bool "Enable gesture recognition library"
+        default y
+        depends on EXAMPLE_ENABLE_DISPLAY
+        help
+            Compile gesture recognition module (swipe, pinch, rotation, long press).
+
+    config EXAMPLE_ENABLE_TOUCH_GAME
+        bool "Enable touch game demo"
+        default y
+        depends on EXAMPLE_ENABLE_DISPLAY
+        help
+            Compile gesture-controlled ball game demo.
+
+    config EXAMPLE_GESTURE_DEBUG_LOG
+        bool "Enable gesture recognition debug logging"
+        default n
+        depends on EXAMPLE_ENABLE_DISPLAY
+        help
+            Enable verbose per-frame logging in gesture recognition.
+            Disable for production to improve performance.
+
+    choice EXAMPLE_DEMO
+        prompt "Select demo to run"
+        default EXAMPLE_DEMO_LVGL
+        depends on EXAMPLE_ENABLE_DISPLAY
+        help
+            Choose which demo to run at startup. Only one demo runs at a time.
+
+        config EXAMPLE_DEMO_LVGL
+            bool "LVGL Framework (esp_lvgl_port)"
+            help
+                Use LVGL 9.x graphics library with esp_lvgl_port for MIPI DSI display.
+                Provides full GUI framework with widgets, animations, and touch support.
+        config EXAMPLE_DEMO_EXPRESSIVE_EYES
+            bool "Expressive Eyes (animated eye display)"
+            help
+                Display animated expressive eyes using the espp/expressive_eyes component.
+                Shows electric blue monochrome eyes on black background with blinking,
+                look direction, and expression changes. Perfect for robot face display.
+        config EXAMPLE_DEMO_TOUCH_GAME
+            bool "Touch Game (gesture-controlled ball)"
+            select EXAMPLE_ENABLE_TOUCH_GAME
+        config EXAMPLE_DEMO_GESTURE_RECOGNITION
+            bool "Gesture Recognition Demo"
+            select EXAMPLE_ENABLE_GESTURE_RECOGNITION
+        config EXAMPLE_DEMO_TOUCH_GUI
+            bool "Touch GUI Demo (button test)"
+        config EXAMPLE_DEMO_DATA_COLLECTOR
+            bool "Gesture Data Collector (calibration)"
+    endchoice
+
+    #===========================================================================#
+    # Audio System Configuration                                                #
+    #===========================================================================#
+
+    config EXAMPLE_RUN_I2S_TEST
+        bool "Run I2S driver verification test on startup"
+        default n
+        depends on EXAMPLE_ENABLE_AUDIO
+        help
+            Execute I2S full-duplex test suite at startup.
+            Tests channel lifecycle, TX sine wave output, RX microphone input,
+            and full-duplex simultaneous operation.
+            Useful for hardware verification during development.
+
+    config EXAMPLE_AUDIO_SAMPLE_RATE
+        int "Audio sample rate (Hz)"
+        default 16000
+        range 8000 48000
+        depends on EXAMPLE_ENABLE_AUDIO
+        help
+            I2S audio sample rate in Hz. Common values: 8000, 16000, 22050, 44100, 48000.
+            16000 is the default used in the current implementation.
+            Note: 16kHz WAV recordings consume ~0.9MB per 30 seconds.
+
+    config EXAMPLE_AUDIO_I2S_NUM
+        int "I2S port number"
+        default 0
+        range 0 2
+        depends on EXAMPLE_ENABLE_AUDIO
+        help
+            I2S controller port number. ESP32-P4 has I2S port 0-2.
+            Use 0 for default or set to I2S_NUM_AUTO for auto-allocation.
+
+    config EXAMPLE_AUDIO_LITTLEFS_PARTITION_LABEL
+        string "LittleFS partition label"
+        default "littlefs"
+        depends on EXAMPLE_ENABLE_AUDIO
+        help
+            Label of the partition used for LittleFS audio file storage.
+            Must match the partition name in partitions.csv.
+
+    config EXAMPLE_AUDIO_MOUNT_POINT
+        string "LittleFS mount point"
+        default "/audio"
+        depends on EXAMPLE_ENABLE_AUDIO
+        help
+            File system mount point for audio files.
+
+    choice EXAMPLE_AUDIO_DEMO_MODE
+        prompt "Audio demo mode"
+        default EXAMPLE_AUDIO_DEMO_LOOPBACK
+        depends on EXAMPLE_ENABLE_AUDIO
+        help
+            Select the audio demo to run.
+
+        config EXAMPLE_AUDIO_DEMO_LOOPBACK
+            bool "Loopback (mic → speaker)"
+            help
+                Record from microphone and immediately play through speaker.
+                Tests the full I2S full-duplex path.
+
+        config EXAMPLE_AUDIO_DEMO_RECORD_ONLY
+            bool "Record only (mic → WAV file)"
+            help
+                Record from microphone and save as WAV file to LittleFS.
+
+        config EXAMPLE_AUDIO_DEMO_PLAY_ONLY
+            bool "Play only (Ogg file → speaker)"
+            help
+                Play an Ogg audio file from LittleFS through the speaker.
+
+        config EXAMPLE_AUDIO_DEMO_FULL
+            bool "Full demo (record + play + monitor)"
+            help
+                Complete audio system with recording, playback, and system monitoring.
+    endchoice
+
+    #===========================================================================#
+    # System Monitor Configuration (Independent of Board Type)                  #
+    #===========================================================================#
+
+    config EXAMPLE_ENABLE_SYSMON
+        bool "Enable system resource monitor"
+        default n
+        help
+            Enable real-time system resource monitoring during system operation.
+            Logs heap usage, PSRAM usage, and task statistics.
+            Works in both Top and Bottom board modes.
+
+    config EXAMPLE_SYSMON_INTERVAL_SEC
+        int "Monitor log interval (seconds)"
+        default 10
+        range 1 3600
+        depends on EXAMPLE_ENABLE_SYSMON
+        help
+            Interval between automatic system status logs.
+            Set lower value for detailed debugging, higher value for production.
+
+    config EXAMPLE_SYSMON_PRINT_TASK_LIST
+        bool "Print task list in monitor report"
+        default n
+        depends on EXAMPLE_ENABLE_SYSMON
+        help
+            Include FreeRTOS task list with stack high water marks.
+            Increases log output but useful for debugging.
+endmenu

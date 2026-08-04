@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32-P4 摄像头监控</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f5f5f5;
+            color: #333;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            padding: 20px;
+        }
+        h1 {
+            color: #2c3e50;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 10px;
+        }
+        .main-grid {
+            display: grid;
+            grid-template-columns: 3fr 2fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .video-section {
+            background: #000;
+            border-radius: 6px;
+            overflow: hidden;
+            aspect-ratio: 5/4;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+        }
+        .video-section img {
+            max-width: 100%;
+            max-height: 100%;
+            display: none;
+        }
+        .video-placeholder {
+            color: #888;
+            font-size: 14px;
+            text-align: center;
+        }
+        .video-overlay {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0,0,0,0.6);
+            color: #0f0;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .controls-section {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        .control-group {
+            background: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 6px;
+            padding: 15px;
+        }
+        .control-group h3 {
+            color: #2c3e50;
+            margin-bottom: 10px;
+            font-size: 14px;
+            text-transform: uppercase;
+        }
+        .control-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+        .control-row label {
+            min-width: 60px;
+            font-size: 13px;
+        }
+        .control-row input[type="range"] {
+            flex: 1;
+        }
+        .control-row .value {
+            min-width: 40px;
+            text-align: right;
+            font-family: monospace;
+            font-size: 13px;
+        }
+        button {
+            background: #3498db;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: background 0.2s;
+        }
+        button:hover {
+            background: #2980b9;
+        }
+        button.danger {
+            background: #e74c3c;
+        }
+        button.danger:hover {
+            background: #c0392b;
+        }
+        button.success {
+            background: #27ae60;
+        }
+        button.success:hover {
+            background: #229954;
+        }
+        button:disabled {
+            background: #bdc3c7;
+            cursor: not-allowed;
+        }
+        .btn-group {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .connection-bar {
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            margin-bottom: 20px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 6px;
+            font-size: 13px;
+        }
+        .status-dot {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 6px;
+        }
+        .status-dot.connected {
+            background: #27ae60;
+        }
+        .status-dot.disconnected {
+            background: #e74c3c;
+        }
+        .log-section {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            border-radius: 6px;
+            padding: 12px;
+            font-family: "Consolas", "Courier New", monospace;
+            font-size: 12px;
+            height: 200px;
+            overflow-y: auto;
+        }
+        .log-section .log-entry {
+            margin-bottom: 4px;
+        }
+        .log-section .log-time {
+            color: #888;
+        }
+        .log-section .log-info {
+            color: #4ec9b0;
+        }
+        .log-section .log-warn {
+            color: #dcdcaa;
+        }
+        .log-section .log-error {
+            color: #f44747;
+        }
+        .log-section .log-recv {
+            color: #9cdcfe;
+        }
+        input[type="text"] {
+            padding: 6px 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 13px;
+            flex: 1;
+        }
+        input[type="checkbox"] {
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>ESP32-P4 摄像头监控</h1>
+
+        <div class="connection-bar">
+            <span>设备IP:</span>
+            <input type="text" id="deviceIp" value="192.168.1.100" style="width: 150px;">
+            <button onclick="connectAll()">连接</button>
+            <button onclick="disconnectAll()" class="danger">断开</button>
+            <span><span id="camStatus" class="status-dot disconnected"></span>摄像头流</span>
+            <span><span id="mcpStatus" class="status-dot disconnected"></span>MCP控制</span>
+            <span style="margin-left: auto;">帧计数: <span id="frameCount">0</span> | 大小: <span id="frameSize">0</span> bytes | FPS: <span id="actualFps">0</span></span>
+        </div>
+
+        <div class="main-grid">
+            <div class="video-section">
+                <div class="video-placeholder" id="videoPlaceholder">
+                    未连接<br>点击"连接"按钮开始
+                </div>
+                <img id="videoImg" alt="Camera Stream">
+                <div class="video-overlay" id="videoOverlay" style="display: none;">
+                    <span id="overlayText">--</span>
+                </div>
+            </div>
+
+            <div class="controls-section">
+                <div class="control-group">
+                    <h3>摄像头控制</h3>
+                    <div class="btn-group" style="margin-bottom: 10px;">
+                        <button onclick="callTool('camera.start')" class="success">启动</button>
+                        <button onclick="callTool('camera.stop')" class="danger">停止</button>
+                    </div>
+                    <div class="control-row">
+                        <label>JPEG质量:</label>
+                        <input type="range" id="qualitySlider" min="1" max="100" value="80" oninput="updateQualityLabel()">
+                        <span class="value" id="qualityValue">80</span>
+                        <button onclick="applyQuality()">应用</button>
+                    </div>
+                    <div class="control-row">
+                        <label>帧率FPS:</label>
+                        <input type="range" id="fpsSlider" min="1" max="30" value="15" oninput="updateFpsLabel()">
+                        <span class="value" id="fpsValue">15</span>
+                        <button onclick="applyFps()">应用</button>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <h3>显示控制</h3>
+                    <div class="btn-group" style="margin-bottom: 10px;">
+                        <button onclick="callTool('display.on')" class="success">开屏</button>
+                        <button onclick="callTool('display.off')" class="danger">关屏</button>
+                    </div>
+                    <div class="control-row">
+                        <label>背光亮度:</label>
+                        <input type="range" id="brightnessSlider" min="0" max="100" value="100" oninput="updateBrightnessLabel()">
+                        <span class="value" id="brightnessValue">100</span>
+                        <button onclick="applyBrightness()">应用</button>
+                    </div>
+                    <div class="control-row">
+                        <label>屏幕预览:</label>
+                        <input type="checkbox" id="showCameraCheckbox" onchange="applyShowCamera(this.checked)">
+                        <span>启用屏幕摄像头预览</span>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <h3>MCP工具测试</h3>
+                    <div class="btn-group">
+                        <button onclick="sendInitialize()">Initialize</button>
+                        <button onclick="sendToolsList()">Tools List</button>
+                        <button onclick="sendPing()">Ping</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="log-section" id="logArea">
+            <div class="log-entry"><span class="log-time">[--:--:--]</span> 等待连接...</div>
+        </div>
+    </div>
+
+    <script>
+        let camWs = null;
+        let mcpWs = null;
+        let mcpRequestId = 1;
+        let frameCount = 0;
+        let lastFpsTime = Date.now();
+        let lastFpsFrameCount = 0;
+        let currentObjectUrl = null;
+
+        /* Auto-reconnect state */
+        let camReconnectTimer = null;
+        let camReconnectDelay = 1000;      /* Initial reconnect delay: 1s */
+        const CAM_RECONNECT_MAX_DELAY = 10000; /* Max reconnect delay: 10s */
+        let mcpReconnectTimer = null;
+        let mcpReconnectDelay = 1000;
+        const MCP_RECONNECT_MAX_DELAY = 10000;
+        let deviceIp = '';                  /* Remember IP for reconnect */
+        let userDisconnected = false;       /* True when user explicitly clicks "Disconnect" */
+
+        /* Add jitter to reconnect delay to avoid thundering herd */
+        function jitterDelay(baseMs) {
+            return baseMs + Math.floor(Math.random() * 500); /* +0~500ms jitter */
+        }
+
+        /* Logging */
+        function log(msg, level = 'info') {
+            const now = new Date();
+            const time = String(now.getHours()).padStart(2,'0') + ':' +
+                         String(now.getMinutes()).padStart(2,'0') + ':' +
+                         String(now.getSeconds()).padStart(2,'0');
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.innerHTML = `<span class="log-time">[${time}]</span> <span class="log-${level}">${msg}</span>`;
+            const logArea = document.getElementById('logArea');
+            logArea.appendChild(entry);
+            logArea.scrollTop = logArea.scrollHeight;
+            console.log(`[${level}] ${msg}`);
+        }
+
+        /* Connection management */
+        function connectAll() {
+            const ip = document.getElementById('deviceIp').value.trim();
+            if (!ip) {
+                log('请输入设备IP', 'error');
+                return;
+            }
+            deviceIp = ip;
+            userDisconnected = false; /* User explicitly connected */
+            /* Clear any pending reconnect timers */
+            if (camReconnectTimer) { clearTimeout(camReconnectTimer); camReconnectTimer = null; }
+            if (mcpReconnectTimer) { clearTimeout(mcpReconnectTimer); mcpReconnectTimer = null; }
+            /* Reset reconnect delays */
+            camReconnectDelay = 1000;
+            mcpReconnectDelay = 1000;
+            connectCamera(ip);
+            connectMcp(ip);
+        }
+
+        function disconnectAll() {
+            userDisconnected = true; /* Prevent auto-reconnect */
+            /* Cancel auto-reconnect before closing */
+            if (camReconnectTimer) { clearTimeout(camReconnectTimer); camReconnectTimer = null; }
+            if (mcpReconnectTimer) { clearTimeout(mcpReconnectTimer); mcpReconnectTimer = null; }
+            deviceIp = '';
+            if (camWs) { camWs.close(); }
+            if (mcpWs) { mcpWs.close(); }
+        }
+
+        function connectCamera(ip) {
+            const url = `ws://${ip}/camera`;
+            log(`连接摄像头流: ${url}`);
+            camWs = new WebSocket(url);
+            camWs.binaryType = 'blob';
+
+            camWs.onopen = () => {
+                document.getElementById('camStatus').className = 'status-dot connected';
+                document.getElementById('videoPlaceholder').style.display = 'none';
+                document.getElementById('videoImg').style.display = 'block';
+                document.getElementById('videoOverlay').style.display = 'block';
+                camReconnectDelay = 1000; /* Reset reconnect delay on successful connection */
+                log('摄像头流已连接', 'info');
+            };
+
+            camWs.onmessage = (event) => {
+                if (event.data instanceof Blob) {
+                    const size = event.data.size;
+                    if (currentObjectUrl) {
+                        URL.revokeObjectURL(currentObjectUrl);
+                    }
+                    currentObjectUrl = URL.createObjectURL(event.data);
+                    document.getElementById('videoImg').src = currentObjectUrl;
+
+                    frameCount++;
+                    document.getElementById('frameCount').textContent = frameCount;
+                    document.getElementById('frameSize').textContent = size;
+
+                    /* FPS calculation (every 2 seconds) */
+                    const now = Date.now();
+                    if (now - lastFpsTime >= 2000) {
+                        const fps = (frameCount - lastFpsFrameCount) * 1000 / (now - lastFpsTime);
+                        document.getElementById('actualFps').textContent = fps.toFixed(1);
+                        document.getElementById('overlayText').textContent = `${size}B | ${fps.toFixed(1)}fps`;
+                        lastFpsTime = now;
+                        lastFpsFrameCount = frameCount;
+                    } else {
+                        document.getElementById('overlayText').textContent = `${size}B`;
+                    }
+                }
+            };
+
+            camWs.onclose = (event) => {
+                document.getElementById('camStatus').className = 'status-dot disconnected';
+                document.getElementById('videoPlaceholder').style.display = 'block';
+                document.getElementById('videoImg').style.display = 'none';
+                document.getElementById('videoOverlay').style.display = 'none';
+                camWs = null;
+                /* Auto-reconnect with exponential backoff + jitter.
+                 * Skip reconnect if user explicitly clicked "Disconnect". */
+                if (deviceIp && !userDisconnected) {
+                    const delay = jitterDelay(camReconnectDelay);
+                    log(`摄像头流已断开 (code=${event.code})，${(delay/1000).toFixed(1)}秒后重连...`, 'warn');
+                    camReconnectTimer = setTimeout(() => {
+                        log('摄像头流自动重连中...', 'info');
+                        connectCamera(deviceIp);
+                    }, delay);
+                    camReconnectDelay = Math.min(camReconnectDelay * 2, CAM_RECONNECT_MAX_DELAY);
+                } else {
+                    log(`摄像头流已断开 (code=${event.code})`, 'warn');
+                }
+            };
+
+            camWs.onerror = (err) => {
+                /* onerror is always followed by onclose, which handles reconnect */
+                log('摄像头流连接错误', 'error');
+            };
+        }
+
+        function connectMcp(ip) {
+            const url = `ws://${ip}/mcp`;
+            log(`连接MCP控制: ${url}`);
+            mcpWs = new WebSocket(url);
+
+            mcpWs.onopen = () => {
+                document.getElementById('mcpStatus').className = 'status-dot connected';
+                mcpReconnectDelay = 1000; /* Reset reconnect delay on successful connection */
+                log('MCP控制已连接', 'info');
+                sendInitialize();
+            };
+
+            mcpWs.onmessage = (event) => {
+                log(`MCP响应: ${event.data}`, 'recv');
+            };
+
+            mcpWs.onclose = (event) => {
+                document.getElementById('mcpStatus').className = 'status-dot disconnected';
+                mcpWs = null;
+                /* Auto-reconnect with exponential backoff + jitter.
+                 * Skip reconnect if user explicitly clicked "Disconnect". */
+                if (deviceIp && !userDisconnected) {
+                    const delay = jitterDelay(mcpReconnectDelay);
+                    log(`MCP控制已断开 (code=${event.code})，${(delay/1000).toFixed(1)}秒后重连...`, 'warn');
+                    mcpReconnectTimer = setTimeout(() => {
+                        log('MCP控制自动重连中...', 'info');
+                        connectMcp(deviceIp);
+                    }, delay);
+                    mcpReconnectDelay = Math.min(mcpReconnectDelay * 2, MCP_RECONNECT_MAX_DELAY);
+                } else {
+                    log(`MCP控制已断开 (code=${event.code})`, 'warn');
+                }
+            };
+
+            mcpWs.onerror = (err) => {
+                /* onerror is always followed by onclose, which handles reconnect */
+                log('MCP连接错误', 'error');
+            };
+        }
+
+        /* MCP JSON-RPC helpers */
+        function sendJsonRpc(method, params = null) {
+            if (!mcpWs || mcpWs.readyState !== WebSocket.OPEN) {
+                log('MCP未连接，无法发送', 'error');
+                return;
+            }
+            const msg = {
+                jsonrpc: '2.0',
+                id: mcpRequestId++,
+                method: method
+            };
+            if (params) {
+                msg.params = params;
+            }
+            const jsonStr = JSON.stringify(msg);
+            mcpWs.send(jsonStr);
+            log(`MCP发送: ${jsonStr}`, 'info');
+        }
+
+        function sendInitialize() {
+            sendJsonRpc('initialize', {
+                protocolVersion: '2025-11-25',
+                capabilities: {},
+                clientInfo: { name: 'web-monitor', version: '1.0.0' }
+            });
+        }
+
+        function sendToolsList() {
+            sendJsonRpc('tools.list');
+        }
+
+        function sendPing() {
+            sendJsonRpc('ping');
+        }
+
+        function callTool(name, args = null) {
+            const params = { name: name };
+            if (args) {
+                params.arguments = args;
+            }
+            sendJsonRpc('tools.call', params);
+        }
+
+        /* Control handlers */
+        function updateQualityLabel() {
+            document.getElementById('qualityValue').textContent = document.getElementById('qualitySlider').value;
+        }
+        function updateFpsLabel() {
+            document.getElementById('fpsValue').textContent = document.getElementById('fpsSlider').value;
+        }
+        function updateBrightnessLabel() {
+            document.getElementById('brightnessValue').textContent = document.getElementById('brightnessSlider').value;
+        }
+
+        function applyQuality() {
+            const q = parseInt(document.getElementById('qualitySlider').value);
+            callTool('camera.set_quality', { quality: q });
+        }
+        function applyFps() {
+            const f = parseInt(document.getElementById('fpsSlider').value);
+            callTool('camera.set_fps', { fps: f });
+        }
+        function applyBrightness() {
+            const b = parseInt(document.getElementById('brightnessSlider').value);
+            callTool('display.set_brightness', { level: b });
+        }
+        function applyShowCamera(enable) {
+            callTool('display.show_camera', { enable: enable });
+        }
+    </script>
+</body>
+</html>

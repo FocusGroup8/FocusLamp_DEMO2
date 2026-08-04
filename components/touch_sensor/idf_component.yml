@@ -1,0 +1,4 @@
+dependencies:
+  # No external dependencies - uses only built-in IDF components
+  idf:
+    version: ">=5.0"

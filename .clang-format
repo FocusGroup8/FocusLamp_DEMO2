@@ -1,0 +1,70 @@
+# ESP-IDF based clang-format configuration
+# Reference: https://docs.espressif.com/projects/esp-idf/en/stable/contribute/style-guide.html
+---
+BasedOnStyle: LLVM
+Language: Cpp
+
+# Indentation: 4 spaces, no tabs
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ContinuationIndentWidth: 4
+
+# Line width
+ColumnLimit: 120
+
+# Braces: function opening brace on new line, control flow on same line
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterFunction: true
+  AfterControlStatement: Never
+  AfterEnum: false
+  AfterStruct: false
+  AfterUnion: false
+  AfterExternBlock: false
+  BeforeCatch: false
+  BeforeElse: false
+  IndentBraces: false
+  SplitEmptyFunction: false
+  SplitEmptyRecord: false
+
+# Pointer alignment: right (pointer/reference next to variable name, e.g. uint8_t *p)
+# Matches ESP-IDF style
+PointerAlignment: Right
+
+# Spacing
+SpaceBeforeParens: ControlStatements
+SpaceAfterCStyleCast: false
+SpaceBeforeSquareBrackets: false
+SpaceAroundPointerQualifiers: Default
+SpacesInCStyleCastParentheses: false
+SpacesInConditionalStatement: false
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+
+# Alignment
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: Consecutive
+AlignConsecutiveDeclarations: None
+AlignEscapedNewlines: Left
+AlignOperands: Align
+AlignTrailingComments: true
+
+# Short forms
+AllowShortBlocksOnASingleLine: Empty
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLambdasOnASingleLine: All
+AllowShortLoopsOnASingleLine: false
+
+# Include sorting
+IncludeBlocks: Regroup
+SortIncludes: CaseSensitive
+
+# Misc
+ReflowComments: true
+Cpp11BracedListStyle: true
+FixNamespaceComments: true
+MaxEmptyLinesToKeep: 2
+KeepEmptyLinesAtTheStartOfBlocks: false

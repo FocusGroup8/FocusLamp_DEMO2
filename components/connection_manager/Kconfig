@@ -1,0 +1,38 @@
+menu "Connection Manager"
+
+    config CONNECTION_MANAGER_ENABLE
+        bool "Enable Connection Manager"
+        default y
+        help
+            Enable the Connection Manager component for unified WiFi and
+            WebSocket health monitoring and automatic recovery.
+
+    if CONNECTION_MANAGER_ENABLE
+
+        config CONNECTION_MANAGER_WIFI_INIT_TIMEOUT_MS
+            int "WiFi init timeout (ms)"
+            default 30000
+            help
+                Maximum time to wait for WiFi initialization.
+
+        config CONNECTION_MANAGER_WIFI_RECONNECT_MAX_DELAY_MS
+            int "WiFi reconnect max delay (ms)"
+            default 60000
+            help
+                Maximum delay for WiFi exponential backoff reconnection.
+
+        config CONNECTION_MANAGER_WS_RECONNECT_MAX_DELAY_MS
+            int "WebSocket reconnect max delay (ms)"
+            default 60000
+            help
+                Maximum delay for WebSocket exponential backoff reconnection.
+
+        config CONNECTION_MANAGER_MONITOR_INTERVAL_MS
+            int "Health monitor interval (ms)"
+            default 5000
+            help
+                Interval for periodic connection health checks.
+
+    endif
+
+endmenu

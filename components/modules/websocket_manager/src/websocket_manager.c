@@ -438,7 +438,7 @@ esp_err_t ws_manager_server_start(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port    = WS_MANAGER_SERVER_PORT;
     config.max_uri_handlers =
-        32; /* 3(WebSocket URIs: /ws + /mcp + /) + 19(REST) + 10(reserved) */
+        40; /* 3(WebSocket URIs: /ws + /mcp + /) + 32(REST) + 5(reserved) */
     config.max_open_sockets = WS_MANAGER_SERVER_MAX_CONN + 2; /* Reserve for HTTP + control */
     config.close_fn         = ws_session_close_cb;
 

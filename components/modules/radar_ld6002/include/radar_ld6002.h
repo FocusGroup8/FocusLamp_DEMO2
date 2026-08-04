@@ -4,12 +4,9 @@
  * Migrated from the standalone radar test (radar/main/main.c).
  * Parses TF frames (SOF=0x01, big-endian fields, XOR-NOT checksum)
  * from the HLK-LD6002 radar module via the shared radar_driver UART
- * layer, decodes them into a radar state, and periodically prints a
- * summary.
- *
- * This module is independent from the existing radar_module /
- * radar_data_task / radar_frame_handler pipeline and does not touch
- * the event_bus, so it cannot affect other features.
+ * layer, decodes them into a radar state, publishes EV_RADAR_* events
+ * onto the event_bus (so device_state / focus_app / lcd_service stay in
+ * sync), and periodically prints a summary.
  */
 
 #pragma once

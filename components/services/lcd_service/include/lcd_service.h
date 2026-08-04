@@ -176,6 +176,13 @@ esp_err_t lcd_service_info_set_timer(uint32_t seconds);
  */
 void lcd_service_info_update(void);
 
+/**
+ * @brief Enable/disable companion mode overlay on expression page
+ *        (mode name at top + heart rate at bottom).
+ * @param enable  true to show overlay, false to hide and clear residual text
+ */
+void lcd_service_set_companion_overlay(bool enable);
+
 /* ===================== Native Page Management API ===================== */
 
 /**

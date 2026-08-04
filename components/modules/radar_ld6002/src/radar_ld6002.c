@@ -29,6 +29,10 @@
 #include "radar_driver.h"
 #include "system_config.h"
 
+#include "event_bus.h"
+#include "event_def.h"
+#include "radar_module.h"
+
 static const char *TAG = "radar_ld6002";
 
 /* ===================== EMA Filter Config ===================== */
@@ -115,6 +119,19 @@ static void decode_frame(const uint8_t *buf, uint16_t msg_type, uint16_t data_le
                 s_filt_breath_rate = EMA_ALPHA_BREATH * s_radar.breath_rate
                                    + (1.0f - EMA_ALPHA_BREATH) * s_filt_breath_rate;
             }
+
+            radar_breath_data_t bd = {
+                .is_detected  = true,
+                .breath_phase = s_radar.breath_phase,
+                .breath_rate  = s_filt_breath_rate,
+            };
+            event_t ev = {
+                .type      = EV_RADAR_BREATH,
+                .data      = &bd,
+                .data_size = sizeof(bd),
+                .timestamp = event_bus_get_timestamp(),
+            };
+            event_bus_publish(&ev);
         }
         break;
     case 0x0A15:  /* 心率 */
@@ -128,11 +145,39 @@ static void decode_frame(const uint8_t *buf, uint16_t msg_type, uint16_t data_le
                 s_filt_heart_rate = EMA_ALPHA_HEART * s_radar.heart_rate
                                   + (1.0f - EMA_ALPHA_HEART) * s_filt_heart_rate;
             }
+
+            radar_heart_data_t hd = {
+                .is_valid    = true,
+                .heart_rate  = s_filt_heart_rate,
+                .heart_phase = s_radar.heart_phase,
+            };
+            event_t ev = {
+                .type      = EV_RADAR_HEART_RATE,
+                .data      = &hd,
+                .data_size = sizeof(hd),
+                .timestamp = event_bus_get_timestamp(),
+            };
+            event_bus_publish(&ev);
         }
         break;
     case 0x0F09:  /* 人体存在 */
         s_radar.person_present = (data_len >= 1 && data[0] != 0);
         s_radar.has_presence   = true;
+
+        radar_presence_data_t pd = {
+            .is_present  = s_radar.person_present,
+            .distance_cm = s_radar.range_dist,
+            .x           = s_filt_pos_x,
+            .y           = s_filt_pos_y,
+            .z           = s_filt_pos_z,
+        };
+        event_t ev = {
+            .type      = EV_RADAR_PRESENCE,
+            .data      = &pd,
+            .data_size = sizeof(pd),
+            .timestamp = event_bus_get_timestamp(),
+        };
+        event_bus_publish(&ev);
         break;
     case 0x0A04:  /* 人员位置 */
         if (data_len >= 4) {
@@ -145,6 +190,18 @@ static void decode_frame(const uint8_t *buf, uint16_t msg_type, uint16_t data_le
             memcpy(&s_radar.range_flag, data, 4);
             s_radar.range_dist = rd_float(data, 4);
             s_radar.has_range  = true;
+
+            radar_target_range_data_t rd = {
+                .flag     = s_radar.range_flag,
+                .range_cm = s_radar.range_dist,
+            };
+            event_t ev = {
+                .type      = EV_RADAR_TARGET_RANGE,
+                .data      = &rd,
+                .data_size = sizeof(rd),
+                .timestamp = event_bus_get_timestamp(),
+            };
+            event_bus_publish(&ev);
         }
         break;
     case 0x0A17:  /* 跟踪目标位置 */

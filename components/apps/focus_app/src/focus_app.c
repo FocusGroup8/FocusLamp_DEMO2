@@ -28,6 +28,11 @@ static esp_timer_handle_t s_focus_timer = NULL;
 static uint32_t s_duration_sec = 0;
 static uint32_t s_elapsed_sec = 0;
 
+/* 在位久坐提醒状态：雷达在场连续累计，每会话最多播报1次 */
+#define FOCUS_SEATED_REMIND_SEC 60
+static uint32_t s_seated_sec = 0;
+static bool s_seated_notified = false;
+
 /* ===================== Internal Helpers ===================== */
 static void focus_app_apply_lighting(void)
 {
@@ -82,6 +87,21 @@ static void focus_app_timer_callback(void *arg)
     }
 
     s_elapsed_sec++;
+
+    /* 在位连续≥60s（倒计时运行中，即非语音对话）播报久坐提醒 */
+    device_state_t state = {0};
+    device_state_get(&state);
+    if (state.radar.present) {
+        s_seated_sec++;
+        if (s_seated_sec >= FOCUS_SEATED_REMIND_SEC && !s_seated_notified) {
+            s_seated_notified = true;
+            ESP_LOGI(TAG, "User seated >=%d s, broadcasting sedentary reminder",
+                     FOCUS_SEATED_REMIND_SEC);
+            tts_bridge_speak("你已经坐了很久，请站起来活动活动吧~");
+        }
+    } else {
+        s_seated_sec = 0;
+    }
 
     /* Publish tick event for UI updates */
     event_bus_publish_simple(EV_APP_FOCUS_TIMER_TICK);
@@ -149,6 +169,8 @@ esp_err_t focus_app_start(uint32_t duration_minutes)
     s_elapsed_sec = 0;
     s_paused = false;
     s_running = true;
+    s_seated_sec = 0;
+    s_seated_notified = false;
 
     /* Apply focus environment */
     focus_app_apply_lighting();

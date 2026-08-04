@@ -7,6 +7,7 @@
 #include "event_bus.h"
 #include "event_def.h"
 #include "lcd_driver.h"
+#include "device_state.h"
 #include "esp_log.h"
 #include "esp_random.h"
 
@@ -408,7 +409,7 @@ void lcd_service_expression_update(void)
     /* Diagnostic: white top+bottom border to verify expression_update runs */
     lcd_draw_hline_buffer(0, 0, LCD_WIDTH, LCD_COLOR_WHITE);
     lcd_draw_hline_buffer(0, LCD_HEIGHT - 1, LCD_WIDTH, LCD_COLOR_WHITE);
-    lcd_flush_buffer();
+    /* 不在本函数内 flush：由调用方统一 flush，避免叠加文本造成闪烁 */
 }
 
 esp_err_t lcd_service_expression_set(lcd_expression_t expr)
@@ -464,14 +465,17 @@ bool lcd_service_expression_is_auto_blink(void)
 #define LCD_INFO_MODE_X 4            /* Mode name X */
 #define LCD_INFO_MODE_Y 0            /* Mode name row */
 #define LCD_INFO_TASK_X 4            /* Task name X */
-#define LCD_INFO_TASK_Y 20           /* Task name row */
-#define LCD_INFO_TIMER_Y 20          /* Timer display row (same as task, right-aligned) */
+#define LCD_INFO_TASK_Y 18           /* Task name row */
+#define LCD_INFO_TIMER_Y 18          /* Timer display row (same as task, right-aligned) */
 #define LCD_INFO_TIMER_SIZE 2   /* 12px per char; right-aligned */
 
-#define LCD_INFO_BAR_Y 42           /* Progress bar Y position */
-#define LCD_INFO_BAR_HEIGHT 8
+#define LCD_INFO_BAR_Y 36           /* Progress bar Y position */
+#define LCD_INFO_BAR_HEIGHT 6
 #define LCD_INFO_BAR_X 4
 #define LCD_INFO_BAR_WIDTH (LCD_WIDTH - 8)
+
+#define LCD_INFO_HR_Y 44            /* Heart rate row (Chinese font 16px high) */
+#define LCD_INFO_MODE_BAND_H 16     /* Mode name overlay band height (16px) */
 
 typedef struct {
     char               task_title[LCD_INFO_TITLE_MAX_LEN];
@@ -645,6 +649,58 @@ esp_err_t lcd_service_info_set_timer(uint32_t seconds)
     return ESP_OK;
 }
 
+/* ===================== Heart Rate Display & Companion Overlay ===================== */
+
+static bool s_companion_overlay = false;
+
+/**
+ * @brief 绘制心率文本到指定行（中文"心率XX"，无效时显示"心率--"）
+ */
+static void lcd_service_draw_heart_rate(uint16_t y)
+{
+    char hr_str[16];
+    device_state_t state = {0};
+    device_state_get(&state);
+
+    if (state.radar.heart_rate_valid && state.radar.heart_rate_bpm > 0.0f) {
+        snprintf(hr_str, sizeof(hr_str), "心率%u",
+                 (unsigned)(state.radar.heart_rate_bpm + 0.5f));
+    } else {
+        snprintf(hr_str, sizeof(hr_str), "心率--");
+    }
+    lcd_draw_utf8_string_buffer(LCD_INFO_MODE_X, y, hr_str, LCD_COLOR_WHITE,
+                                LCD_COLOR_BLACK, 1);
+}
+
+void lcd_service_set_companion_overlay(bool enable)
+{
+    if (s_companion_overlay == enable) {
+        return;
+    }
+    s_companion_overlay = enable;
+
+    if (!enable) {
+        /* 退出陪伴模式时清除表情页残留叠加文本 */
+        lcd_fill_rect_buffer(0, LCD_INFO_MODE_Y, LCD_WIDTH, LCD_INFO_MODE_BAND_H,
+                             LCD_COLOR_BLACK);
+        lcd_fill_rect_buffer(0, LCD_INFO_HR_Y, LCD_WIDTH,
+                             LCD_HEIGHT - LCD_INFO_HR_Y, LCD_COLOR_BLACK);
+        lcd_flush_buffer();
+    }
+    ESP_LOGI(TAG, "Companion overlay %s", enable ? "enabled" : "disabled");
+}
+
+/**
+ * @brief 陪伴模式表情页叠加：顶部模式名 + 底部心率（保留开心眼睛）
+ */
+static void lcd_service_draw_companion_overlay(void)
+{
+    lcd_draw_utf8_string_buffer(LCD_INFO_MODE_X, LCD_INFO_MODE_Y, "陪伴模式",
+                                LCD_COLOR_WHITE, LCD_COLOR_BLACK, 1);
+    lcd_service_draw_heart_rate(LCD_INFO_HR_Y);
+    /* 不在此 flush：与表情帧统一由调用方 flush，避免两帧交替闪烁 */
+}
+
 void lcd_service_info_update(void)
 {
     if (!s_info_state.initialized) {
@@ -680,6 +736,9 @@ void lcd_service_info_update(void)
         /* Fill */
         lcd_fill_rect_buffer(LCD_INFO_BAR_X, LCD_INFO_BAR_Y, fill_width, LCD_INFO_BAR_HEIGHT, LCD_COLOR_WHITE);
     }
+
+    /* Row 4: Heart rate */
+    lcd_service_draw_heart_rate(LCD_INFO_HR_Y);
 
     lcd_flush_buffer();
 }
@@ -814,6 +873,11 @@ void lcd_service_update(void)
 
     if (page == LCD_PAGE_EXPRESSION) {
         lcd_service_expression_update();
+        if (s_companion_overlay) {
+            lcd_service_draw_companion_overlay();
+        }
+        /* 表情+叠加文本绘制完毕后统一刷新上屏，避免闪烁 */
+        lcd_flush_buffer();
     } else if (page == LCD_PAGE_INFO) {
         lcd_service_info_update();
     }
@@ -841,6 +905,11 @@ static void lcd_service_event_handler(event_t *event, void *context)
             lcd_page_t current = lcd_service_page_get_current();
             if (current == LCD_PAGE_EXPRESSION) {
                 lcd_service_expression_update();
+                if (s_companion_overlay) {
+                    lcd_service_draw_companion_overlay();
+                }
+                /* 表情+叠加文本绘制完毕后统一刷新上屏，避免闪烁 */
+                lcd_flush_buffer();
             } else if (current == LCD_PAGE_INFO) {
                 lcd_service_info_update();
             }

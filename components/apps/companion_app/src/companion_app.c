@@ -170,6 +170,8 @@ esp_err_t companion_app_start(void)
     /* 小屏幕显示陪伴模式 */
     lcd_service_mode_set(LCD_MODE_COMPANION);
     lcd_service_expression_set(LCD_EXPRESSION_HAPPY);
+    /* 表情页叠加"陪伴模式"与心率 */
+    lcd_service_set_companion_overlay(true);
 
     /* Start arm friendly action loop */
     arm_service_load_action(&s_companion_seq);
@@ -205,6 +207,9 @@ esp_err_t companion_app_stop(void)
 
     /* 恢复头部表情为正常 */
     lamp_head_set_expression("neutral");
+
+    /* 关闭小屏陪伴叠加层 */
+    lcd_service_set_companion_overlay(false);
 
     /* Restore default lighting and LCD */
     led_service_turn_off();

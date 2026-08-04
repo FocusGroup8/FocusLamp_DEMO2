@@ -36,6 +36,13 @@
 #include "focus_app.h"
 #include "motion_controller.h"
 
+/* Demo trio headers */
+#include "device_state.h"
+#include "arm_service.h"
+#include "companion_app.h"
+#include "tts_bridge.h"
+#include "error_code.h"
+
 static const char *TAG = "REST_API";
 
 #define REST_JSON_BUF_SIZE 512
@@ -900,12 +907,190 @@ static const httpd_uri_t motion_greet_uri = { .uri = "/api/motion/greet", .metho
 static const httpd_uri_t motion_home_uri  = { .uri = "/api/motion/home",  .method = HTTP_POST, .handler = motion_home_handler,  .user_ctx = NULL };
 
 /*---------------------------------------------------------------
+ * Demo Trio Handlers (5 endpoints)
+ *-------------------------------------------------------------*/
+
+/* Handler: GET /api/ambient - 环境光等级查询（0-4） */
+static esp_err_t ambient_get_handler(httpd_req_t *req) {
+  device_state_t state = {0};
+  esp_err_t ret = device_state_get(&state);
+  if (ret != ESP_OK) {
+    return send_error_500(req, "device_state_get failed");
+  }
+
+  char json[64];
+  snprintf(json, sizeof(json), "{\"ok\":true,\"level\":%u}",
+           state.ambient_light.level);
+  ESP_LOGI(TAG, "GET /api/ambient -> %s", json);
+  return send_json_response(req, json);
+}
+
+static const httpd_uri_t ambient_get_uri = {
+    .uri = "/api/ambient",
+    .method = HTTP_GET,
+    .handler = ambient_get_handler,
+    .user_ctx = NULL,
+};
+
+/* Handler: POST /api/arm/gesture - 拇指手势驱动机械臂上下（servo0 单步） */
+static esp_err_t arm_gesture_handler(httpd_req_t *req) {
+  char body[REST_BODY_BUF_SIZE];
+  if (read_post_body(req, body, sizeof(body)) != 0) {
+    return send_error_500(req, "read body failed");
+  }
+
+  cJSON *root = cJSON_Parse(body);
+  if (!root) {
+    return send_error_400(req, "invalid JSON");
+  }
+  cJSON *g = cJSON_GetObjectItem(root, "gesture");
+  if (!cJSON_IsString(g) || !g->valuestring) {
+    cJSON_Delete(root);
+    return send_error_400(req, "missing or invalid gesture");
+  }
+  char gesture[16];
+  strncpy(gesture, g->valuestring, sizeof(gesture) - 1);
+  gesture[sizeof(gesture) - 1] = '\0';
+  cJSON_Delete(root);
+
+  /* 单步动作：servo0(EM3) 向上1850 / 向下1150，500ms */
+  static const action_step_t s_gesture_up_steps[]   = { { 0, 1850, 500, 0 } };
+  static const action_step_t s_gesture_down_steps[] = { { 0, 1150, 500, 0 } };
+  static const action_sequence_t s_gesture_up_seq = {
+      .steps = s_gesture_up_steps, .step_count = 1, .loop_count = 1,
+  };
+  static const action_sequence_t s_gesture_down_seq = {
+      .steps = s_gesture_down_steps, .step_count = 1, .loop_count = 1,
+  };
+
+  const action_sequence_t *seq = NULL;
+  if (strcmp(gesture, "thumb_up") == 0) {
+    seq = &s_gesture_up_seq;
+  } else if (strcmp(gesture, "thumb_down") == 0) {
+    seq = &s_gesture_down_seq;
+  } else {
+    return send_error_400(req, "unknown gesture");
+  }
+
+  /* 手势动作优先：停止当前机械臂动作（如陪伴循环），随后使能舵机再执行 */
+  arm_service_stop_action();
+  servo_service_enable();
+
+  esp_err_t ret = arm_service_load_action(seq);
+  if (ret == ESP_OK) {
+    ret = arm_service_start_action();
+  }
+  if (ret != ESP_OK) {
+    return send_error_500(req, "arm action failed");
+  }
+
+  char json[128];
+  snprintf(json, sizeof(json), "{\"ok\":true,\"gesture\":\"%s\"}", gesture);
+  ESP_LOGI(TAG, "POST /api/arm/gesture %s", gesture);
+  return send_json_response(req, json);
+}
+
+static const httpd_uri_t arm_gesture_uri = {
+    .uri = "/api/arm/gesture",
+    .method = HTTP_POST,
+    .handler = arm_gesture_handler,
+    .user_ctx = NULL,
+};
+
+/* Handler: POST /api/detect/phone - VLM 检测玩手机/电脑，播报对应文案 */
+static esp_err_t detect_phone_handler(httpd_req_t *req) {
+  char body[REST_BODY_BUF_SIZE];
+  if (read_post_body(req, body, sizeof(body)) != 0) {
+    return send_error_500(req, "read body failed");
+  }
+
+  cJSON *root = cJSON_Parse(body);
+  if (!root) {
+    return send_error_400(req, "invalid JSON");
+  }
+  cJSON *s = cJSON_GetObjectItem(root, "source");
+  if (!cJSON_IsString(s) || !s->valuestring) {
+    cJSON_Delete(root);
+    return send_error_400(req, "missing or invalid source");
+  }
+
+  const char *text = NULL;
+  if (strcmp(s->valuestring, "phone") == 0) {
+    text = "识别到您正在玩手机，快把手机放下，好好专注把工作完成吧";
+  } else if (strcmp(s->valuestring, "computer") == 0) {
+    text = "识别到您正在玩电脑游戏，快停下来活动一下，然后先专注把工作完成再玩吧~";
+  } else {
+    cJSON_Delete(root);
+    return send_error_400(req, "unknown source");
+  }
+
+  ESP_LOGI(TAG, "POST /api/detect/phone source=%s", s->valuestring);
+  cJSON_Delete(root);
+
+  esp_err_t ret = tts_bridge_speak(text);
+  if (ret != ESP_OK) {
+    return send_error_500(req, "tts_bridge_speak failed");
+  }
+
+  ESP_LOGI(TAG, "POST /api/detect/phone -> TTS queued");
+  return send_json_response(req, "{\"ok\":true}");
+}
+
+static const httpd_uri_t detect_phone_uri = {
+    .uri = "/api/detect/phone",
+    .method = HTTP_POST,
+    .handler = detect_phone_handler,
+    .user_ctx = NULL,
+};
+
+/* Handler: POST /api/companion/start - 开启陪伴模式 */
+static esp_err_t companion_start_handler(httpd_req_t *req) {
+  char body[REST_BODY_BUF_SIZE];
+  if (read_post_body(req, body, sizeof(body)) != 0) {
+    return send_error_500(req, "read body failed");
+  }
+  /* body 可选 {"duration":0}，本版忽略 */
+
+  esp_err_t ret = companion_app_start();
+  if (ret != ESP_OK) {
+    return send_error_500(req, "companion_app_start failed");
+  }
+  ESP_LOGI(TAG, "POST /api/companion/start");
+  return send_json_response(req, "{\"ok\":true}");
+}
+
+static const httpd_uri_t companion_start_uri = {
+    .uri = "/api/companion/start",
+    .method = HTTP_POST,
+    .handler = companion_start_handler,
+    .user_ctx = NULL,
+};
+
+/* Handler: POST /api/companion/stop - 关闭陪伴模式 */
+static esp_err_t companion_stop_handler(httpd_req_t *req) {
+  esp_err_t ret = companion_app_stop();
+  /* 未初始化或未运行时停止视为成功（幂等） */
+  if (ret != ESP_OK && ret != ERR_BUSY && ret != ERR_NOT_INITIALIZED) {
+    return send_error_500(req, "companion_app_stop failed");
+  }
+  ESP_LOGI(TAG, "POST /api/companion/stop");
+  return send_json_response(req, "{\"ok\":true}");
+}
+
+static const httpd_uri_t companion_stop_uri = {
+    .uri = "/api/companion/stop",
+    .method = HTTP_POST,
+    .handler = companion_stop_handler,
+    .user_ctx = NULL,
+};
+
+/*---------------------------------------------------------------
  * Init / Deinit
  *-------------------------------------------------------------*/
 static bool s_initialized = false;
 
 /* Table of all REST URI descriptors for batch registration.
- * Total: 19 endpoints (1 existing status + 18 new). */
+ * Total: 32 endpoints (27 existing + 5 demo trio). */
 static const httpd_uri_t *const s_rest_uris[] = {
     /* System query (3) */
     &status_uri,
@@ -941,6 +1126,12 @@ static const httpd_uri_t *const s_rest_uris[] = {
     &motion_dance_uri,
     &motion_greet_uri,
     &motion_home_uri,
+    /* Demo trio (5) */
+    &ambient_get_uri,
+    &arm_gesture_uri,
+    &detect_phone_uri,
+    &companion_start_uri,
+    &companion_stop_uri,
 };
 #define REST_URI_COUNT (sizeof(s_rest_uris) / sizeof(s_rest_uris[0]))
 

@@ -1,0 +1,21 @@
+idf_component_register(
+    SRCS "arm_action_app/src/arm_action_app.c"
+         "companion_app/src/companion_app.c"
+         "focus_app/src/focus_app.c"
+         "game_app/src/game_app.c"
+         "lighting_app/src/lighting_app.c"
+         "music_rhythm_app/src/music_rhythm_app.c"
+         "exercise_follow_app/src/exercise_follow_app.c"
+         "custom_rule_app/src/custom_rule_app.c"
+         "voice_app/src/voice_app.c"
+    INCLUDE_DIRS "arm_action_app/include"
+                 "companion_app/include"
+                 "focus_app/include"
+                 "game_app/include"
+                 "lighting_app/include"
+                 "music_rhythm_app/include"
+                 "exercise_follow_app/include"
+                 "custom_rule_app/include"
+                 "voice_app/include"
+    REQUIRES common event_bus services esp_timer nvs_flash xiaozhi_manager lamp_head_controller tts_bridge
+)

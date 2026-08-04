@@ -1,0 +1,91 @@
+menu "Servo Control Configuration"
+
+    config PROJECT_ENABLE_SERVO_CONTROL
+        bool "Enable Servo Control Module"
+        default n
+        help
+            Enable or disable the servo control module.
+
+    config SERVO_CONTROL_MAX_SLOTS
+        int "Maximum Recording Slots"
+        default 10
+        depends on PROJECT_ENABLE_SERVO_CONTROL
+        help
+            Maximum number of recording slots.
+
+    config SERVO_CONTROL_MAX_FRAMES
+        int "Maximum Frames Per Slot"
+        default 1000
+        depends on PROJECT_ENABLE_SERVO_CONTROL
+        help
+            Maximum number of frames per recording slot.
+
+    config SERVO_CONTROL_SAMPLING_MS
+        int "Sampling Interval (ms)"
+        default 50
+        depends on PROJECT_ENABLE_SERVO_CONTROL
+        help
+            Sampling interval in milliseconds.
+
+    config SERVO_CONTROL_PLAYBACK_SPEED_MULTIPLIER
+        int "Playback Speed Multiplier (x10)"
+        default 10
+        depends on PROJECT_ENABLE_SERVO_CONTROL
+        help
+            Playback speed multiplier (x10).
+            Example: 5 means 0.5x speed (slow motion).
+            Example: 10 means 1.0x speed (normal).
+            Example: 40 means 4.0x speed (fast motion).
+
+    config SERVO_CONTROL_EM3_ID
+        int "EM3 Servo ID"
+        default 4
+        depends on PROJECT_ENABLE_SERVO_CONTROL
+        help
+            EM3 servo ID.
+
+    config SERVO_CONTROL_LX_COUNT
+        int "LX Servo Count"
+        default 4
+        depends on PROJECT_ENABLE_SERVO_CONTROL
+        help
+            Number of LX servos.
+
+    config SERVO_CONTROL_EM3_DEFAULT_SPEED
+        int "EM3 Default Speed (steps/sec)"
+        default 1000
+        depends on PROJECT_ENABLE_SERVO_CONTROL
+        help
+            EM3 servo default speed for first frame (steps/sec).
+            Range: 50-3000, default: 1000 (about 14.6 RPM).
+            50 steps/sec ≈ 0.732 RPM (very slow)
+            1000 steps/sec ≈ 14.6 RPM (medium)
+            3000 steps/sec ≈ 43.9 RPM (very fast)
+
+    config SERVO_CONTROL_EM3_MIN_SPEED
+        int "EM3 Minimum Speed (steps/sec)"
+        default 50
+        depends on PROJECT_ENABLE_SERVO_CONTROL
+        help
+            EM3 servo minimum speed limit (steps/sec).
+            Range: 10-100, default: 50 (about 0.732 RPM).
+
+    config SERVO_CONTROL_EM3_MAX_SPEED
+        int "EM3 Maximum Speed (steps/sec)"
+        default 3000
+        depends on PROJECT_ENABLE_SERVO_CONTROL
+        help
+            EM3 servo maximum speed limit (steps/sec).
+            Range: 1000-5000, default: 3000 (about 43.9 RPM).
+
+    config SERVO_CONTROL_EM3_POSITION_THRESHOLD
+        int "EM3 Position Change Threshold"
+        default 1500
+        depends on PROJECT_ENABLE_SERVO_CONTROL
+        help
+            EM3 servo position change threshold for multi-step movement.
+            When position change exceeds this threshold, the servo will move in multiple steps
+            to avoid reverse rotation near boundaries.
+            Range: 500-2000, default: 1500 (about 180 degrees).
+
+endmenu

@@ -1,0 +1,40 @@
+menu "Servo Web Control Module"
+    config PROJECT_ENABLE_SERVO_WEB_CONTROL
+        bool "Enable Servo Web Control Module"
+        default n
+        help
+            Enable servo web control module for device control via WebSocket/HTTP.
+
+    if PROJECT_ENABLE_SERVO_WEB_CONTROL
+        config SERVO_WEB_CONTROL_WS_PORT
+            int "WebSocket Port"
+            default 80
+            help
+                Port for the WebSocket server.
+
+        config SERVO_WEB_CONTROL_WS_ENDPOINT
+            string "WebSocket Endpoint"
+            default "/ws"
+            help
+                Path for the WebSocket connection.
+
+        config SERVO_WEB_CONTROL_ENABLE_SERIAL_BRIDGE
+            bool "Enable Serial Bridge Control"
+            default y
+            help
+                Allow controlling servos via serial commands (JSON format).
+
+        config SERVO_WEB_CONTROL_TASK_STACK_SIZE
+            int "Task Stack Size"
+            default 4096
+            help
+                Stack size for web control tasks.
+
+        config SERVO_WEB_CONTROL_TASK_PRIORITY
+            int "Task Priority"
+            range 1 10
+            default 5
+            help
+                Priority for web control tasks.
+    endif
+endmenu

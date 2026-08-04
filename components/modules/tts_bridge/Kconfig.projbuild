@@ -1,0 +1,10 @@
+menu "TTS Bridge Configuration"
+
+    config TTS_BRIDGE_TARGET_IP
+        string "TTS board target IP address (with port)"
+        default "10.10.40.92:80"
+        help
+            IP address and port of the TTS board's HTTP server.
+            Example: "10.10.40.92:80"
+
+endmenu

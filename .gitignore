@@ -1,0 +1,33 @@
+# ===== ESP-IDF 构建产物（体积大，可重新生成）=====
+build/
+managed_components/
+dependencies.lock
+
+# ===== SDK 配置备份 =====
+sdkconfig.old
+sdkconfig.bak
+
+# ===== 调试 / 临时文件 =====
+.dbg/
+tmp_log.txt
+*.log
+debug-*.md
+
+# ===== IDE / 编辑器 =====
+.vscode/
+.idea/
+.cache/
+
+# ===== Trae / Agent 本地数据 =====
+.agents/
+
+# ===== Python（脚本工具用）=====
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# ===== 系统杂项 =====
+.DS_Store
+Thumbs.db

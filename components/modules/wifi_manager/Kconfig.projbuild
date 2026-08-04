@@ -1,0 +1,38 @@
+menu "WiFi Manager Configuration"
+
+    config WIFI_MANAGER_ENABLE
+        bool "Enable WiFi Manager"
+        default y
+        help
+            Enable the WiFi Manager component. When disabled, all API
+            functions return ERR_NOT_SUPPORTED.
+
+    config WIFI_MANAGER_SSID
+        string "WiFi SSID"
+        default "myssid"
+        depends on WIFI_MANAGER_ENABLE
+        help
+            SSID (network name) of the access point to connect to.
+
+    config WIFI_MANAGER_PASSWORD
+        string "WiFi Password"
+        default "mypassword"
+        depends on WIFI_MANAGER_ENABLE
+        help
+            WiFi password (WPA2 or WPA3) for the access point.
+
+    config WIFI_MANAGER_MAX_RETRY
+        int "Maximum retry count"
+        default 5
+        depends on WIFI_MANAGER_ENABLE
+        help
+            Maximum number of retries to connect to the AP before giving up.
+
+    config WIFI_MANAGER_AUTO_RECONNECT
+        bool "Enable auto-reconnect"
+        default y
+        depends on WIFI_MANAGER_ENABLE
+        help
+            Automatically reconnect to AP when disconnected.
+
+endmenu

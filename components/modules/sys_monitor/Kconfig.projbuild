@@ -1,0 +1,83 @@
+menu "System Monitor Configuration"
+    config PROJECT_ENABLE_SYS_MONITOR
+        bool "Enable System Monitor"
+        default n
+        select FREERTOS_USE_TRACE_FACILITY
+        select FREERTOS_GENERATE_RUN_TIME_STATS
+        help
+            Enable system resource monitoring module.
+
+            When enabled, provides:
+            - Heap memory monitoring (internal/SPIRAM)
+            - Task CPU usage statistics
+            - Task stack high water mark
+            - Console commands for on-demand queries
+            - Low memory alert with configurable thresholds
+
+            Note: Automatically enables FreeRTOS trace facility and
+            run-time stats generation (required for task monitoring).
+
+    menu "Memory Alert Configuration"
+        depends on PROJECT_ENABLE_SYS_MONITOR
+
+        config PROJECT_SYS_MONITOR_INTERNAL_HEAP_WARN_THRESHOLD
+            int "Internal Heap Warning Threshold (bytes)"
+            default 51200
+            range 1024 524288
+            help
+                Internal heap free size warning threshold in bytes.
+                When free internal heap falls below this value, a warning log is emitted.
+                Default: 51200 (50KB)
+
+        config PROJECT_SYS_MONITOR_INTERNAL_HEAP_ERROR_THRESHOLD
+            int "Internal Heap Error Threshold (bytes)"
+            default 20480
+            range 512 262144
+            help
+                Internal heap free size error threshold in bytes.
+                When free internal heap falls below this value, an error log is emitted.
+                Default: 20480 (20KB)
+
+        config PROJECT_SYS_MONITOR_PSRAM_HEAP_WARN_THRESHOLD
+            int "PSRAM Heap Warning Threshold (bytes)"
+            default 524288
+            range 10240 8388608
+            help
+                PSRAM heap free size warning threshold in bytes.
+                When free PSRAM heap falls below this value, a warning log is emitted.
+                Default: 524288 (512KB)
+
+        config PROJECT_SYS_MONITOR_PSRAM_HEAP_ERROR_THRESHOLD
+            int "PSRAM Heap Error Threshold (bytes)"
+            default 262144
+            range 5120 4194304
+            help
+                PSRAM heap free size error threshold in bytes.
+                When free PSRAM heap falls below this value, an error log is emitted.
+                Default: 262144 (256KB)
+
+        config PROJECT_SYS_MONITOR_ALERT_CHECK_INTERVAL_MS
+            int "Alert Check Interval (ms)"
+            default 5000
+            range 1000 60000
+            help
+                Interval in milliseconds for memory alert checking.
+                Default: 5000 (5 seconds)
+    endmenu
+
+    menu "Console Commands Configuration"
+        depends on PROJECT_ENABLE_SYS_MONITOR
+
+        config PROJECT_SYS_MONITOR_ENABLE_CONSOLE_COMMANDS
+            bool "Enable Console Commands"
+            default y
+            help
+                Enable system monitor console commands.
+
+                Available commands:
+                - sys_heap: Show heap memory info
+                - sys_tasks: Show task runtime stats
+                - sys_stack: Show task stack high water mark
+                - sys_stats: Show all system stats
+    endmenu
+endmenu

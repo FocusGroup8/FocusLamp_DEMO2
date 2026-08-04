@@ -1,0 +1,11 @@
+menu "REST API"
+
+    config REST_API_ENABLE
+        bool "Enable REST API module"
+        default y
+        help
+            Enable the REST API module for external HTTP REST control.
+            Registers /api/ endpoints on the websocket_manager HTTP server.
+            When disabled, all API functions return ERR_NOT_SUPPORTED.
+
+endmenu

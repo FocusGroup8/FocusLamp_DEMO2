@@ -1,0 +1,7 @@
+menu "JPEG Encoder Configuration"
+    config PROJECT_ENABLE_JPEG_ENCODER
+        bool "Enable JPEG Encoder"
+        default n
+        help
+            Enable or disable the JPEG encoder component.
+endmenu

@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+# LVGL UI Kconfig (STUB)
+# 
+# NOTE: This configuration has been merged into main/Kconfig.projbuild
+# under the "Display Configuration" -> "LVGL UI" menu.
+# 
+# This file is kept as a stub for backward compatibility.
+# All LVGL UI configuration options are now centralized in:
+#   main/Kconfig.projbuild -> menu "Display Configuration" -> menu "LVGL UI"
+#
+# Merged on: 2026-06-02 (Z0.5 refactoring cleanup)

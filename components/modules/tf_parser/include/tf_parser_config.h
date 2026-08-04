@@ -1,0 +1,13 @@
+#ifndef TF_PARSER_CONFIG_H
+#define TF_PARSER_CONFIG_H
+
+#define TF_PARSER_ENABLE
+
+#ifdef TF_PARSER_ENABLE
+
+#define TF_PARSER_MAX_PAYLOAD_SIZE 256
+#define TF_PARSER_MAX_FRAME_SIZE 520
+
+#endif
+
+#endif

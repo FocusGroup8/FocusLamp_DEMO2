@@ -1,0 +1,21 @@
+menu "Status Reporter"
+
+    config STATUS_REPORTER_ENABLE
+        bool "Enable Status Reporter"
+        default y
+        help
+            Enable the Status Reporter component for sending status/sensor
+            data from FocusLamp_DEMO2 to wifi_test via HTTP POST.
+            When disabled, all API functions return ERR_NOT_SUPPORTED.
+
+    config STATUS_REPORTER_TARGET_IP
+        string "wifi_test Device IP Address"
+        default "0.0.0.0"
+        depends on STATUS_REPORTER_ENABLE
+        help
+            IP address (with optional port) of the wifi_test device that
+            will receive status reports.
+            Example: "192.168.1.100" or "192.168.1.100:80".
+            Set to "0.0.0.0" to disable reporting (init will warn).
+
+endmenu

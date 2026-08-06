@@ -6,6 +6,7 @@
 
 #include "network_manager.h"
 
+#include "base_bridge.h"
 #include "cJSON.h"
 #include "camera_stream.h"
 #include "connection_manager.h"
@@ -44,6 +45,20 @@ static char s_ip_string[16]                   = {0};
  * read by network_manager_get_algo_result_state()). */
 static algo_result_state_t s_algo_state = {0};
 static SemaphoreHandle_t s_algo_mutex   = NULL;
+
+/*---------------------------------------------------------------
+ * VLM detection forward (A1) and gesture forward (A2) throttle state
+ *-------------------------------------------------------------*/
+/* A1: forward phone/computer detection once per source every >=60s;
+ * a source change forwards immediately and resets the timer. */
+static char s_last_vlm_source[16]    = {0};
+static int64_t s_last_vlm_forward_us = 0;
+#define VLM_FORWARD_THROTTLE_US (60LL * 1000LL * 1000LL)
+
+/* A2: forward thumb up/down only on gesture change, throttled to >=1s. */
+static char s_last_gesture[32]    = {0};
+static int64_t s_last_gesture_us  = 0;
+#define GESTURE_FORWARD_THROTTLE_US (1LL * 1000LL * 1000LL)
 
 /*---------------------------------------------------------------
  * Internal: WiFi event callback
@@ -873,6 +888,68 @@ static esp_err_t mcp_cb_algo_result(const void *args_json, char *response_buf, i
              snap.focus_score, snap.gesture[0] ? snap.gesture : "-", snap.vlm_judgment[0] ? snap.vlm_judgment : "-",
              snap.vlm_trigger_source[0] ? snap.vlm_trigger_source : "-");
 
+    /*---------------------------------------------------------------
+     * A1: forward VLM phone/computer detection to base board
+     * Trigger: judgment=="是" AND trigger_source is 手机/电脑.
+     * Throttle: same source >=60s; source change forwards immediately.
+     *-------------------------------------------------------------*/
+    {
+        const char *source = NULL;
+        if (snap.vlm_judgment[0] && strcmp(snap.vlm_judgment, "是") == 0) {
+            if (strstr(snap.vlm_trigger_source, "手机")) {
+                source = "phone";
+            } else if (strstr(snap.vlm_trigger_source, "电脑")) {
+                source = "computer";
+            }
+        }
+
+        if (source) {
+            int64_t now_us         = esp_timer_get_time();
+            bool source_changed    = (strcmp(s_last_vlm_source, source) != 0);
+            bool throttle_elapsed  = (now_us - s_last_vlm_forward_us) >= VLM_FORWARD_THROTTLE_US;
+            if (source_changed || throttle_elapsed) {
+                esp_err_t err = base_bridge_post_detect_phone(source);
+                if (err == ESP_OK) {
+                    snprintf(s_last_vlm_source, sizeof(s_last_vlm_source), "%s", source);
+                    s_last_vlm_forward_us = now_us;
+                } else {
+                    ESP_LOGW(TAG, "VLM forward failed (will retry): source=%s", source);
+                }
+            } else {
+                ESP_LOGI(TAG, "VLM forward throttled: source=%s", source);
+            }
+        }
+    }
+
+    /*---------------------------------------------------------------
+     * A2: forward VLM thumb up/down gesture to base board
+     * Trigger: gesture changes to Thumb_Up/Thumb_Down.
+     * Throttle: >=1s between forwards.
+     *-------------------------------------------------------------*/
+    if (snap.gesture[0]) {
+        const char *gesture = NULL;
+        if (strcmp(snap.gesture, "Thumb_Up") == 0) {
+            gesture = "thumb_up";
+        } else if (strcmp(snap.gesture, "Thumb_Down") == 0) {
+            gesture = "thumb_down";
+        }
+
+        if (gesture) {
+            int64_t now_us        = esp_timer_get_time();
+            bool gesture_changed  = (strcmp(s_last_gesture, gesture) != 0);
+            bool throttle_elapsed = (now_us - s_last_gesture_us) >= GESTURE_FORWARD_THROTTLE_US;
+            if (gesture_changed && throttle_elapsed) {
+                esp_err_t err = base_bridge_post_arm_gesture(gesture);
+                if (err == ESP_OK) {
+                    snprintf(s_last_gesture, sizeof(s_last_gesture), "%s", gesture);
+                    s_last_gesture_us = now_us;
+                } else {
+                    ESP_LOGW(TAG, "Gesture forward failed (will retry): gesture=%s", gesture);
+                }
+            }
+        }
+    }
+
     snprintf(response_buf, response_buf_size, "{\"ok\":true}");
     return ESP_OK;
 }
@@ -1014,6 +1091,14 @@ static esp_err_t rest_api_eyes_get_expression_handler(httpd_req_t *req)
 /*---------------------------------------------------------------
  * Register REST API endpoints on the HTTP server
  *-------------------------------------------------------------*/
+static void safe_register_uri(const httpd_uri_t *uri)
+{
+    esp_err_t ret = ws_manager_server_register_uri(uri);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Register %s failed: %s", uri->uri, esp_err_to_name(ret));
+    }
+}
+
 static void register_rest_api_handlers(void)
 {
     /* Camera control REST API */
@@ -1022,28 +1107,28 @@ static void register_rest_api_handlers(void)
         .method  = HTTP_POST,
         .handler = rest_api_camera_start_handler,
     };
-    ws_manager_server_register_uri(&api_camera_start);
+    safe_register_uri(&api_camera_start);
 
     const httpd_uri_t api_camera_stop = {
         .uri     = "/api/camera/stop",
         .method  = HTTP_POST,
         .handler = rest_api_camera_stop_handler,
     };
-    ws_manager_server_register_uri(&api_camera_stop);
+    safe_register_uri(&api_camera_stop);
 
     const httpd_uri_t api_camera_quality = {
         .uri     = "/api/camera/quality",
         .method  = HTTP_POST,
         .handler = rest_api_camera_quality_handler,
     };
-    ws_manager_server_register_uri(&api_camera_quality);
+    safe_register_uri(&api_camera_quality);
 
     const httpd_uri_t api_camera_fps = {
         .uri     = "/api/camera/fps",
         .method  = HTTP_POST,
         .handler = rest_api_camera_fps_handler,
     };
-    ws_manager_server_register_uri(&api_camera_fps);
+    safe_register_uri(&api_camera_fps);
 
     /* Display control REST API */
     const httpd_uri_t api_display_on = {
@@ -1051,28 +1136,28 @@ static void register_rest_api_handlers(void)
         .method  = HTTP_POST,
         .handler = rest_api_display_on_handler,
     };
-    ws_manager_server_register_uri(&api_display_on);
+    safe_register_uri(&api_display_on);
 
     const httpd_uri_t api_display_off = {
         .uri     = "/api/display/off",
         .method  = HTTP_POST,
         .handler = rest_api_display_off_handler,
     };
-    ws_manager_server_register_uri(&api_display_off);
+    safe_register_uri(&api_display_off);
 
     const httpd_uri_t api_display_brightness = {
         .uri     = "/api/display/brightness",
         .method  = HTTP_POST,
         .handler = rest_api_display_brightness_handler,
     };
-    ws_manager_server_register_uri(&api_display_brightness);
+    safe_register_uri(&api_display_brightness);
 
     const httpd_uri_t api_display_camera_preview = {
         .uri     = "/api/display/camera_preview",
         .method  = HTTP_POST,
         .handler = rest_api_display_camera_preview_handler,
     };
-    ws_manager_server_register_uri(&api_display_camera_preview);
+    safe_register_uri(&api_display_camera_preview);
 
     /* LED control REST API */
     const httpd_uri_t api_led_on = {
@@ -1080,35 +1165,35 @@ static void register_rest_api_handlers(void)
         .method  = HTTP_POST,
         .handler = rest_api_led_on_handler,
     };
-    ws_manager_server_register_uri(&api_led_on);
+    safe_register_uri(&api_led_on);
 
     const httpd_uri_t api_led_off = {
         .uri     = "/api/led/off",
         .method  = HTTP_POST,
         .handler = rest_api_led_off_handler,
     };
-    ws_manager_server_register_uri(&api_led_off);
+    safe_register_uri(&api_led_off);
 
     const httpd_uri_t api_led_brightness = {
         .uri     = "/api/led/brightness",
         .method  = HTTP_POST,
         .handler = rest_api_led_brightness_handler,
     };
-    ws_manager_server_register_uri(&api_led_brightness);
+    safe_register_uri(&api_led_brightness);
 
     const httpd_uri_t api_led_color_temp = {
         .uri     = "/api/led/color_temp",
         .method  = HTTP_POST,
         .handler = rest_api_led_color_temp_handler,
     };
-    ws_manager_server_register_uri(&api_led_color_temp);
+    safe_register_uri(&api_led_color_temp);
 
     const httpd_uri_t api_led_status = {
         .uri     = "/api/led/status",
         .method  = HTTP_GET,
         .handler = rest_api_led_status_handler,
     };
-    ws_manager_server_register_uri(&api_led_status);
+    safe_register_uri(&api_led_status);
 
     /* Status endpoint */
     const httpd_uri_t api_status = {
@@ -1116,7 +1201,7 @@ static void register_rest_api_handlers(void)
         .method  = HTTP_GET,
         .handler = rest_api_status_handler,
     };
-    ws_manager_server_register_uri(&api_status);
+    safe_register_uri(&api_status);
 
     /* Expressive Eyes control REST API */
     const httpd_uri_t api_eyes_set_expression = {
@@ -1124,28 +1209,28 @@ static void register_rest_api_handlers(void)
         .method  = HTTP_POST,
         .handler = rest_api_eyes_set_expression_handler,
     };
-    ws_manager_server_register_uri(&api_eyes_set_expression);
+    safe_register_uri(&api_eyes_set_expression);
 
     const httpd_uri_t api_eyes_look_at = {
         .uri     = "/api/eyes/look_at",
         .method  = HTTP_POST,
         .handler = rest_api_eyes_look_at_handler,
     };
-    ws_manager_server_register_uri(&api_eyes_look_at);
+    safe_register_uri(&api_eyes_look_at);
 
     const httpd_uri_t api_eyes_blink = {
         .uri     = "/api/eyes/blink",
         .method  = HTTP_POST,
         .handler = rest_api_eyes_blink_handler,
     };
-    ws_manager_server_register_uri(&api_eyes_blink);
+    safe_register_uri(&api_eyes_blink);
 
     const httpd_uri_t api_eyes_get_expression = {
         .uri     = "/api/eyes/expression",
         .method  = HTTP_GET,
         .handler = rest_api_eyes_get_expression_handler,
     };
-    ws_manager_server_register_uri(&api_eyes_get_expression);
+    safe_register_uri(&api_eyes_get_expression);
 
     ESP_LOGI(TAG, "REST API endpoints registered: /api/camera/*, /api/display/*, /api/led/*, /api/eyes/*, /api/status");
 }

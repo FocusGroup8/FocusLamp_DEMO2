@@ -631,7 +631,7 @@ esp_err_t ws_manager_server_start(void)
         1; /* Reduced from default 5s: fail fast on slow networks instead of blocking httpd worker */
     config.server_port = WS_MANAGER_SERVER_PORT;
     config.max_uri_handlers =
-        24; /* 4(WebSocket URIs) + 14(REST API: camera 4 + display 4 + led 5 + status 1) + 6(reserved) */
+        28; /* 4(WebSocket URIs) + 18(REST API: camera 4 + display 4 + led 5 + status 1 + eyes 4) + 3(touch) + 3(reserved) */
     config.max_open_sockets = WS_MANAGER_SERVER_MAX_CONN + 2; /* Reserve for HTTP + control */
     config.close_fn         = ws_session_close_cb;
     config.open_fn          = ws_session_open_cb;

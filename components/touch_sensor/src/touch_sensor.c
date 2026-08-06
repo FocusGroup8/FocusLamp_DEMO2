@@ -23,6 +23,7 @@ static bool s_initialized                 = false;
 static touch_sensor_event_cb_t s_event_cb = NULL;
 static void *s_user_ctx                   = NULL;
 static int64_t s_last_event_time_ms       = 0; /* For software debounce + interval filter */
+static touch_event_t s_last_event         = TOUCH_EVENT_RELEASE; /* Last accepted edge direction */
 
 /*---------------------------------------------------------------
  * GPIO ISR handler
@@ -31,8 +32,17 @@ static int64_t s_last_event_time_ms       = 0; /* For software debounce + interv
  *   Rising edge (GPIO HIGH) = finger detected → TOUCH_EVENT_PRESS
  *   Falling edge (GPIO LOW) = finger released → TOUCH_EVENT_RELEASE
  *
+ * Debounce policy:
+ *   - Same-direction edges (PRESS→PRESS / RELEASE→RELEASE) are contact
+ *     bounce / noise → filtered by TOUCH_SENSOR_DEBOUNCE_MS.
+ *   - Direction changes (PRESS↔RELEASE) are always accepted, otherwise a
+ *     quick tap (< TOUCH_SENSOR_MIN_INTERVAL_MS) would have its RELEASE
+ *     edge discarded and be misread as a LONG_PRESS.
+ *
  * ISR-safe: only captures timestamp and calls callback.
  *-------------------------------------------------------------*/
+#define TOUCH_SENSOR_EDGE_GUARD_MS 2 /* Tiny guard vs. double-ISR storm */
+
 static void IRAM_ATTR gpio_isr_handler(void *arg)
 {
     (void)arg;
@@ -40,16 +50,24 @@ static void IRAM_ATTR gpio_isr_handler(void *arg)
     int64_t now_us = esp_timer_get_time();
     int64_t now_ms = now_us / 1000;
 
-    /* Software debounce + minimum interval filter */
-    int64_t elapsed = now_ms - s_last_event_time_ms;
-    if (elapsed < TOUCH_SENSOR_DEBOUNCE_MS || elapsed < TOUCH_SENSOR_MIN_INTERVAL_MS) {
-        return;
-    }
-    s_last_event_time_ms = now_ms;
-
     /* Determine event type from current GPIO level */
     int level           = gpio_get_level(TOUCH_SENSOR_GPIO);
     touch_event_t event = (level == 1) ? TOUCH_EVENT_PRESS : TOUCH_EVENT_RELEASE;
+
+    int64_t elapsed = now_ms - s_last_event_time_ms;
+    if (event == s_last_event) {
+        /* Same direction: debounce against bounce/noise */
+        if (elapsed < TOUCH_SENSOR_DEBOUNCE_MS) {
+            return;
+        }
+    } else {
+        /* Direction change (press<->release): accept immediately */
+        if (elapsed < TOUCH_SENSOR_EDGE_GUARD_MS) {
+            return;
+        }
+    }
+    s_last_event_time_ms = now_ms;
+    s_last_event         = event;
 
     /* Deliver event via callback */
     if (s_event_cb) {
@@ -111,6 +129,7 @@ esp_err_t touch_sensor_init(const touch_sensor_config_t *config)
 
     s_initialized        = true;
     s_last_event_time_ms = 0;
+    s_last_event         = TOUCH_EVENT_RELEASE;
 
     ESP_LOGI(TAG, "TTP223 touch sensor initialized");
     return ESP_OK;
@@ -139,6 +158,7 @@ esp_err_t touch_sensor_deinit(void)
     s_event_cb           = NULL;
     s_user_ctx           = NULL;
     s_last_event_time_ms = 0;
+    s_last_event         = TOUCH_EVENT_RELEASE;
 
     ESP_LOGI(TAG, "TTP223 touch sensor deinitialized");
     return ESP_OK;

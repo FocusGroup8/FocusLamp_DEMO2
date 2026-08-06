@@ -10,6 +10,8 @@ list(APPEND COMP_SRCS "mcp/mcp_tools.c")
 
 # Network integration sources (always compiled)
 list(APPEND COMP_SRCS "network/network_manager.c")
+list(APPEND COMP_SRCS "network/base_bridge.c")
+list(APPEND COMP_SRCS "network/tts_inject.c")
 
 # Display sources (conditional on EXAMPLE_ENABLE_DISPLAY)
 if (CONFIG_EXAMPLE_ENABLE_DISPLAY)
@@ -86,6 +88,7 @@ set(COMP_PRIV_REQUIRES
     "esp_timer"
     "json"
     "esp_http_server"
+    "esp_http_client"
     "nvs_flash")
 
 if (CONFIG_EXAMPLE_ENABLE_CAMERA)

@@ -45,6 +45,11 @@ extern "C" {
 #define TOUCH_INTERPRETER_VALID_TOUCH_MAX_MS CONFIG_TOUCH_INTERPRETER_VALID_TOUCH_MAX_MS
 #endif
 
+/* Raw PRESS/RELEASE timing log (threshold calibration helper) */
+#if (TOUCH_INTERPRETER_ENABLE == 1)
+#define TOUCH_INTERPRETER_DEBUG_LOG CONFIG_TOUCH_INTERPRETER_DEBUG_LOG
+#endif
+
 #ifdef __cplusplus
 }
 #endif

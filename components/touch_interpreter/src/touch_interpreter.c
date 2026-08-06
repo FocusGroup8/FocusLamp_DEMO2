@@ -51,6 +51,10 @@ static int64_t s_press_time_ms    = 0; /* Timestamp of last PRESS event */
 static int64_t s_first_tap_end_ms = 0; /* Timestamp when first TAP's RELEASE occurred */
 static int s_tap_count            = 0; /* Number of completed taps in current sequence */
 
+/* Calibration helper: timestamp of the last RELEASE, to measure the gap
+ * between consecutive presses. */
+static int64_t s_last_release_ms = 0;
+
 /*---------------------------------------------------------------
  * Event queue item
  *-------------------------------------------------------------*/
@@ -171,6 +175,26 @@ static void processing_task(void *arg)
         if (xQueueReceive(s_event_queue, &item, portMAX_DELAY) != pdTRUE) {
             continue;
         }
+
+#if TOUCH_INTERPRETER_DEBUG_LOG
+        /* Calibration helper: log raw touch timing so the user can pick
+         * TAP / DOUBLE_TAP / LONG_PRESS thresholds from real measurements. */
+        if (item.event == TOUCH_EVENT_PRESS) {
+            if (s_last_release_ms > 0) {
+                ESP_LOGI(TAG, "PRESS t=%lldms (gap since last release=%lldms)", item.timestamp_ms,
+                         item.timestamp_ms - s_last_release_ms);
+            } else {
+                ESP_LOGI(TAG, "PRESS t=%lldms", item.timestamp_ms);
+            }
+        } else if (item.event == TOUCH_EVENT_RELEASE) {
+            int64_t dur = item.timestamp_ms - s_press_time_ms;
+            if (dur < 0) {
+                dur = 0;
+            }
+            ESP_LOGI(TAG, "RELEASE t=%lldms (duration=%lldms)", item.timestamp_ms, dur);
+            s_last_release_ms = item.timestamp_ms;
+        }
+#endif
 
         switch (s_state) {
         case STATE_IDLE:

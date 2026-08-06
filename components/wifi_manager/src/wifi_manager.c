@@ -250,7 +250,42 @@ esp_err_t wifi_manager_init(void)
         return ESP_ERR_NO_MEM;
     }
 
-    esp_wifi_remote_create_default_sta();
+    esp_netif_t *netif = esp_wifi_remote_create_default_sta();
+    if (netif == NULL) {
+        ESP_LOGE(TAG, "Failed to create WiFi Remote STA netif");
+        return ESP_ERR_NO_MEM;
+    }
+    /* The default-wifi-sta creation functions do NOT set a default netif,
+     * so mark it explicitly for esp_netif_get_default_netif() users. */
+    esp_netif_set_default_netif(netif);
+
+#if WIFI_MANAGER_USE_STATIC_IP
+    /* Use a static IP to prevent DHCP re-assignment from changing this
+     * device's address and breaking cross-board HTTP/WS links. */
+    esp_netif_ip_info_t ip_info = {0};
+    ip_info.ip.addr      = esp_ip4addr_aton(WIFI_MANAGER_STATIC_IP);
+    ip_info.gw.addr      = esp_ip4addr_aton(WIFI_MANAGER_STATIC_GATEWAY);
+    ip_info.netmask.addr = esp_ip4addr_aton(WIFI_MANAGER_STATIC_NETMASK);
+    esp_err_t e = esp_netif_dhcpc_stop(netif);
+    if (e != ESP_OK) {
+        ESP_LOGW(TAG, "dhcpc_stop: %s", esp_err_to_name(e));
+    }
+    e = esp_netif_set_ip_info(netif, &ip_info);
+    if (e != ESP_OK) {
+        ESP_LOGE(TAG, "Static IP set failed: %s", esp_err_to_name(e));
+        return e;
+    }
+    /* Static IP stops the DHCP client, so the DNS server provided by DHCP
+     * is lost. Configure the DNS server explicitly. */
+    esp_netif_dns_info_t dns_info = {0};
+    dns_info.ip.type = ESP_IPADDR_TYPE_V4;
+    dns_info.ip.u_addr.ip4.addr = esp_ip4addr_aton(WIFI_MANAGER_STATIC_DNS);
+    e = esp_netif_set_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns_info);
+    if (e != ESP_OK) {
+        ESP_LOGW(TAG, "Set DNS failed: %s", esp_err_to_name(e));
+    }
+    ESP_LOGI(TAG, "Static IP configured: " IPSTR, IP2STR(&ip_info.ip));
+#endif
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     err                    = esp_wifi_remote_init(&cfg);

@@ -287,8 +287,28 @@ menu "Example Configuration"
     config EXAMPLE_SYSMON_PRINT_TASK_LIST
         bool "Print task list in monitor report"
         default n
-        depends on EXAMPLE_ENABLE_SYSMON
+        depends on CONFIG_EXAMPLE_ENABLE_SYSMON
         help
             Include FreeRTOS task list with stack high water marks.
             Increases log output but useful for debugging.
+
+    #===========================================================================#
+    # Inter-board Bridge Configuration (three-board demo)                      #
+    #===========================================================================#
+
+    config TTS_INJECT_TARGET_IP
+        string "Voice board target IP (welcome TTS injection)"
+        default "192.168.1.110:80"
+        help
+            IP address and port of the voice board's HTTP server, used to
+            inject welcome messages via POST /api/tts/speak.
+            Example: "192.168.1.110:80"
+
+    config BASE_BRIDGE_TARGET_IP
+        string "Base board target IP (ambient / gesture / detect forward)"
+        default "192.168.1.120:80"
+        help
+            IP address and port of the base board's HTTP server, used for
+            GET /api/ambient, POST /api/arm/gesture and POST /api/detect/phone.
+            Example: "192.168.1.120:80"
 endmenu

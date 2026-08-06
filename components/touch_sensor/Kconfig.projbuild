@@ -34,8 +34,9 @@ menu "Touch Sensor"
         range 50 500
         depends on TOUCH_SENSOR_ENABLE
         help
-            Minimum time between two consecutive touch events.
-            Events arriving faster than this are filtered as spam/noise.
-            100ms is recommended for anti-false-trigger protection.
+            DEPRECATED: no longer filters press<->release direction changes
+            (a quick tap would otherwise lose its RELEASE edge and be misread
+            as LONG_PRESS). Kept only for sdkconfig compatibility.
+            Debounce now applies to same-direction bounce edges only.
 
 endmenu

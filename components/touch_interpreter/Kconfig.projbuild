@@ -12,21 +12,25 @@ menu "Touch Interpreter"
 
     config TOUCH_INTERPRETER_TAP_MIN_MS
         int "Minimum tap duration (ms)"
-        default 100
+        default 50
         range 30 500
         depends on TOUCH_INTERPRETER_ENABLE
         help
             Minimum touch duration to be recognized as a TAP.
             Touches shorter than this are filtered as noise.
+            Calibrated from TTP223 field data: quick taps of 53-66ms
+            must still be recognized (TAP_MIN below the fastest observed tap).
 
     config TOUCH_INTERPRETER_TAP_MAX_MS
         int "Maximum tap duration (ms)"
-        default 300
+        default 500
         range 100 2000
         depends on TOUCH_INTERPRETER_ENABLE
         help
             Maximum touch duration to be recognized as a TAP.
             Touches longer than this are either LONG_PRESS or ignored.
+            500ms accommodates the slow release of the TTP223 sensor;
+            durations between TAP_MAX and LONG_PRESS are discarded.
 
     config TOUCH_INTERPRETER_DOUBLE_TAP_MIN_MS
         int "Minimum double-tap interval (ms)"
@@ -40,7 +44,7 @@ menu "Touch Interpreter"
 
     config TOUCH_INTERPRETER_DOUBLE_TAP_MAX_MS
         int "Maximum double-tap interval (ms)"
-        default 500
+        default 700
         range 100 2000
         depends on TOUCH_INTERPRETER_ENABLE
         help
@@ -50,12 +54,15 @@ menu "Touch Interpreter"
 
     config TOUCH_INTERPRETER_LONG_PRESS_MS
         int "Long press threshold (ms)"
-        default 2000
+        default 700
         range 500 10000
         depends on TOUCH_INTERPRETER_ENABLE
         help
             Duration threshold for LONG_PRESS recognition.
             Touch held continuously for longer than this triggers LONG_PRESS.
+            Calibrated from TTP223 field data: user long presses measured
+            853-1040ms, so 700ms reliably triggers while still separating
+            from TAP_MAX (500ms).
 
     config TOUCH_INTERPRETER_VALID_TOUCH_MIN_MS
         int "Minimum valid touch duration (ms)"
@@ -74,5 +81,15 @@ menu "Touch Interpreter"
         help
             Maximum duration for a single tap to be considered valid.
             Only used as an upper bound for TAP classification.
+
+    config TOUCH_INTERPRETER_DEBUG_LOG
+        bool "Log raw PRESS/RELEASE touch timing (threshold calibration)"
+        default y
+        depends on TOUCH_INTERPRETER_ENABLE
+        help
+            Print every PRESS/RELEASE event with its duration and the gap
+            between consecutive presses. Use these measurements to pick the
+            TAP / DOUBLE_TAP / LONG_PRESS thresholds in this menu.
+            Disable after calibration to reduce log output.
 
 endmenu

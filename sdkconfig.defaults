@@ -40,11 +40,22 @@ CONFIG_AUDIO_BRIDGE_ENABLE=n
 # end of Audio Bridge
 
 #
+# Lamp Head Controller Configuration
+#
+CONFIG_LAMP_HEAD_TARGET_IP="10.132.136.143:80"
+# end of Lamp Head Controller Configuration
+
+#
 # Status Reporter
 #
-# ⚠️ 将此 IP 改为灯头板（camera-fps）实际的 IP
-CONFIG_STATUS_REPORTER_TARGET_IP="10.10.43.26"
+CONFIG_STATUS_REPORTER_TARGET_IP="10.132.136.3:80"
 # end of Status Reporter
+
+#
+# TTS Bridge Configuration
+#
+CONFIG_TTS_BRIDGE_TARGET_IP="10.132.136.3:80"
+# end of TTS Bridge Configuration
 
 #
 # WebSocket Manager Configuration
@@ -68,6 +79,7 @@ CONFIG_WS_MANAGER_SERVER_ECHO=n
 #
 CONFIG_WIFI_MANAGER_SSID="RT3"
 CONFIG_WIFI_MANAGER_PASSWORD="10101010"
+CONFIG_WIFI_MANAGER_USE_STATIC_IP=y
 # end of WiFi Manager Configuration
 
 #
@@ -75,12 +87,6 @@ CONFIG_WIFI_MANAGER_PASSWORD="10101010"
 #
 CONFIG_XIAOZHI_MANAGER_ENABLE=n
 # end of Xiaozhi Manager
-
-#
-# TTS Bridge
-#
-CONFIG_TTS_BRIDGE_TARGET_IP="10.10.43.26:80"
-# end of TTS Bridge
 
 #
 # Component config
@@ -192,7 +198,12 @@ CONFIG_LIBC_OPTIMIZED_MISALIGNED_ACCESS=n
 #
 # ESP-Hosted config
 #
-CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y
+
+#
+# Hosted SDIO Configuration
+#
+CONFIG_ESP_HOSTED_SDIO_GPIO_RESET_SLAVE=13
+# end of Hosted SDIO Configuration
 # end of ESP-Hosted config
 
 #

@@ -1016,9 +1016,9 @@ static esp_err_t detect_phone_handler(httpd_req_t *req) {
 
   const char *text = NULL;
   if (strcmp(s->valuestring, "phone") == 0) {
-    text = "识别到您正在玩手机，快把手机放下，好好专注把工作完成吧";
+    text = "提醒玩手机";
   } else if (strcmp(s->valuestring, "computer") == 0) {
-    text = "识别到您正在玩电脑游戏，快停下来活动一下，然后先专注把工作完成再玩吧~";
+    text = "提醒玩电脑";
   } else {
     cJSON_Delete(root);
     return send_error_400(req, "unknown source");

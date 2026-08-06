@@ -59,7 +59,11 @@ esp_err_t tts_bridge_speak(const char *text)
     esp_http_client_config_t config = {
         .url = url,
         .method = HTTP_METHOD_POST,
-        .timeout_ms = 5000,
+        /* Voice board handles /api/tts/speak synchronously: when busy it
+         * aborts the current TTS (up to 3s wait) and opens the audio channel
+         * (up to 3s wait). 5s was too tight and caused ESP_ERR_HTTP_EAGAIN
+         * timeouts even though the voice board received and played the text. */
+        .timeout_ms = 15000,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);

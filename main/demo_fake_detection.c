@@ -22,8 +22,8 @@ static const char *TAG = "fake_detect";
 
 /* 玩手机/电脑检测播报内容（交替使用）*/
 static const char *s_phone_messages[] = {
-    "识别到您正在玩手机，快把手机放下，好好专注把工作完成吧",
-    "识别到您正在玩电脑游戏，快停下来活动一下，然后先专注把工作完成再玩吧~",
+    "玩手机提醒",
+    "玩电脑提醒",
 };
 #define PHONE_MSG_COUNT 2
 

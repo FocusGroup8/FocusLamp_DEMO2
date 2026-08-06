@@ -1,0 +1,12 @@
+menu "Lamp Head Controller Configuration"
+
+    config LAMP_HEAD_TARGET_IP
+        string "Lamp head board target IP address (with port)"
+        default "10.10.42.209:80"
+        help
+            IP address and port of the lamp head (camera-fps) board's HTTP
+            server, used for head LED and expression control.
+            This is independent from the status reporter target (voice board).
+            Example: "10.10.42.209:80"
+
+endmenu

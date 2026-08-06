@@ -5,7 +5,8 @@
  * - Head LED (on/off/brightness)
  * - Head expression (big screen expressive eyes)
  *
- * Target IP is shared with status_reporter (STATUS_REPORTER_TARGET_IP).
+ * Target IP is configured independently via LAMP_HEAD_TARGET_IP (menuconfig),
+ * separate from status_reporter's target (voice board).
  */
 
 #pragma once

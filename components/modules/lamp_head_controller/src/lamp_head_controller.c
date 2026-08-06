@@ -6,9 +6,9 @@
  */
 
 #include "lamp_head_controller.h"
+#include "lamp_head_controller_config.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
-#include "status_reporter_config.h"
 #include "device_state.h"
 #include <string.h>
 
@@ -20,9 +20,9 @@ static const char *TAG = "lamp_head";
 
 static esp_err_t send_post_request(const char *path, const char *json_body)
 {
-    const char *target_ip = STATUS_REPORTER_TARGET_IP;
+    const char *target_ip = LAMP_HEAD_TARGET_IP;
     if (target_ip[0] == '\0' || strcmp(target_ip, "0.0.0.0") == 0) {
-        ESP_LOGW(TAG, "Target IP not configured");
+        ESP_LOGW(TAG, "Lamp head target IP not configured");
         return ESP_ERR_INVALID_STATE;
     }
 

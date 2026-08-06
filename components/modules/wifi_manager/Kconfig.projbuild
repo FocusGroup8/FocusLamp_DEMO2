@@ -35,4 +35,42 @@ menu "WiFi Manager Configuration"
         help
             Automatically reconnect to AP when disconnected.
 
+    config WIFI_MANAGER_USE_STATIC_IP
+        bool "Use static IP (avoid DHCP drift)"
+        default n
+        depends on WIFI_MANAGER_ENABLE
+        help
+            Use a static IP instead of DHCP. Prevents the DHCP server from
+            re-assigning a different address after reconnect, which would
+            break cross-board HTTP/WS links that are configured by IP.
+
+    config WIFI_MANAGER_STATIC_IP
+        string "Static IP address"
+        default "10.132.136.4"
+        depends on WIFI_MANAGER_USE_STATIC_IP
+        help
+            Fixed IP address for this board (FocusLamp base board).
+
+    config WIFI_MANAGER_STATIC_GATEWAY
+        string "Static gateway"
+        default "10.132.136.105"
+        depends on WIFI_MANAGER_USE_STATIC_IP
+        help
+            Gateway of the RT3 hotspot network.
+
+    config WIFI_MANAGER_STATIC_NETMASK
+        string "Static netmask"
+        default "255.255.255.0"
+        depends on WIFI_MANAGER_USE_STATIC_IP
+        help
+            Subnet mask.
+
+    config WIFI_MANAGER_STATIC_DNS
+        string "Static DNS server"
+        default "10.132.136.105"
+        depends on WIFI_MANAGER_USE_STATIC_IP
+        help
+            DNS server used with the static IP. Required because the DHCP
+            client is stopped, so the DHCP-provided DNS is no longer available.
+
 endmenu

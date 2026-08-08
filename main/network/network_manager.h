@@ -8,6 +8,7 @@
 
 #include "esp_err.h"
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -96,6 +97,8 @@ typedef struct {
     char vlm_judgment[16];       /*!< VLM game detector judgment: 是/否/不确定/等待检测 */
     char vlm_trigger_source[16]; /*!< VLM trigger source: None/手机/电脑 */
     char vlm_reason[128];        /*!< VLM detection reason text */
+    bool present;                /*!< User presence (true=present, derived from face_position.valid) */
+    float presence_duration_s;   /*!< Presence duration in seconds (0.0 when absent) */
     int64_t last_update_us;      /*!< esp_timer_get_time() of last update, 0 if never */
 } algo_result_state_t;
 

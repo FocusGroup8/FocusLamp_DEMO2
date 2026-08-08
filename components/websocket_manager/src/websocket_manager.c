@@ -35,6 +35,12 @@ static const char *TAG = "ws_mgr";
  *-------------------------------------------------------------*/
 #if WS_MANAGER_SERVER_ENABLE
 
+/* Forward declarations: camera dead-connection fast reclaim helpers are
+ * defined later but used by the async send completion callback below. */
+static bool camera_client_matches(int socket);
+static void camera_client_record_failure(void);
+static void camera_client_reset_failures(void);
+
 #define WS_FRAME_POOL_SIZE 4          /* Number of pre-allocated frame buffers (2 clients × 2 in-flight) */
 #define WS_FRAME_BUF_SIZE (32 * 1024) /* 32KB per buffer, sufficient for Q=15 YUV420 @ 800x640 */
 
@@ -50,8 +56,10 @@ typedef struct {
 
 static ws_frame_buf_t s_frame_pool[WS_FRAME_POOL_SIZE];
 
-/* Send statistics: updated by httpd worker thread (ws_async_send_complete_cb)
- * and read by cam_stream task. Uses atomic operations for thread safety. */
+/* Send statistics: updated by ws_manager_server_send_binary (raw blocking
+ * send loop) and read by cam_stream task. Uses plain writes from the camera
+ * stream task; fields are monotonic counters / EWMA so brief inconsistency
+ * between reads is acceptable. */
 static struct {
     uint32_t total_sent;           /* Total frames successfully sent */
     uint32_t total_failed;         /* Total frames failed to send */
@@ -61,57 +69,6 @@ static struct {
     int64_t last_send_duration_us; /* Last send duration (queue to completion) */
     int64_t avg_send_duration_us;  /* EWMA of send duration */
 } s_send_stats;
-
-/* Called by httpd worker thread after httpd_ws_send_data_async completes.
- * Returns the frame buffer to the pool.
- * On send failure, log a warning to help diagnose connection issues.
- * TCP keepalive (idle=3s, interval=2s, count=2) ensures broken
- * connections are detected within ~7 seconds, at which point httpd
- * calls ws_session_close_cb to clean up s_camera_client_fd. */
-static void ws_async_send_complete_cb(esp_err_t err, int socket, void *arg)
-{
-    ws_frame_buf_t *buf = (ws_frame_buf_t *)arg;
-
-    /* Calculate send duration (from queue to completion) */
-    int64_t now_us      = esp_timer_get_time();
-    int64_t duration_us = now_us - buf->start_time_us;
-
-    if (err != ESP_OK) {
-        /* Map ESP error codes to errno-like values for congestion classification:
-         * - ESP_ERR_TIMEOUT / ESP_FAIL with EAGAIN: transient congestion (buffer full)
-         * - ESP_ERR_INVALID_STATE / ESP_ERR_INVALID_ARG: connection broken
-         * The actual errno is logged but not directly accessible here;
-         * we use the ESP error code as a proxy. */
-        s_send_stats.total_failed++;
-        s_send_stats.consecutive_failures++;
-        s_send_stats.last_error = (int)err;
-
-        /* Classify error for logging: transient vs fatal */
-        if (err == ESP_ERR_TIMEOUT || err == ESP_FAIL) {
-            /* EAGAIN (errno 11) equivalent: transient congestion, buffer full */
-            ESP_LOGD(TAG, "Transient send failure on fd=%d: %s (congestion)", socket, esp_err_to_name(err));
-        } else {
-            /* ECONNRESET (errno 104) or other: connection-level error */
-            ESP_LOGW(TAG, "Async WS send failed on fd=%d: %s", socket, esp_err_to_name(err));
-        }
-    } else {
-        s_send_stats.total_sent++;
-        s_send_stats.consecutive_failures = 0;
-        s_send_stats.last_error           = 0;
-
-        /* Update send duration statistics (EWMA) */
-        s_send_stats.last_send_duration_us = duration_us;
-        if (s_send_stats.avg_send_duration_us == 0) {
-            s_send_stats.avg_send_duration_us = duration_us;
-        } else {
-            float new_avg = WS_SEND_DURATION_EWMA_ALPHA * (float)duration_us +
-                            (1.0f - WS_SEND_DURATION_EWMA_ALPHA) * (float)s_send_stats.avg_send_duration_us;
-            s_send_stats.avg_send_duration_us = (int64_t)new_avg;
-        }
-    }
-
-    atomic_store(&buf->in_use, false); /* Return buffer to pool */
-}
 
 /* Acquire a free buffer from the pool. Returns NULL if all in use. */
 static ws_frame_buf_t *ws_frame_pool_acquire(void)
@@ -131,7 +88,15 @@ static ws_frame_buf_t *ws_frame_pool_acquire(void)
 static void dispatch_event(ws_manager_event_t event, void *data)
 {
     if (event <= WS_MANAGER_EVENT_CLIENT_TIMEOUT && s_callbacks[event]) {
+        ESP_LOGD(TAG, "dispatch_event: calling callback for event=%d (cb=%p)", (int)event, s_callbacks[event]);
         s_callbacks[event](event, data);
+    } else {
+        /* Debug: log when no callback is registered for an event.
+         * This helps diagnose cases where ws_server_handler receives data
+         * but dispatch_event silently drops it because s_callbacks is NULL. */
+        ESP_LOGW(TAG, "dispatch_event: no callback for event=%d (cb=%p, max_event=%d)", (int)event,
+                 event <= WS_MANAGER_EVENT_CLIENT_TIMEOUT ? s_callbacks[event] : NULL,
+                 (int)WS_MANAGER_EVENT_CLIENT_TIMEOUT);
     }
 }
 
@@ -353,9 +318,69 @@ static SemaphoreHandle_t s_server_mutex = NULL;
 
 /* Camera stream client limit: only 1 concurrent /camera connection allowed.
  * Camera streaming is bandwidth-intensive; multiple clients would exceed
- * WiFi capacity and cause frame congestion / disconnection oscillation. */
+ * WiFi capacity and cause frame congestion / disconnection oscillation.
+ *
+ * Dead-connection fast reclaim: when the camera client disappears (TCP RST /
+ * half-open), TCP keepalive takes up to ~7s to detect it. During that window
+ * s_camera_client_fd still holds the dead fd and new /camera connections are
+ * rejected with 403 (observed as "connection fails / black screen"). To fix
+ * this, consecutive send failures on the camera fd mark it "dead"; the slot
+ * is then reclaimed immediately (httpd_sess_trigger_close) so the next
+ * /camera connection is accepted. Transient congestion (EAGAIN/TIMEOUT) does
+ * NOT count toward the dead mark. */
 #define WS_CAMERA_MAX_CLIENTS 1
 static int s_camera_client_fd = -1;
+/* Consecutive connection-level send failures on the camera fd before kicking */
+#define WS_CAMERA_FAIL_KICK_THRESHOLD 5
+static volatile uint32_t s_camera_fail_count = 0;
+
+/* Kick the current /camera client (assumed dead) and release the slot.
+ * httpd_sess_trigger_close queues an async close; ws_session_close_cb then
+ * calls track_client_remove which is idempotent here (guarded by the fd check).
+ * Releasing the slot immediately lets the next /camera connection be accepted
+ * without waiting for the TCP keepalive timeout (~7s). */
+static void camera_client_kick(const char *reason)
+{
+    int fd = s_camera_client_fd;
+    if (fd < 0) {
+        return;
+    }
+    ESP_LOGW(TAG, "Server: kicking dead /camera client fd=%d (%s, fail_count=%u)", fd, reason,
+             (unsigned)s_camera_fail_count);
+    if (s_server) {
+        httpd_sess_trigger_close(s_server, fd);
+    }
+    s_camera_client_fd  = -1;
+    s_camera_fail_count = 0;
+}
+
+/* True if the given socket is the current /camera client. Used by the async
+ * send completion callback (defined before s_camera_client_fd). */
+static bool camera_client_matches(int socket)
+{
+    return s_camera_client_fd >= 0 && socket == s_camera_client_fd;
+}
+
+/* Record a connection-level send failure on the camera fd and kick the client
+ * once the threshold is reached. Called from the httpd worker thread (async
+ * binary send callback) and from the camera stream task (text header send). */
+static void camera_client_record_failure(void)
+{
+    if (s_camera_client_fd < 0) {
+        return;
+    }
+    s_camera_fail_count++;
+    if (s_camera_fail_count >= WS_CAMERA_FAIL_KICK_THRESHOLD) {
+        camera_client_kick("send failure threshold");
+    }
+}
+
+/* Reset the camera dead-connection counter (called on send success or on new
+ * camera client acceptance). */
+static void camera_client_reset_failures(void)
+{
+    s_camera_fail_count = 0;
+}
 
 /* Pre-allocated receive buffer to avoid frequent malloc/free */
 static uint8_t s_recv_buf[WS_MANAGER_BUFFER_SIZE];
@@ -429,16 +454,19 @@ static esp_err_t ws_session_open_cb(httpd_handle_t hd, int sockfd)
         ESP_LOGW(TAG, "Failed to set TCP_NODELAY on fd=%d (errno=%d)", sockfd, errno);
     }
 
-    /* Override SO_SNDTIMEO to 500ms (from httpd default of 1s).
-     * When the TCP send buffer is full, send() blocks for SO_SNDTIMEO
-     * before returning EAGAIN. The httpd worker thread is single-threaded,
-     * so a very long block stalls ALL WebSocket processing.
-     * 500ms provides enough time for the TCP buffer to drain on slow
-     * WiFi while keeping the httpd thread responsive. The previous 100ms
-     * was too aggressive and caused frequent send timeouts on weak networks. */
+    /* Override SO_SNDTIMEO to 3000ms (from httpd default of 1s).
+     * A single camera JPEG frame is ~15KB (> TCP MSS), sent as header +
+     * payload by httpd_ws_send_frame_async. On the ESP-Hosted (SDIO bridged)
+     * link the per-frame send can legitimately take >500ms; the previous
+     * 500ms timeout caused partial writes (send returns bytes written before
+     * timing out) which httpd treats as success, delivering a truncated WS
+     * frame that makes the client reset the connection. 3s lets slow links
+     * finish the frame. The httpd worker is single-threaded so a long send
+     * stalls other sockets briefly; BBA throttles the frame rate when send
+     * duration is high to bound this. */
     struct timeval tv = {
-        .tv_sec  = 0,
-        .tv_usec = 500000, /* 500ms */
+        .tv_sec  = 3,
+        .tv_usec = 0, /* 3000ms */
     };
     if (setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0) {
         ESP_LOGW(TAG, "Failed to set SO_SNDTIMEO on fd=%d (errno=%d)", sockfd, errno);
@@ -477,18 +505,28 @@ static esp_err_t ws_server_handler(httpd_req_t *req)
         /* Handshake complete - new client connected */
         int fd = httpd_req_to_sockfd(req);
 
-        /* Camera stream client limit: reject if /camera already occupied */
+        /* Camera stream client limit: reject if /camera already occupied by a
+         * healthy client; replace the client when the slot is held by a dead
+         * one (send-failure threshold reached) so reconnects never stall. */
         if (strcmp(req->uri, "/camera") == 0) {
-            if (s_camera_client_fd >= 0) {
+            if (s_camera_client_fd >= 0 && s_camera_fail_count < WS_CAMERA_FAIL_KICK_THRESHOLD) {
                 ESP_LOGW(TAG, "Server: rejecting /camera client fd=%d (already occupied by fd=%d)", fd,
                          s_camera_client_fd);
                 httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "Camera stream already in use");
                 return ESP_FAIL;
             }
+            if (s_camera_client_fd >= 0) {
+                camera_client_kick("replaced by new /camera client");
+            }
             s_camera_client_fd = fd;
+            camera_client_reset_failures();
             ESP_LOGI(TAG, "Server: new /camera client connected, fd=%d", fd);
+        } else if (strcmp(req->uri, "/algo") == 0) {
+            ESP_LOGI(TAG, "Server: new /algo client connected, fd=%d", fd);
+        } else if (strcmp(req->uri, "/mcp") == 0) {
+            ESP_LOGI(TAG, "Server: new /mcp client connected, fd=%d", fd);
         } else {
-            ESP_LOGI(TAG, "Server: new client connected, fd=%d", fd);
+            ESP_LOGI(TAG, "Server: new client connected, fd=%d (uri=%s)", fd, req->uri);
         }
 
         track_client_add(fd);
@@ -547,6 +585,7 @@ static esp_err_t ws_server_handler(httpd_req_t *req)
             .client_fd = httpd_req_to_sockfd(req),
             .uri       = req->uri,
         };
+        ESP_LOGI(TAG, "WS recv: uri=%s len=%d type=%d fd=%d", req->uri, ws_pkt.len, ws_pkt.type, msg.client_fd);
         dispatch_event(WS_MANAGER_EVENT_DATA, &msg);
 
 #if (WS_MANAGER_SERVER_ECHO == 1)
@@ -593,6 +632,15 @@ static httpd_uri_t ws_uri_mcp = {
     .is_websocket = true,
 };
 
+/* Algorithm results endpoint: JSON-RPC 2.0 text frames (docker main-client → ESP32) */
+static httpd_uri_t ws_uri_algo = {
+    .uri          = "/algo",
+    .method       = HTTP_GET,
+    .handler      = ws_server_handler,
+    .user_ctx     = NULL,
+    .is_websocket = true,
+};
+
 /* Root page handler: show device info and WebSocket endpoint */
 static esp_err_t root_handler(httpd_req_t *req)
 {
@@ -627,11 +675,21 @@ esp_err_t ws_manager_server_start(void)
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size     = 16384; /* Increased from default 4096 to accommodate 32KB TCP send buffer */
-    config.send_wait_timeout =
-        1; /* Reduced from default 5s: fail fast on slow networks instead of blocking httpd worker */
-    config.server_port = WS_MANAGER_SERVER_PORT;
-    config.max_uri_handlers =
-        28; /* 4(WebSocket URIs) + 18(REST API: camera 4 + display 4 + led 5 + status 1 + eyes 4) + 3(touch) + 3(reserved) */
+    /* [FIX 2026-08-08] send_wait_timeout raised 1s->5s: a single 15KB camera
+     * frame can take >1s to send on the ESP-Hosted (SDIO bridged) link; the
+     * 1s timeout aborted sends mid-frame causing truncated WS frames and
+     * client RST. 5s allows frames to complete. */
+    config.send_wait_timeout = 5;
+    /* [FIX 2026-08-08] recv_wait_timeout raised 5s->300s: WebSocket clients
+     * that only receive (e.g. web_ui /camera) never send data, so the default
+     * 5s recv timeout closed their connection every ~5s (observed as
+     * "repeated connect/disconnect"). Dead-connection detection is handled
+     * independently by TCP keepalive (open_fn, ~7s) + camera fast reclaim,
+     * so a large recv timeout does not leak dead sockets. */
+    config.recv_wait_timeout = 300;
+    config.server_port       = WS_MANAGER_SERVER_PORT;
+    config.max_uri_handlers  = 28; /* 4(WebSocket URIs) + 18(REST API: camera 4 + display 4 + led 5 + status 1 + eyes 4)
+                                      + 3(touch) + 3(reserved) */
     config.max_open_sockets = WS_MANAGER_SERVER_MAX_CONN + 2; /* Reserve for HTTP + control */
     config.close_fn         = ws_session_close_cb;
     config.open_fn          = ws_session_open_cb;
@@ -649,6 +707,7 @@ esp_err_t ws_manager_server_start(void)
     httpd_register_uri_handler(s_server, &ws_uri);
     httpd_register_uri_handler(s_server, &ws_uri_camera);
     httpd_register_uri_handler(s_server, &ws_uri_mcp);
+    httpd_register_uri_handler(s_server, &ws_uri_algo);
     httpd_register_uri_handler(s_server, &root_uri);
     s_server_running = true;
     s_client_count   = 0;
@@ -710,6 +769,33 @@ esp_err_t ws_manager_server_send_text(int client_fd, const char *data, int len)
     return httpd_ws_send_frame_async(s_server, client_fd, &ws_pkt);
 }
 
+/* Raw blocking send with partial-write handling and a total-timeout bound.
+ * httpd's WS send path calls send_fn once and treats a partial write as
+ * success, which truncates frames; here we loop until the whole buffer is
+ * sent. Returns true on success, false on connection error or after 5s of
+ * sustained congestion (so the camera stream task cannot block forever). */
+static bool ws_raw_send_all(int fd, const uint8_t *data, size_t len, int64_t send_start_us)
+{
+    size_t sent = 0;
+    while (sent < len) {
+        int n = send(fd, data + sent, len - sent, MSG_NOSIGNAL);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                if (esp_timer_get_time() - send_start_us > 5 * 1000 * 1000) {
+                    return false; /* total congestion timeout */
+                }
+                continue;
+            }
+            return false; /* connection-level error (e.g. ECONNRESET) */
+        }
+        sent += (size_t)n;
+    }
+    return true;
+}
+
 esp_err_t ws_manager_server_send_binary(int client_fd, const char *data, int len)
 {
     if (!s_server_running || s_server == NULL) {
@@ -729,23 +815,81 @@ esp_err_t ws_manager_server_send_binary(int client_fd, const char *data, int len
     }
 
     memcpy(buf->data, data, len);
-    buf->len = len;
+    buf->len           = len;
+    buf->start_time_us = esp_timer_get_time();
 
-    httpd_ws_frame_t ws_pkt = {
-        .payload = buf->data,
-        .len     = len,
-        .type    = HTTPD_WS_TYPE_BINARY,
-        .final   = true,
-    };
-
-    /* Use httpd_ws_send_data_async (true async via httpd_queue_work)
-     * instead of httpd_ws_send_frame_async (blocking send_fn call).
-     * Completion callback returns the buffer to the pool. */
-    esp_err_t err = httpd_ws_send_data_async(s_server, client_fd, &ws_pkt, ws_async_send_complete_cb, buf);
-    if (err != ESP_OK) {
-        atomic_store(&buf->in_use, false); /* Return buffer on queue failure */
+    /* [FIX 2026-08-08] Send the whole WS frame with a raw blocking send()
+     * loop, bypassing httpd_ws_send_frame_async entirely. httpd's WS send
+     * path calls send_fn ONCE and only checks for <0; a partial write (send()
+     * returning fewer bytes than requested when the TCP window / cwnd is
+     * smaller than the frame) is treated as success, delivering a truncated
+     * WS frame that makes the client reset the connection (observed as
+     * repeated web_ui disconnects even though ws: failed=0). We build the WS
+     * header ourselves (FIN + binary opcode + length, server side needs no
+     * masking) and send header + payload with full partial-write handling. */
+    uint8_t ws_hdr[10];
+    size_t ws_hdr_len;
+    ws_hdr[0] = 0x80 | HTTPD_WS_TYPE_BINARY; /* FIN bit + binary opcode */
+    if (buf->len <= 125) {
+        ws_hdr[1]  = (uint8_t)buf->len;
+        ws_hdr_len = 2;
+    } else if (buf->len <= 0xFFFF) {
+        ws_hdr[1]  = 126;
+        ws_hdr[2]  = (uint8_t)((unsigned)buf->len >> 8);
+        ws_hdr[3]  = (uint8_t)((unsigned)buf->len & 0xFF);
+        ws_hdr_len = 4;
+    } else {
+        ws_hdr[1]      = 127;
+        uint64_t len64 = (uint64_t)buf->len;
+        for (int i = 0; i < 8; i++) {
+            ws_hdr[2 + i] = (uint8_t)(len64 >> ((7 - i) * 8));
+        }
+        ws_hdr_len = 10;
     }
-    return err;
+
+    int64_t send_start_us = esp_timer_get_time();
+    bool ok               = ws_raw_send_all(client_fd, ws_hdr, ws_hdr_len, send_start_us) &&
+                            ws_raw_send_all(client_fd, buf->data, (size_t)buf->len, send_start_us);
+
+    int64_t dur_us = esp_timer_get_time() - buf->start_time_us;
+    esp_err_t ret  = ESP_OK;
+    if (ok) {
+        s_send_stats.total_sent++;
+        s_send_stats.consecutive_failures  = 0;
+        s_send_stats.last_error            = 0;
+        s_send_stats.last_send_duration_us = dur_us;
+        if (s_send_stats.avg_send_duration_us == 0) {
+            s_send_stats.avg_send_duration_us = dur_us;
+        } else {
+            float new_avg = WS_SEND_DURATION_EWMA_ALPHA * (float)dur_us +
+                            (1.0f - WS_SEND_DURATION_EWMA_ALPHA) * (float)s_send_stats.avg_send_duration_us;
+            s_send_stats.avg_send_duration_us = (int64_t)new_avg;
+        }
+        if (camera_client_matches(client_fd)) {
+            camera_client_reset_failures();
+        }
+    } else {
+        s_send_stats.total_failed++;
+        s_send_stats.consecutive_failures++;
+        s_send_stats.last_send_duration_us = dur_us;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            /* Sustained congestion (5s send timeout): drop this frame but do
+             * NOT mark the connection dead — congestion is not a disconnect. */
+            s_send_stats.last_error = EAGAIN;
+            ret                     = ESP_FAIL;
+        } else {
+            /* Connection-level error (e.g. ECONNRESET/EBADF): mark dead so the
+             * camera slot is reclaimed quickly. */
+            s_send_stats.last_error = errno;
+            if (camera_client_matches(client_fd)) {
+                camera_client_record_failure();
+            }
+            ret = ESP_FAIL;
+        }
+    }
+
+    atomic_store(&buf->in_use, false); /* Return buffer to pool */
+    return ret;
 }
 
 esp_err_t ws_manager_server_broadcast_text(const char *data, int len)
@@ -790,6 +934,26 @@ esp_err_t ws_manager_server_broadcast_binary(const char *data, int len)
     ret = ws_manager_server_send_binary(s_camera_client_fd, data, len);
     if (s_server_mutex) {
         xSemaphoreGive(s_server_mutex);
+    }
+    return ret;
+}
+
+esp_err_t ws_manager_server_send_camera_text(const char *data, int len)
+{
+    if (!s_server_running || s_server == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* Mirror broadcast_binary semantics: only the /camera client receives
+     * text frames. /mcp and /algo clients expect JSON-RPC only and would
+     * log warnings on unexpected text frames. */
+    if (s_camera_client_fd < 0) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    esp_err_t ret = ws_manager_server_send_text(s_camera_client_fd, data, len);
+    if (ret != ESP_OK && ret != ESP_ERR_TIMEOUT) {
+        /* Connection-level send failure: mark dead so the slot is reclaimed
+         * quickly instead of retrying against a broken socket every frame. */
+        camera_client_record_failure();
     }
     return ret;
 }

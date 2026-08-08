@@ -167,6 +167,19 @@ esp_err_t ws_manager_server_broadcast_text(const char *data, int len);
 esp_err_t ws_manager_server_broadcast_binary(const char *data, int len);
 
 /**
+ * @brief Send a text frame to the /camera client only
+ *
+ * Used by camera_stream to emit the frame_header JSON text frame before each
+ * binary JPEG frame. Unlike broadcast_text(), this does not disturb /mcp or
+ * /algo clients (which expect only JSON-RPC traffic).
+ *
+ * @param data  Text payload (e.g., JSON frame_header)
+ * @param len   Payload length
+ * @return ESP_OK on success, ESP_ERR_NOT_FOUND if no /camera client is connected
+ */
+esp_err_t ws_manager_server_send_camera_text(const char *data, int len);
+
+/**
  * @brief Get number of connected clients
  *
  * @return Number of connected clients

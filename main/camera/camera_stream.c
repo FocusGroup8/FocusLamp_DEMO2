@@ -14,9 +14,16 @@
 #include "freertos/task.h"
 #include "websocket_manager.h"
 
+#include <stdio.h>
 #include <string.h>
 
 static const char *TAG = "cam_stream";
+
+/* Monotonic frame sequence counter for frame_header text frames.
+ * Incremented per captured frame; sent as JSON before each binary JPEG
+ * frame so the docker main-client can track seq + timestamp and detect
+ * drops / out-of-order frames. */
+static uint32_t s_frame_seq = 0;
 
 #define STREAM_TASK_STACK_DEFAULT 8192
 #define STREAM_TASK_PRIORITY_DEFAULT 5
@@ -66,8 +73,12 @@ static const bba_level_config_t s_bba_levels[BBA_LEVEL_COUNT] = {
 #define BBA_FAILURE_RATE_HIGH 0.20f /* >20% failure rate → step down */
 #define BBA_FAILURE_RATE_LOW 0.05f  /* <5% failure rate → can step up */
 #define BBA_CONSEC_FAIL_HIGH 3      /* >3 consecutive failures → immediate step down */
-#define BBA_SEND_DUR_HIGH_MS 200    /* >200ms avg send duration → congested */
-#define BBA_SEND_DUR_LOW_MS 50      /* <50ms avg send duration → healthy */
+/* [TEMP A/B 2026-08-08] threshold tuned 500ms: high send duration indicates
+ * the ESP-Hosted (SDIO bridged) link is congested; BBA must step down early
+ * to keep the frame rate within the link's real throughput (150KB/s at 10fps
+ * exceeds the bridge under weak-signal RTT). Revert/tune after verification. */
+#define BBA_SEND_DUR_HIGH_MS 500 /* >500ms avg send duration → congested */
+#define BBA_SEND_DUR_LOW_MS 50   /* <50ms avg send duration → healthy */
 
 /* BBA state */
 typedef struct {
@@ -514,10 +525,11 @@ static void camera_stream_task(void *arg)
                 ESP_LOGI(TAG, "No camera client: throttling fps %d -> %d", s_state.current_fps, ADAPTIVE_FPS_MIN);
                 was_throttled = true;
             }
-        } else if (motion.is_static) {
-            effective_fps = MOTION_STATIC_FPS;
-            was_throttled = false;
         } else {
+            /* [TEMP A/B 2026-08-08] motion static FPS throttle disabled:
+             * static scene locked FPS to 3 (MOTION_STATIC_FPS) shortly after
+             * boot, overriding BBA 10fps. Target is >=10fps. Re-enable by
+             * restoring `else if (motion.is_static)` branch below. */
             effective_fps = s_state.current_fps;
             was_throttled = false;
         }
@@ -544,13 +556,17 @@ static void camera_stream_task(void *arg)
             s_hist_ready = false;
             portEXIT_CRITICAL(&s_hist_spinlock);
 
-            bool was_static = motion.is_static;
+            /* Motion state-change log is silenced: the "STATIC->reduce fps"
+             * message would be misleading because static-scene FPS throttling
+             * is disabled (see effective_fps logic above). SAD/static_cnt
+             * remain visible in the periodic Stats line. */
+            // bool was_static = motion.is_static;
             motion_update(&motion, curr_hist);
-            if (was_static != motion.is_static) {
-                ESP_LOGI(TAG, "Motion: %s (SAD=%.4f, static_frames=%d)",
-                         motion.is_static ? "STATIC→reduce fps" : "ACTIVE→restore fps", motion.last_sad,
-                         motion.static_count);
-            }
+            // if (was_static != motion.is_static) {
+            //     ESP_LOGI(TAG, "Motion: %s (SAD=%.4f, static_frames=%d)",
+            //              motion.is_static ? "STATIC→reduce fps" : "ACTIVE→restore fps", motion.last_sad,
+            //              motion.static_count);
+            // }
         }
 
         /* Encode JPEG with BBA+PI-controlled quality */
@@ -572,6 +588,28 @@ static void camera_stream_task(void *arg)
             continue;
         }
 
+        /* Send frame_header text frame (JSON) before the binary JPEG payload.
+         * Algorithm client (docker main-client) uses seq to detect drops and
+         * out-of-order frames. timestamp is intentionally omitted: ESP32 has
+         * no SNTP, so esp_timer_get_time() is uptime (not Unix epoch). The
+         * algorithm client falls back to its local time.time()*1000 when the
+         * "timestamp" field is absent (header.get('timestamp', frame_timestamp)).
+         * Only the /camera client receives this text; /mcp and /algo clients
+         * are not disturbed (see ws_manager_server_send_camera_text). */
+        s_frame_seq++;
+        char header_buf[64];
+        int header_len =
+            snprintf(header_buf, sizeof(header_buf), "{\"type\":\"frame_header\",\"seq\":%u}", (unsigned)s_frame_seq);
+        if (header_len > 0 && header_len < (int)sizeof(header_buf)) {
+            /* [TEMP A/B 2026-08-08] frame_header text send disabled to verify
+             * whether text frames mixed into the binary stream (sent
+             * synchronously from the stream task while binary frames are sent
+             * asynchronously by the httpd worker on the SAME socket) cause
+             * WS frame interleaving/corruption and client RST ~1s after
+             * connect. Re-enable after verification. */
+            // ws_manager_server_send_camera_text(header_buf, header_len);
+        }
+
         /* Broadcast to /camera clients (async via httpd_queue_work).
          * BBA+PI handle congestion control — here we just update counters.
          * Send failures are tracked by ws_manager's send stats which BBA reads. */
@@ -590,14 +628,25 @@ static void camera_stream_task(void *arg)
         if (now - last_stats_log >= 10 * 1000 * 1000) {
             uint32_t avg_size =
                 (s_state.frame_size_count > 0) ? (s_state.frame_size_sum / s_state.frame_size_count) : 0;
+            /* Fetch latest ws stats to expose link send duration (throughput
+             * diagnostic: avg_size/avg_dur ≈ effective link throughput). */
+            int64_t ws_avg_dur_ms  = 0;
+            int64_t ws_last_dur_ms = 0;
+            ws_send_stats_t ws_stats_log;
+            if (ws_manager_server_get_send_stats(&ws_stats_log) == ESP_OK) {
+                ws_avg_dur_ms  = ws_stats_log.avg_send_duration_us / 1000;
+                ws_last_dur_ms = ws_stats_log.last_send_duration_us / 1000;
+            }
             ESP_LOGI(TAG,
                      "Stats: sent=%u failed=%u avg_size=%u fps=%d Q=%d bba=%d "
-                     "[ws: sent=%u failed=%u] [PI: actual=%lu target=%lu B/s integral=%.2f] "
+                     "[ws: sent=%u failed=%u avg_dur=%lldms last=%lldms] "
+                     "[PI: actual=%lu target=%lu B/s integral=%.2f] "
                      "[motion: %s SAD=%.4f static_cnt=%d]",
                      (unsigned)s_state.frames_sent, (unsigned)s_state.frames_failed, (unsigned)avg_size, effective_fps,
                      s_state.current_quality, bba.current_level, (unsigned)bba.accum_sent, (unsigned)bba.accum_failed,
-                     (unsigned long)pi.actual_bitrate_bps, (unsigned long)pi.target_bitrate_bps, pi.integral,
-                     motion.is_static ? "STATIC" : "ACTIVE", motion.last_sad, motion.static_count);
+                     (long long)ws_avg_dur_ms, (long long)ws_last_dur_ms, (unsigned long)pi.actual_bitrate_bps,
+                     (unsigned long)pi.target_bitrate_bps, pi.integral, motion.is_static ? "STATIC" : "ACTIVE",
+                     motion.last_sad, motion.static_count);
             last_stats_log = now;
         }
 

@@ -8,6 +8,9 @@ set(COMP_SRCS "main.c"
 # MCP tools sources (always compiled, lightweight JSON-RPC engine)
 list(APPEND COMP_SRCS "mcp/mcp_tools.c")
 
+# Algorithm result manager sources (always compiled)
+list(APPEND COMP_SRCS "algo/algo_result_manager.c")
+
 # Network integration sources (always compiled)
 list(APPEND COMP_SRCS "network/network_manager.c")
 list(APPEND COMP_SRCS "network/base_bridge.c")
@@ -56,7 +59,8 @@ endif()
 set(COMP_INCLUDE_DIRS "."
                       "led"
                       "mcp"
-                      "network")
+                      "network"
+                      "algo")
 
 if (CONFIG_EXAMPLE_ENABLE_DISPLAY)
     list(APPEND COMP_INCLUDE_DIRS "display")

@@ -99,6 +99,20 @@ static void wifi_remote_event_handler(void *arg, esp_event_base_t event_base, in
         switch (event_id) {
         case WIFI_EVENT_STA_START:
             ESP_LOGI(TAG, "WiFi STA started, connecting...");
+            /* Disable WiFi power save. Note: the ESP-Hosted C5 slave firmware
+             * already calls esp_wifi_set_ps(WIFI_PS_NONE) in its own wifi init
+             * (esp_hosted_coprocessor.c), so this host-side call is a redundant
+             * safety net. It may return ESP_ERR_WIFI_NOT_INIT due to host-side
+             * remote-WiFi RPC timing; that is benign since PS is already off
+             * on the slave. */
+            {
+                esp_err_t ps_err = esp_wifi_set_ps(WIFI_PS_NONE);
+                if (ps_err != ESP_OK) {
+                    ESP_LOGW(TAG, "Failed to disable WiFi power save: %s", esp_err_to_name(ps_err));
+                } else {
+                    ESP_LOGI(TAG, "WiFi power save disabled (WIFI_PS_NONE)");
+                }
+            }
             esp_wifi_remote_connect();
             break;
         case WIFI_EVENT_STA_DISCONNECTED:
@@ -263,10 +277,10 @@ esp_err_t wifi_manager_init(void)
     /* Use a static IP to prevent DHCP re-assignment from changing this
      * device's address and breaking cross-board HTTP/WS links. */
     esp_netif_ip_info_t ip_info = {0};
-    ip_info.ip.addr      = esp_ip4addr_aton(WIFI_MANAGER_STATIC_IP);
-    ip_info.gw.addr      = esp_ip4addr_aton(WIFI_MANAGER_STATIC_GATEWAY);
-    ip_info.netmask.addr = esp_ip4addr_aton(WIFI_MANAGER_STATIC_NETMASK);
-    esp_err_t e = esp_netif_dhcpc_stop(netif);
+    ip_info.ip.addr             = esp_ip4addr_aton(WIFI_MANAGER_STATIC_IP);
+    ip_info.gw.addr             = esp_ip4addr_aton(WIFI_MANAGER_STATIC_GATEWAY);
+    ip_info.netmask.addr        = esp_ip4addr_aton(WIFI_MANAGER_STATIC_NETMASK);
+    esp_err_t e                 = esp_netif_dhcpc_stop(netif);
     if (e != ESP_OK) {
         ESP_LOGW(TAG, "dhcpc_stop: %s", esp_err_to_name(e));
     }
@@ -278,9 +292,9 @@ esp_err_t wifi_manager_init(void)
     /* Static IP stops the DHCP client, so the DNS server provided by DHCP
      * is lost. Configure the DNS server explicitly. */
     esp_netif_dns_info_t dns_info = {0};
-    dns_info.ip.type = ESP_IPADDR_TYPE_V4;
-    dns_info.ip.u_addr.ip4.addr = esp_ip4addr_aton(WIFI_MANAGER_STATIC_DNS);
-    e = esp_netif_set_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns_info);
+    dns_info.ip.type              = ESP_IPADDR_TYPE_V4;
+    dns_info.ip.u_addr.ip4.addr   = esp_ip4addr_aton(WIFI_MANAGER_STATIC_DNS);
+    e                             = esp_netif_set_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns_info);
     if (e != ESP_OK) {
         ESP_LOGW(TAG, "Set DNS failed: %s", esp_err_to_name(e));
     }

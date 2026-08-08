@@ -6,6 +6,7 @@
 
 #include "network_manager.h"
 
+#include "algo_result_manager.h"
 #include "base_bridge.h"
 #include "cJSON.h"
 #include "camera_stream.h"
@@ -47,20 +48,6 @@ static algo_result_state_t s_algo_state = {0};
 static SemaphoreHandle_t s_algo_mutex   = NULL;
 
 /*---------------------------------------------------------------
- * VLM detection forward (A1) and gesture forward (A2) throttle state
- *-------------------------------------------------------------*/
-/* A1: forward phone/computer detection once per source every >=60s;
- * a source change forwards immediately and resets the timer. */
-static char s_last_vlm_source[16]    = {0};
-static int64_t s_last_vlm_forward_us = 0;
-#define VLM_FORWARD_THROTTLE_US (60LL * 1000LL * 1000LL)
-
-/* A2: forward thumb up/down only on gesture change, throttled to >=1s. */
-static char s_last_gesture[32]    = {0};
-static int64_t s_last_gesture_us  = 0;
-#define GESTURE_FORWARD_THROTTLE_US (1LL * 1000LL * 1000LL)
-
-/*---------------------------------------------------------------
  * Internal: WiFi event callback
  *-------------------------------------------------------------*/
 static void wifi_event_handler(wifi_manager_event_t event, void *data)
@@ -84,39 +71,107 @@ static void wifi_event_handler(wifi_manager_event_t event, void *data)
 }
 
 /*---------------------------------------------------------------
- * Internal: WebSocket data callback - dispatch /mcp messages
+ * Internal: WebSocket data callback - dispatch /mcp & /algo messages
+ *
+ * Note: In ESP-IDF 5.5.4, req->uri is empty for WebSocket data frames
+ * received after the upgrade handshake (only the initial GET request
+ * carries the URI). Therefore we cannot filter by URI here — both /mcp
+ * and /algo use the same JSON-RPC protocol, and mcp_tools_handle_message
+ * dispatches by the "method" field, so URI filtering is unnecessary.
  *-------------------------------------------------------------*/
 static void ws_data_handler(ws_manager_event_t event, void *data)
 {
+    /* Debug: log entry to confirm dispatch_event calls this handler.
+     * If this log is missing while ws_mgr: WS recv appears, dispatch_event
+     * is not invoking the callback (s_callbacks[WS_MANAGER_EVENT_DATA] is NULL). */
+    ESP_LOGI(TAG, "ws_data_handler: entry (event=%d)", (int)event);
+
     if (event != WS_MANAGER_EVENT_DATA || !data) {
+        ESP_LOGW(TAG, "ws_data_handler: early return (event=%d, data=%p)", (int)event, data);
         return;
     }
 
     ws_manager_data_t *msg = (ws_manager_data_t *)data;
 
-    /* Only handle text messages on /mcp or /algo path */
-    if (msg->type != WS_DATA_TYPE_TEXT || !msg->uri) {
+    /* Only handle text messages (JSON-RPC). Binary frames on /camera are
+     * not expected from clients (ESP32 is the binary frame sender). */
+    if (msg->type != WS_DATA_TYPE_TEXT) {
+        ESP_LOGD(TAG, "ws_data_handler: skip non-text frame (type=%d)", (int)msg->type);
         return;
     }
 
-    if (strcmp(msg->uri, "/mcp") != 0 && strcmp(msg->uri, "/algo") != 0) {
+    /* Allocate request buffer on heap to avoid stack overflow in httpd worker.
+     * httpd worker stack is 16KB; two 4KB stack buffers (request + response)
+     * plus ws_server_handler's stack usage could overflow the thread stack,
+     * causing silent corruption (no Guru Meditation Error) that prevents the
+     * ESP_LOGI below from executing. */
+    char *request_buf = calloc(1, MCP_RESPONSE_BUF_SIZE);
+    if (request_buf == NULL) {
+        ESP_LOGE(TAG, "ws_data_handler: failed to allocate request_buf");
         return;
     }
-
-    /* Ensure null-terminated (copy to local buffer) */
-    char request_buf[MCP_RESPONSE_BUF_SIZE];
     int copy_len = msg->data_len;
-    if (copy_len >= (int)sizeof(request_buf)) {
-        copy_len = sizeof(request_buf) - 1;
+    if (copy_len >= MCP_RESPONSE_BUF_SIZE) {
+        copy_len = MCP_RESPONSE_BUF_SIZE - 1;
     }
     memcpy(request_buf, msg->data, copy_len);
     request_buf[copy_len] = '\0';
 
+    /* Log received message: URI + length + content preview (first 256 bytes).
+     * This is the primary "data received" printout for serial monitoring. */
+    ESP_LOGI(TAG, "WS recv %s [%d bytes]: %.*s", msg->uri ? msg->uri : "(null)", copy_len,
+             copy_len > 256 ? 256 : copy_len, request_buf);
+
+    /* Discard response-type messages (result/error without method) - these are
+     * JSON-RPC responses to tool calls, not new requests. Avoids mcp_tools
+     * returning INVALID_REQUEST for every response received on /mcp or /algo. */
+    if (strstr(request_buf, "\"method\"") == NULL &&
+        (strstr(request_buf, "\"result\"") != NULL || strstr(request_buf, "\"error\"") != NULL)) {
+        ESP_LOGD(TAG, "Discarding response-type message on %s", msg->uri ? msg->uri : "(null)");
+        free(request_buf);
+        return;
+    }
+
+    /* Check for mode.set notification (custom method, handled before mcp_tools).
+     * Voice board -> head board: {"jsonrpc":"2.0","method":"mode.set","params":{"mode":"focus"}} */
+    if (strstr(request_buf, "mode.set") != NULL) {
+        cJSON *root = cJSON_Parse(request_buf);
+        if (root) {
+            cJSON *method = cJSON_GetObjectItem(root, "method");
+            if (cJSON_IsString(method) && strcmp(method->valuestring, "mode.set") == 0) {
+                cJSON *params    = cJSON_GetObjectItem(root, "params");
+                cJSON *mode_item = params ? cJSON_GetObjectItem(params, "mode") : NULL;
+                if (cJSON_IsString(mode_item)) {
+                    if (strcmp(mode_item->valuestring, "focus") == 0) {
+                        algo_result_set_mode(ALGO_MODE_FOCUS);
+                    } else if (strcmp(mode_item->valuestring, "companion") == 0) {
+                        algo_result_set_mode(ALGO_MODE_COMPANION);
+                    } else {
+                        algo_result_set_mode(ALGO_MODE_NORMAL);
+                    }
+                }
+                cJSON_Delete(root);
+                free(request_buf);
+                return; /* Notification handled, no response needed */
+            }
+            cJSON_Delete(root);
+        }
+    }
+
+    /* Allocate response buffer on heap (same stack overflow mitigation) */
+    char *response_buf = calloc(1, MCP_RESPONSE_BUF_SIZE);
+    if (response_buf == NULL) {
+        ESP_LOGE(TAG, "ws_data_handler: failed to allocate response_buf");
+        free(request_buf);
+        return;
+    }
+
     /* Handle MCP message */
-    char response_buf[MCP_RESPONSE_BUF_SIZE];
-    esp_err_t ret = mcp_tools_handle_message(request_buf, response_buf, sizeof(response_buf));
+    esp_err_t ret = mcp_tools_handle_message(request_buf, response_buf, MCP_RESPONSE_BUF_SIZE);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "MCP handle failed: %s", esp_err_to_name(ret));
+        free(request_buf);
+        free(response_buf);
         return;
     }
 
@@ -127,6 +182,9 @@ static void ws_data_handler(ws_manager_event_t event, void *data)
             ESP_LOGW(TAG, "MCP response enqueue failed: %s", esp_err_to_name(ret));
         }
     }
+
+    free(request_buf);
+    free(response_buf);
 }
 
 /*---------------------------------------------------------------
@@ -873,6 +931,19 @@ static esp_err_t mcp_cb_algo_result(const void *args_json, char *response_buf, i
         algo_copy_str(vlm, "reason", snap.vlm_reason, sizeof(snap.vlm_reason));
     }
 
+    /* presence sub-object (derived from face_position.valid by docker main-client) */
+    cJSON *presence = cJSON_GetObjectItem(root, "presence");
+    if (cJSON_IsObject(presence)) {
+        cJSON *present_item = cJSON_GetObjectItem(presence, "present");
+        if (cJSON_IsBool(present_item)) {
+            snap.present = cJSON_IsTrue(present_item);
+        }
+        cJSON *duration_item = cJSON_GetObjectItem(presence, "duration_s");
+        if (cJSON_IsNumber(duration_item)) {
+            snap.presence_duration_s = (float)duration_item->valuedouble;
+        }
+    }
+
     snap.last_update_us = esp_timer_get_time();
 
     /* Publish */
@@ -883,72 +954,16 @@ static esp_err_t mcp_cb_algo_result(const void *args_json, char *response_buf, i
         ESP_LOGW(TAG, "algo_result: mutex unavailable, state not updated");
     }
 
-    ESP_LOGI(TAG, "algo_result: emotion=%s fatigue=%d focus=%s score=%.2f gesture=%s vlm=%s|%s",
+    ESP_LOGI(TAG, "algo_result: emotion=%s fatigue=%d focus=%s score=%.2f gesture=%s vlm=%s|%s presence=%s(%.0fs)",
              snap.emotion[0] ? snap.emotion : "-", snap.fatigue, snap.focus_level_name[0] ? snap.focus_level_name : "-",
              snap.focus_score, snap.gesture[0] ? snap.gesture : "-", snap.vlm_judgment[0] ? snap.vlm_judgment : "-",
-             snap.vlm_trigger_source[0] ? snap.vlm_trigger_source : "-");
+             snap.vlm_trigger_source[0] ? snap.vlm_trigger_source : "-", snap.present ? "yes" : "no",
+             snap.presence_duration_s);
 
-    /*---------------------------------------------------------------
-     * A1: forward VLM phone/computer detection to base board
-     * Trigger: judgment=="是" AND trigger_source is 手机/电脑.
-     * Throttle: same source >=60s; source change forwards immediately.
-     *-------------------------------------------------------------*/
-    {
-        const char *source = NULL;
-        if (snap.vlm_judgment[0] && strcmp(snap.vlm_judgment, "是") == 0) {
-            if (strstr(snap.vlm_trigger_source, "手机")) {
-                source = "phone";
-            } else if (strstr(snap.vlm_trigger_source, "电脑")) {
-                source = "computer";
-            }
-        }
-
-        if (source) {
-            int64_t now_us         = esp_timer_get_time();
-            bool source_changed    = (strcmp(s_last_vlm_source, source) != 0);
-            bool throttle_elapsed  = (now_us - s_last_vlm_forward_us) >= VLM_FORWARD_THROTTLE_US;
-            if (source_changed || throttle_elapsed) {
-                esp_err_t err = base_bridge_post_detect_phone(source);
-                if (err == ESP_OK) {
-                    snprintf(s_last_vlm_source, sizeof(s_last_vlm_source), "%s", source);
-                    s_last_vlm_forward_us = now_us;
-                } else {
-                    ESP_LOGW(TAG, "VLM forward failed (will retry): source=%s", source);
-                }
-            } else {
-                ESP_LOGI(TAG, "VLM forward throttled: source=%s", source);
-            }
-        }
-    }
-
-    /*---------------------------------------------------------------
-     * A2: forward VLM thumb up/down gesture to base board
-     * Trigger: gesture changes to Thumb_Up/Thumb_Down.
-     * Throttle: >=1s between forwards.
-     *-------------------------------------------------------------*/
-    if (snap.gesture[0]) {
-        const char *gesture = NULL;
-        if (strcmp(snap.gesture, "Thumb_Up") == 0) {
-            gesture = "thumb_up";
-        } else if (strcmp(snap.gesture, "Thumb_Down") == 0) {
-            gesture = "thumb_down";
-        }
-
-        if (gesture) {
-            int64_t now_us        = esp_timer_get_time();
-            bool gesture_changed  = (strcmp(s_last_gesture, gesture) != 0);
-            bool throttle_elapsed = (now_us - s_last_gesture_us) >= GESTURE_FORWARD_THROTTLE_US;
-            if (gesture_changed && throttle_elapsed) {
-                esp_err_t err = base_bridge_post_arm_gesture(gesture);
-                if (err == ESP_OK) {
-                    snprintf(s_last_gesture, sizeof(s_last_gesture), "%s", gesture);
-                    s_last_gesture_us = now_us;
-                } else {
-                    ESP_LOGW(TAG, "Gesture forward failed (will retry): gesture=%s", gesture);
-                }
-            }
-        }
-    }
+    /* Dispatch to algo_result_manager for sub-handler processing:
+     * emotion→eyes, focus→display(deferred), vlm_game→base_bridge+TTS,
+     * presence→sedentary+TTS, gesture→base_bridge arm. Mode-gated. */
+    algo_result_handle(root);
 
     snprintf(response_buf, response_buf_size, "{\"ok\":true}");
     return ESP_OK;
@@ -1359,6 +1374,13 @@ esp_err_t network_manager_init(void)
     ret = mcp_tools_register_callbacks(&callbacks);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "MCP callbacks register failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    /* 3b. Initialize algo result manager (sub-handlers + mode state machine) */
+    ret = algo_result_manager_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Algo result manager init failed: %s", esp_err_to_name(ret));
         return ret;
     }
 

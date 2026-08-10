@@ -92,13 +92,61 @@ esp_err_t tts_inject_speak(const char *text)
             ESP_LOGW(TAG, "TTS inject HTTP %d (attempt %d)", status, attempt);
             err = ESP_FAIL;
         } else {
-            ESP_LOGW(TAG, "POST /api/tts/speak failed (attempt %d): %s",
-                     attempt, esp_err_to_name(err));
+            ESP_LOGW(TAG, "POST /api/tts/speak failed (attempt %d): %s", attempt, esp_err_to_name(err));
         }
 
         esp_http_client_cleanup(client);
     }
 
     free(json_str);
+    return err;
+}
+
+esp_err_t tts_inject_end_chat(void)
+{
+    char url[160];
+    snprintf(url, sizeof(url), "http://" CONFIG_TTS_INJECT_TARGET_IP "/api/chat/end");
+
+    ESP_LOGI(TAG, "Sending end-chat -> %s", url);
+
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 1; attempt <= TTS_INJECT_RETRY_COUNT; attempt++) {
+        if (attempt > 1) {
+            ESP_LOGW(TAG, "End-chat inject retry (%d/%d)", attempt, TTS_INJECT_RETRY_COUNT);
+            vTaskDelay(pdMS_TO_TICKS(TTS_INJECT_RETRY_DELAY_MS));
+        }
+
+        esp_http_client_config_t config = {
+            .url        = url,
+            .method     = HTTP_METHOD_POST,
+            .timeout_ms = TTS_INJECT_HTTP_TIMEOUT_MS,
+        };
+
+        esp_http_client_handle_t client = esp_http_client_init(&config);
+        if (!client) {
+            ESP_LOGE(TAG, "Failed to init HTTP client");
+            continue;
+        }
+
+        esp_http_client_set_header(client, "Content-Type", "application/json");
+        esp_http_client_set_post_field(client, "{}", 2);
+
+        err = esp_http_client_perform(client);
+        if (err == ESP_OK) {
+            int status = esp_http_client_get_status_code(client);
+            if (status == 200) {
+                ESP_LOGI(TAG, "End-chat response: HTTP %d (attempt %d)", status, attempt);
+                esp_http_client_cleanup(client);
+                return ESP_OK;
+            }
+            ESP_LOGW(TAG, "End-chat HTTP %d (attempt %d)", status, attempt);
+            err = ESP_FAIL;
+        } else {
+            ESP_LOGW(TAG, "POST /api/chat/end failed (attempt %d): %s", attempt, esp_err_to_name(err));
+        }
+
+        esp_http_client_cleanup(client);
+    }
+
     return err;
 }

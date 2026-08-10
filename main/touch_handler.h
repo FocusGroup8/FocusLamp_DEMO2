@@ -21,7 +21,7 @@ extern "C" {
  * Connects touch_interpreter gesture events to concrete actions:
  * - TAP: LED blink + screen welcome text + notify wifi_test to wake
  * - DOUBLE_TAP: brightness level cycling (delegated to brightness_controller)
- * - LONG_PRESS: placeholder for future binding
+ * - LONG_PRESS: turn off head light + ask voice board to end the conversation
  *
  * Requires touch_interpreter, led_controller, and display_system to be initialized.
  */

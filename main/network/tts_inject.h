@@ -30,6 +30,18 @@ extern "C" {
  */
 esp_err_t tts_inject_speak(const char *text);
 
+/**
+ * @brief Ask the voice board to end the current voice conversation
+ *
+ * Sends POST /api/chat/end to the voice board so it closes the xiaozhi
+ * audio channel (aborts ongoing TTS, ends the session). The voice board's
+ * wake word detection remains active, so a new conversation can still be
+ * started by speaking the wake word afterwards.
+ *
+ * @return ESP_OK on success, otherwise an esp_err_t error code
+ */
+esp_err_t tts_inject_end_chat(void);
+
 #ifdef __cplusplus
 }
 #endif

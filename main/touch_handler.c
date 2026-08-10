@@ -32,9 +32,8 @@
 #include "touch_interpreter_types.h"
 #endif
 
-#include "websocket_manager.h"
-
 #include "tts_inject.h"
+#include "websocket_manager.h"
 
 #include <string.h>
 
@@ -83,6 +82,7 @@ static SemaphoreHandle_t s_wake_mutex = NULL;
 typedef enum {
     TOUCH_ACTION_TAP,
     TOUCH_ACTION_DOUBLE_TAP,
+    TOUCH_ACTION_LONG_PRESS,
 } touch_action_type_t;
 #define TOUCH_ACTION_QUEUE_LEN 8
 #define TOUCH_ACTION_TASK_STACK 8192
@@ -122,7 +122,7 @@ static void nvs_load_brightness_level(void)
         return;
     }
     uint8_t saved_idx = BRIGHTNESS_DEFAULT_LEVEL;
-    err = nvs_get_u8(handle, NVS_KEY_BRIGHTNESS_IDX, &saved_idx);
+    err               = nvs_get_u8(handle, NVS_KEY_BRIGHTNESS_IDX, &saved_idx);
     if (err == ESP_OK && saved_idx < BRIGHTNESS_LEVEL_COUNT) {
         s_brightness_level_idx = saved_idx;
         ESP_LOGI(TAG, "Loaded brightness level from NVS: index %d (offset %d%%)", saved_idx,
@@ -205,7 +205,7 @@ static void handle_double_tap_action(void)
     ESP_LOGI(TAG, "DOUBLE_TAP action - cycling brightness");
 
     /* Cycle to next brightness level (absolute value, no ambient) */
-    s_brightness_level_idx = (s_brightness_level_idx + 1) % BRIGHTNESS_LEVEL_COUNT;
+    s_brightness_level_idx    = (s_brightness_level_idx + 1) % BRIGHTNESS_LEVEL_COUNT;
     uint8_t target_brightness = s_brightness_levels[s_brightness_level_idx];
 
 #if CONFIG_EXAMPLE_ENABLE_LED
@@ -214,14 +214,40 @@ static void handle_double_tap_action(void)
     }
 #endif
 
-    ESP_LOGI(TAG, "Brightness level %d/%d: %d%%", s_brightness_level_idx + 1,
-             BRIGHTNESS_LEVEL_COUNT, target_brightness);
+    ESP_LOGI(TAG, "Brightness level %d/%d: %d%%", s_brightness_level_idx + 1, BRIGHTNESS_LEVEL_COUNT,
+             target_brightness);
 
     /* Save brightness level to NVS */
     nvs_save_brightness_level();
 
     /* TODO: Display brightness number + progress bar on screen for 2 seconds */
     /* TODO: Notify wifi_test to TTS "亮度已调到百分之XX" */
+}
+
+/*---------------------------------------------------------------
+ * LONG_PRESS action: turn off head light + end the voice conversation.
+ *
+ * The voice board closes its xiaozhi audio channel (aborts ongoing TTS,
+ * ends the session), while its wake word detection stays active so the
+ * user can still start a new conversation by voice afterwards.
+ * Runs in the dedicated action task (adequate stack for HTTP).
+ *-------------------------------------------------------------*/
+static void handle_long_press_action(void)
+{
+    ESP_LOGI(TAG, "LONG_PRESS action - turning off head light + ending conversation");
+
+    /* 1. Turn off the head light */
+#if CONFIG_EXAMPLE_ENABLE_LED
+    if (led_is_initialized()) {
+        led_off();
+    }
+#endif
+
+    /* 2. Ask the voice board to end the current conversation (HTTP) */
+    esp_err_t err = tts_inject_end_chat();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "End-chat inject failed: %s", esp_err_to_name(err));
+    }
 }
 
 /*---------------------------------------------------------------
@@ -241,6 +267,8 @@ static void touch_action_task(void *arg)
             handle_tap_action();
         } else if (action == TOUCH_ACTION_DOUBLE_TAP) {
             handle_double_tap_action();
+        } else if (action == TOUCH_ACTION_LONG_PRESS) {
+            handle_long_press_action();
         }
     }
 }
@@ -273,11 +301,13 @@ static void gesture_callback(const touch_gesture_event_t *event, void *ctx)
         }
         break;
 
-    case TOUCH_GESTURE_LONG_PRESS: {
-        ESP_LOGI(TAG, "LONG_PRESS detected (duration=%lldms) — no action bound yet", event->duration_ms);
-        /* Placeholder for future functionality */
+    case TOUCH_GESTURE_LONG_PRESS:
+        ESP_LOGI(TAG, "LONG_PRESS detected (duration=%lldms) - enqueuing light-off + end chat", event->duration_ms);
+        if (s_action_queue) {
+            touch_action_type_t action = TOUCH_ACTION_LONG_PRESS;
+            xQueueSend(s_action_queue, &action, 0);
+        }
         break;
-    }
 
     default:
         break;

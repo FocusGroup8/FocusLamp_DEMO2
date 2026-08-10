@@ -54,15 +54,17 @@ menu "Touch Interpreter"
 
     config TOUCH_INTERPRETER_LONG_PRESS_MS
         int "Long press threshold (ms)"
-        default 700
+        default 3000
         range 500 10000
         depends on TOUCH_INTERPRETER_ENABLE
         help
             Duration threshold for LONG_PRESS recognition.
             Touch held continuously for longer than this triggers LONG_PRESS.
-            Calibrated from TTP223 field data: user long presses measured
-            853-1040ms, so 700ms reliably triggers while still separating
-            from TAP_MAX (500ms).
+            Default 3000ms binds LONG_PRESS on the head board to "turn off the
+            head light and end the voice conversation" (a deliberate long hold,
+            well above TAP_MAX 500ms and user tap durations, to avoid
+            accidental triggers). Adjust via menuconfig if a different hold
+            time is preferred.
 
     config TOUCH_INTERPRETER_VALID_TOUCH_MIN_MS
         int "Minimum valid touch duration (ms)"

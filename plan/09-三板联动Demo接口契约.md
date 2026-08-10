@@ -27,6 +27,7 @@
 flowchart LR
     VLM[外部 VLM 引擎 PC] -- MCP algorithm.result<br/>WS /mcp|/algo --> HEAD[灯头板]
     HEAD -- POST /api/tts/speak<br/>欢迎语(短指令) --> TTS[语音板]
+    HEAD -- POST /api/chat/end<br/>长按灯头结束对话 --> TTS
     HEAD -- POST /api/arm/gesture<br/>拇指上/下 --> BASE[基座板]
     HEAD -- POST /api/detect/phone<br/>VLM 玩手机/电脑 --> BASE
     TTS -- MCP self.focuslamp.*<br/>HTTP REST --> BASE
@@ -80,6 +81,7 @@ flowchart LR
 | VLM 结果转发 | `mcp_cb_algo_result` | `vlm_judgment=="yes"`(英文枚举) 且 `vlm_trigger_source` 为 phone/computer → `POST /api/detect/phone`（节流 ≥60s） | `base_bridge` |
 | 手势转发 | `mcp_cb_algo_result`（复用 VLM `gesture` 字段） | `gesture` 变化为 Thumb_Up/Thumb_Down → `POST /api/arm/gesture`（节流 ≥1s） | `base_bridge` |
 | 模式同步接收 | 语音板 `POST /api/mode/set` | `focus`→`ALGO_MODE_FOCUS`、`companion`→`ALGO_MODE_COMPANION`、其余→`ALGO_MODE_NORMAL`，切换算法结果处理 | REST API |
+| 长按灯头（≥3s） | `touch_handler` LONG_PRESS | 关闭灯头灯 + `POST {TTS_INJECT_TARGET_IP}/api/chat/end`（语音板结束对话，唤醒词仍可用） | `tts_inject_end_chat`（复用 `tts_inject` HTTP 客户端） |
 
 ### 4.4 小屏心率渲染（基座板 lcd_service）
 
@@ -88,6 +90,13 @@ flowchart LR
   - 专注模式（INFO 页）：进度条下方新增"心率XX"行（布局：模式名 Y0 / 任务+倒计时 Y18 / 进度条 Y36 高6 / 心率 Y44）
   - 陪伴模式（表情页）：顶部叠加"陪伴模式"、底部叠加"心率XX"（保留开心眼睛），由 `lcd_service_set_companion_overlay()` 开关控制
 - 心率无效时显示"心率--"
+
+### 4.5 新增 REST 端点（语音板，注册于 `ws_manager_server_register_uri`）
+
+| 端点 | 方法 | 请求体 | 响应 | 实现 | 调用方 |
+|---|---|---|---|---|---|
+| `POST /api/tts/speak` | POST | `{"text":"短指令","priority":1}` | `{"ok":true}` | `xiaozhi_manager_speak`（异步 TTS 注入队列） | 灯头板/基座板 |
+| `POST /api/chat/end` | POST | `{}`（忽略） | `{"ok":true}` | `xiaozhi_manager_close_audio_channel()`（关闭音频通道，中断进行中的 TTS 并结束对话；唤醒词仍可用） | 灯头板（长按） |
 
 ## 5. 数据字段与业务规则
 
@@ -205,6 +214,21 @@ sequenceDiagram
     B->>T: tts_bridge_speak("主人，跟Focus聊聊天吧~")
     H->>B: 手势 thumb_up/thumb_down → /api/arm/gesture
     B->>B: 机械臂向上/向下
+```
+
+### 6.6 场景7：长按灯头（≥3s）关灯并结束对话
+
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant H as 灯头板
+    participant T as 语音板
+    U->>H: 长按灯头 ≥3s
+    H->>H: touch_interpreter LONG_PRESS → 关灯(led_off)
+    H->>T: POST /api/chat/end{}
+    T->>T: close_audio_channel: 中断 TTS / 结束对话
+    T-->>H: {"ok":true}
+    Note over T: 唤醒词仍监听，可语音再唤醒
 ```
 
 ## 7. 校验与验收

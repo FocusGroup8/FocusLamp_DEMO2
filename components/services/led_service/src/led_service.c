@@ -89,10 +89,6 @@ static uint32_t                  s_fade_start_time    = 0;
 static presence_distance_state_t s_presence_state     = PRESENCE_DISTANCE_UNKNOWN;
 static float                     s_last_distance_cm   = 0.0f;
 
-/* Light control (UART) state */
-static TaskHandle_t s_light_ctrl_task   = NULL;
-static bool         s_light_ctrl_auto   = true;
-
 /* Presence thresholds */
 #define PRESENCE_NEAR_THRESHOLD_CM  100.0f
 #define PRESENCE_FAR_THRESHOLD_CM   300.0f
@@ -102,105 +98,6 @@ static bool         s_light_ctrl_auto   = true;
 #define BLINK_FAST_PERIOD_MS  200
 #define BLINK_SLOW_PERIOD_MS  500
 
-/* ===================== Light Control Task ===================== */
-
-/*
- * This task handles automatic light adjustment based on ambient light sensor.
- * When auto mode is enabled, it reads the light sensor and adjusts UART light
- * controller parameters accordingly.
- *
- * Note: This task is only created if the light_sensor_driver is available
- * at compile time. The sensor service publishes EV_SENSOR_AMBIENT_LIGHT_CHANGED
- * events which could also drive this behavior.
- */
-
-#if defined(LIGHT_SENSOR_DRIVER_H) && defined(CONFIG_LIGHT_SENSOR_ENABLED)
-#include "light_sensor_driver.h"
-#include "uart_light_controller.h"
-
-static bool s_light_ctrl_lamp_on = false;
-
-#define LIGHT_CTRL_TASK_INTERVAL_MS  2000
-#define LIGHT_CTRL_DEFAULT_WARM      1000
-#define LIGHT_CTRL_DEFAULT_COLD      1000
-#define LIGHT_CTRL_DEFAULT_COLOR_R   255
-#define LIGHT_CTRL_DEFAULT_COLOR_G   160
-#define LIGHT_CTRL_DEFAULT_COLOR_B   64
-
-static void light_control_task(void* arg)
-{
-    ESP_LOGI(TAG, "Light control task started");
-
-    while (1) {
-        if (!s_light_ctrl_auto) {
-            vTaskDelay(pdMS_TO_TICKS(LIGHT_CTRL_TASK_INTERVAL_MS));
-            continue;
-        }
-
-        bool is_dark   = false;
-        bool is_bright = false;
-
-        esp_err_t ret = light_sensor_driver_is_dark(&is_dark);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to check if dark");
-            vTaskDelay(pdMS_TO_TICKS(LIGHT_CTRL_TASK_INTERVAL_MS));
-            continue;
-        }
-
-        ret = light_sensor_driver_is_bright(&is_bright);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to check if bright");
-            vTaskDelay(pdMS_TO_TICKS(LIGHT_CTRL_TASK_INTERVAL_MS));
-            continue;
-        }
-
-        float lux = 0.0f;
-        light_sensor_driver_read(&lux);
-        ESP_LOGD(TAG, "Lux: %.2f, Dark: %d, Bright: %d, Lamp: %d", lux, is_dark, is_bright,
-                 s_light_ctrl_lamp_on);
-
-        if (is_dark && !s_light_ctrl_lamp_on) {
-            uart_light_params_t params = {
-                .warm  = LIGHT_CTRL_DEFAULT_WARM,
-                .cold  = LIGHT_CTRL_DEFAULT_COLD,
-                .red   = LIGHT_CTRL_DEFAULT_COLOR_R,
-                .green = LIGHT_CTRL_DEFAULT_COLOR_G,
-                .blue  = LIGHT_CTRL_DEFAULT_COLOR_B,
-            };
-            ret = uart_light_controller_set_params(&params);
-            if (ret == ESP_OK) {
-                s_light_ctrl_lamp_on = true;
-                ESP_LOGI(TAG, "Environment dark, lamp turned ON (Lux: %.2f)", lux);
-
-                event_t ev = { .type = EV_LIGHT_TOGGLE, .timestamp = event_bus_get_timestamp() };
-                event_bus_publish(&ev);
-            } else {
-                ESP_LOGW(TAG, "Failed to turn on lamp");
-            }
-        } else if (is_bright && s_light_ctrl_lamp_on) {
-            ret = uart_light_controller_turn_off();
-            if (ret == ESP_OK) {
-                s_light_ctrl_lamp_on = false;
-                ESP_LOGI(TAG, "Environment bright, lamp turned OFF (Lux: %.2f)", lux);
-
-                event_t ev = { .type = EV_LIGHT_TOGGLE, .timestamp = event_bus_get_timestamp() };
-                event_bus_publish(&ev);
-            } else {
-                ESP_LOGW(TAG, "Failed to turn off lamp");
-            }
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(LIGHT_CTRL_TASK_INTERVAL_MS));
-    }
-}
-#else
-/* Stub - auto light control not available without light_sensor_driver */
-static __attribute__((unused)) void light_control_task(void* arg) {
-    (void)arg;
-    vTaskDelete(NULL);
-}
-#endif /* LIGHT_SENSOR_DRIVER_H */
-
 /* ===================== Event Handler ===================== */
 
 static void led_service_event_handler(event_t* event, void* context)
@@ -209,10 +106,6 @@ static void led_service_event_handler(event_t* event, void* context)
     if (!s_initialized) return;
 
     switch (event->type) {
-    case EV_SENSOR_AMBIENT_LIGHT_CHANGED:
-        /* Ambient light changed - light control task handles auto adjustment */
-        break;
-
     case EV_SENSOR_RADAR_DETECTED:
         /* Radar detected presence */
         led_service_show_presence(true);
@@ -308,7 +201,6 @@ esp_err_t led_service_init(void)
     led_service_sync_device_state();
 
     /* Subscribe to events */
-    event_bus_subscribe(EV_SENSOR_AMBIENT_LIGHT_CHANGED, led_service_event_handler, NULL);
     event_bus_subscribe(EV_SENSOR_RADAR_DETECTED, led_service_event_handler, NULL);
     event_bus_subscribe(EV_SENSOR_RADAR_CLEAR, led_service_event_handler, NULL);
     event_bus_subscribe(EV_LIGHT_TOGGLE, led_service_event_handler, NULL);
@@ -319,17 +211,6 @@ esp_err_t led_service_init(void)
     s_initialized = true;
     s_running     = true;
 
-    /* Start light control task for UART-based lamp control */
-#if defined(LIGHT_SENSOR_DRIVER_H) && defined(CONFIG_LIGHT_SENSOR_ENABLED)
-    BaseType_t task_ret = xTaskCreate(light_control_task, "lctrl", 2048, NULL, 5, &s_light_ctrl_task);
-    if (task_ret != pdPASS) {
-        ESP_LOGW(TAG, "Failed to create light control task");
-    }
-    s_light_ctrl_auto = true;
-#else
-    s_light_ctrl_auto = false;
-#endif
-
     ESP_LOGI(TAG, "LED service initialized");
     return ESP_OK;
 }
@@ -338,12 +219,6 @@ esp_err_t led_service_deinit(void)
 {
     if (!s_initialized) {
         return ESP_OK;
-    }
-
-    /* Stop light control task */
-    if (s_light_ctrl_task != NULL) {
-        vTaskDelete(s_light_ctrl_task);
-        s_light_ctrl_task = NULL;
     }
 
     s_running     = false;

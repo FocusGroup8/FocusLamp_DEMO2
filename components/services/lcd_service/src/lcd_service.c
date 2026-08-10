@@ -927,7 +927,6 @@ static void lcd_service_event_handler(event_t *event, void *context)
     case EV_LCD_BRIGHTNESS_CHANGED:
         if (event->data != NULL && event->data_size == sizeof(uint8_t)) {
             uint8_t brightness = *(const uint8_t *)event->data;
-            ESP_LOGI(TAG, "[DBG][LCD_SVC] event brightness=%u current=%u sleeping=%d", brightness, s_brightness, s_sleeping);
             if (brightness != s_brightness) {
                 lcd_service_set_brightness(brightness);
                 ESP_LOGI(TAG, "Brightness changed to %u via event", brightness);
@@ -959,10 +958,6 @@ esp_err_t lcd_service_init(void)
         ESP_LOGE(TAG, "LCD driver init failed");
         return ret;
     }
-
-    // #region debug-point dbg-svc-brightness
-    ESP_LOGI(TAG, "[DBG][SVC] s_brightness=%u after driver_init", s_brightness);
-    // #endregion
 
     /* Initialize native page manager */
     ret = lcd_service_page_init();
@@ -1007,7 +1002,6 @@ void lcd_service_set_brightness(uint8_t brightness)
         return;
     }
 
-    ESP_LOGI(TAG, "[DBG][LCD_SVC] set_brightness req=%u prev=%u sleeping=%d", brightness, s_brightness, s_sleeping);
     s_brightness = brightness;
     lcd_driver_set_backlight(brightness);
 
@@ -1026,7 +1020,6 @@ void lcd_service_sleep(void)
         return;
     }
 
-    ESP_LOGI(TAG, "[DBG][LCD_SVC] sleep brightness=%u", s_brightness);
     ESP_LOGI(TAG, "LCD sleep");
     s_sleeping = true;
     lcd_driver_display_off();
@@ -1040,7 +1033,6 @@ void lcd_service_wakeup(void)
         return;
     }
 
-    ESP_LOGI(TAG, "[DBG][LCD_SVC] wakeup restore_brightness=%u", s_brightness);
     ESP_LOGI(TAG, "LCD wakeup");
     s_sleeping = false;
     lcd_driver_display_on();

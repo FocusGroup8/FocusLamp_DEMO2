@@ -39,7 +39,6 @@
 #include "lcd_module.h"
 #include "lcd_driver.h"
 #include "touch_driver.h"
-#include "light_sensor_driver.h"
 #include "sensor_service.h"
 #include "radar_module.h"
 #include "radar_driver.h"
@@ -154,51 +153,6 @@ static int cmd_touch_test(int argc, char **argv)
     }
 
     printf("\nTouch test complete.\n");
-    return 0;
-}
-
-/* ===================== Sensor Commands ===================== */
-
-static int cmd_sensor_light(int argc, char **argv)
-{
-    (void)argc;
-    (void)argv;
-
-    /* PID-smoothed value (primary — digital filter + 10s block averaging) */
-    float lux_smoothed = 0.0f;
-    bool smoothed_valid = (sensor_service_get_smoothed_lux(&lux_smoothed) == ESP_OK);
-
-    /* Raw oversampled value (secondary — 8 reads averaged at ADC level) */
-    float lux_raw = 0.0f;
-    esp_err_t ret = sensor_service_get_light_lux(&lux_raw);
-
-    bool is_dark = false;
-    bool is_bright = false;
-    light_sensor_driver_is_dark(&is_dark);
-    light_sensor_driver_is_bright(&is_bright);
-
-    float pct = 0.0f;
-    float display_lux = 0.0f;
-    if (smoothed_valid) {
-        display_lux = lux_smoothed;
-    } else if (ret == ESP_OK) {
-        display_lux = lux_raw;
-    }
-
-    pct = (display_lux / 2000.0f) * 100.0f;
-    if (pct < 0.0f)   pct = 0.0f;
-    if (pct > 100.0f)  pct = 100.0f;
-
-    printf("\n=== Ambient Light Sensor ===\n");
-    printf("Brightness:  %.0f lux (%.0f%%)  [level %d]\n",
-           (double)display_lux, (double)pct,
-           sensor_service_lux_to_level(display_lux));
-    printf("Dark:        %s\n", is_dark ? "Yes" : "No");
-    printf("Bright:      %s\n", is_bright ? "Yes" : "No");
-    if (smoothed_valid && ret == ESP_OK) {
-        printf("  (raw: %.0f | smoothed: %.0f)\n", (double)lux_raw, (double)lux_smoothed);
-    }
-    printf("==============================\n\n");
     return 0;
 }
 
@@ -1124,8 +1078,6 @@ static int cmd_system_info(int argc, char **argv)
                ds.audio.level,
                ds.audio.muted ? "MUTE" : "",
                ds.audio.playing ? "PLAY" : "");
-        printf("Ambient:     L%d %.2f lux\n",
-               ds.ambient_light.level, ds.ambient_light.lux);
         printf("Radar:       %s HR%.1f BR%.1f Dist%.1fcm %s\n",
                ds.radar.present ? "PRESENT" : "-",
                ds.radar.heart_rate_bpm,
@@ -2121,14 +2073,6 @@ void register_app_commands(void)
     };
     ESP_ERROR_CHECK(esp_console_cmd_register(&touch_test_cmd));
 
-    /* --- Sensor Commands --- */
-    const esp_console_cmd_t sensor_light_cmd = {
-        .command = "light_sensor",
-        .help    = "Read ambient light sensor value",
-        .func    = &cmd_sensor_light,
-    };
-    ESP_ERROR_CHECK(esp_console_cmd_register(&sensor_light_cmd));
-
     /* --- Audio Commands --- */
 #if 0 // DISABLED: audio command registrations
     const esp_console_cmd_t audio_init_cmd = {
@@ -2318,9 +2262,6 @@ void register_app_commands(void)
     unified_help_register_command("battery", "Show battery level", HELP_CATEGORY_POWER);
 
     unified_help_register_command("touch_test", "Test touch sensor input", HELP_CATEGORY_TOUCH);
-
-    unified_help_register_command("light_sensor", "Read ambient light sensor (lux + brightness %%)",
-                                  HELP_CATEGORY_SENSOR);
 
 #if 0 // DISABLED: audio help registrations (first set)
     unified_help_register_command("audio_init", "Initialize audio driver", HELP_CATEGORY_AUDIO);

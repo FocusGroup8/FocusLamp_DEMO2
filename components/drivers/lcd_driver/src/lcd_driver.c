@@ -27,12 +27,6 @@
 
 static const char *TAG = "LCD_DRIVER";
 
-// #region debug-point lcd-driver-counters
-static uint32_t s_dbg_fill_raw_calls = 0;
-static uint32_t s_dbg_flush_calls = 0;
-static bool s_dbg_runtime_logs_enabled = false;
-// #endregion
-
 // #region forward-declarations
 static void lcd_lock(void);
 static void lcd_unlock(void);
@@ -54,22 +48,25 @@ static bool s_pwm_initialized = false;
 
 static void lcd_fill_screen_raw(lcd_color_t color)
 {
-    s_dbg_fill_raw_calls++;
-    if (s_dbg_runtime_logs_enabled && (s_dbg_fill_raw_calls <= 5 || (s_dbg_fill_raw_calls % 20) == 0)) {
-        ESP_LOGI(TAG, "[DBG][FILL_RAW] call=%lu color=0x%04X", (unsigned long)s_dbg_fill_raw_calls, color);
-    }
+    /* Double-buffered DMA fill buffer: while one buffer is being transferred
+     * by the async SPI DMA, the next fill writes to the other one. Reusing a
+     * single static buffer could let a later write overwrite data the DMA has
+     * not yet read, producing corrupted/white frames. */
+    static DMA_ATTR uint16_t s_phys_fill_buf[2][LCD_PHYS_WIDTH * LCD_PHYS_HEIGHT];
+    static uint8_t s_fill_buf_idx = 0;
+    uint16_t *buf = s_phys_fill_buf[s_fill_buf_idx];
+    s_fill_buf_idx ^= 1;
 
-    /* Build a physical-sized buffer filled with the color (byte-swapped for GC9107).
-     * DMA_ATTR ensures the buffer stays in internal RAM (not PSRAM) so SPI DMA
-     * can access it reliably. */
-    static DMA_ATTR uint16_t s_phys_fill_buf[LCD_PHYS_WIDTH * LCD_PHYS_HEIGHT];
+    /* Build a physical-sized buffer filled with the color (byte-swapped for
+     * GC9107). DMA_ATTR keeps the buffer in internal RAM (not PSRAM) so SPI
+     * DMA can access it reliably. Filling happens inside the lock so two
+     * tasks cannot race on the same buffer. */
     uint16_t swapped = (color >> 8) | (color << 8);
-    for (int i = 0; i < LCD_PHYS_WIDTH * LCD_PHYS_HEIGHT; i++) {
-        s_phys_fill_buf[i] = swapped;
-    }
-
     lcd_lock();
-    esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LCD_PHYS_WIDTH, LCD_PHYS_HEIGHT, s_phys_fill_buf);
+    for (int i = 0; i < LCD_PHYS_WIDTH * LCD_PHYS_HEIGHT; i++) {
+        buf[i] = swapped;
+    }
+    esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LCD_PHYS_WIDTH, LCD_PHYS_HEIGHT, buf);
     lcd_unlock();
 }
 
@@ -217,9 +214,6 @@ esp_err_t lcd_driver_init(void)
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Backlight init failed: %s", esp_err_to_name(ret));
     }
-    ESP_LOGI(TAG, "[INIT] Setting backlight ON (brightness=255)");
-    lcd_driver_set_backlight(255);
-    vTaskDelay(pdMS_TO_TICKS(50));
 
     /* Allocate frame buffer (logical dimensions) in internal DMA-capable RAM.
      * With PSRAM enabled, plain malloc() may place the buffer in PSRAM which
@@ -235,6 +229,16 @@ esp_err_t lcd_driver_init(void)
     }
     memset(s_frame_buffer, 0, LCD_WIDTH * LCD_HEIGHT * sizeof(lcd_color_t));
     s_driver_initialized = true;
+
+    /* Clear the panel to black BEFORE enabling the backlight. GC9107's GRAM
+     * power-on default may be all-ones (white); showing that content while
+     * the backlight is already on is a source of the probabilistic white
+     * screen at boot. */
+    lcd_fill_screen_raw(0);
+
+    ESP_LOGI(TAG, "[INIT] Setting backlight ON (brightness=255)");
+    lcd_driver_set_backlight(255);
+    vTaskDelay(pdMS_TO_TICKS(50));
 
     ESP_LOGI(TAG, "LCD driver initialized successfully");
     return ESP_OK;
@@ -310,11 +314,7 @@ esp_err_t lcd_driver_display_off(void)
 
 void lcd_driver_set_backlight(uint8_t brightness)
 {
-    ESP_LOGI(TAG, "[DBG][BL_SET] brightness=%u bl_init=%d active_low=%d",
-             brightness, s_pwm_initialized, LCD_BL_ACTIVE_LOW);
-
     if (!s_pwm_initialized) {
-        ESP_LOGW(TAG, "[DBG][BL_SET] Backlight not initialized, skipping");
         return;
     }
 
@@ -337,8 +337,6 @@ void lcd_driver_set_backlight(uint8_t brightness)
     gpio_config(&io_conf);
 
     gpio_set_level(LCD_BL_GPIO, level);
-
-    ESP_LOGI(TAG, "[DBG][BL_AFTER_SET] brightness=%u gpio_level=%d", brightness, gpio_get_level(LCD_BL_GPIO));
 }
 
 /* ===================== Frame Buffer Drawing Functions ===================== */
@@ -409,20 +407,24 @@ void lcd_flush_buffer(void)
         return;
     }
 
-    s_dbg_flush_calls++;
-    if (s_dbg_runtime_logs_enabled && (s_dbg_flush_calls <= 5 || (s_dbg_flush_calls % 50) == 0)) {
-        ESP_LOGI(TAG, "[DBG][FLUSH] call=%lu", (unsigned long)s_dbg_flush_calls);
-    }
+    /* Double-buffered DMA buffer: while one buffer is being transferred by
+     * the async SPI DMA, the next frame writes to the other one. Reusing a
+     * single static buffer let a later frame overwrite data the DMA had not
+     * yet read, which caused random corrupted / white frames (the lcd_task
+     * and EV_LCD_UPDATE event handler refresh concurrently). */
+    static DMA_ATTR uint16_t s_physbuf[2][LCD_PHYS_WIDTH * LCD_PHYS_HEIGHT];
+    static uint8_t s_physbuf_idx = 0;
+    uint16_t *buf = s_physbuf[s_physbuf_idx];
+    s_physbuf_idx ^= 1;
 
-    /* If logical dimensions match physical, no rotation needed - just byte-swap.
-     * DMA_ATTR ensures the buffer stays in internal RAM (not PSRAM) so SPI DMA
-     * can access it reliably. */
-    static DMA_ATTR uint16_t s_physbuf[LCD_PHYS_WIDTH * LCD_PHYS_HEIGHT];
-
+    /* DMA_ATTR keeps the buffer in internal RAM (not PSRAM) so SPI DMA can
+     * access it reliably. The rotation + fill + draw_bitmap all happen inside
+     * the lock so two tasks cannot race on the same buffer. */
+    lcd_lock();
     if (LCD_WIDTH == LCD_PHYS_WIDTH && LCD_HEIGHT == LCD_PHYS_HEIGHT) {
         /* Portrait mode: direct copy with byte swap */
         for (int i = 0; i < LCD_PHYS_WIDTH * LCD_PHYS_HEIGHT; i++) {
-            s_physbuf[i] = __builtin_bswap16(s_frame_buffer[i]);
+            buf[i] = __builtin_bswap16(s_frame_buffer[i]);
         }
     } else {
         /* Landscape mode: software rotation logical (WxH) -> physical (HxW)
@@ -431,13 +433,12 @@ void lcd_flush_buffer(void)
             for (int lx = 0; lx < LCD_WIDTH; lx++) {
                 int px = LCD_HEIGHT - 1 - ly;
                 int py = lx;
-                s_physbuf[py * LCD_PHYS_WIDTH + px] = __builtin_bswap16(s_frame_buffer[ly * LCD_WIDTH + lx]);
+                buf[py * LCD_PHYS_WIDTH + px] = __builtin_bswap16(s_frame_buffer[ly * LCD_WIDTH + lx]);
             }
         }
     }
 
-    lcd_lock();
-    esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LCD_PHYS_WIDTH, LCD_PHYS_HEIGHT, s_physbuf);
+    esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LCD_PHYS_WIDTH, LCD_PHYS_HEIGHT, buf);
     lcd_unlock();
 }
 

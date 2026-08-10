@@ -829,6 +829,12 @@ CONFIG_PROJECT_RADAR_UART_RX_GPIO=1
 # end of Radar UART Pins
 
 CONFIG_PROJECT_RADAR_LD6002_ENABLE=y
+
+#
+# Demo
+#
+# CONFIG_PROJECT_DEMO_FAKE_DETECTION_ENABLE is not set
+# end of Demo
 # end of Radar Configuration
 
 #

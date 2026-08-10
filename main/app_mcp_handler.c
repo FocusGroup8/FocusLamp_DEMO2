@@ -93,10 +93,6 @@ static const tool_meta_t s_tool_meta[] = {
     {"radar.get_status", "Get radar status (presence, heart rate, breath rate, distance, HRV)",
      "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"},
 
-    /* --- Light sensor tools --- */
-    {"light.get_status", "Get ambient light level (0-4) and lux value",
-     "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"},
-
     /* --- Servo tools (5 servos: 1 EM3 + 4 LX) ---
      * servo_id mapping: 0=EM3 (range 0-3000), 1-4=LX (range 0-1000, bus IDs 1,2,3,5) */
     {"servo.set_position", "Set single servo position (servo_id 0=EM3 0-3000, 1-4=LX 0-1000)",
@@ -415,24 +411,6 @@ static esp_err_t cb_radar_get_status(const cJSON *args, char *resp, int resp_siz
     return ESP_OK;
 }
 
-/* --- Light Sensor Callbacks --- */
-
-static esp_err_t cb_light_get_status(const cJSON *args, char *resp, int resp_size)
-{
-    (void)args;
-    device_state_t state = {0};
-    esp_err_t ret = device_state_get(&state);
-    if (ret != ESP_OK) {
-        snprintf(resp, resp_size, "{\"ok\":false,\"error\":\"state get failed\"}");
-        return ret;
-    }
-    snprintf(resp, resp_size,
-             "{\"ok\":true,\"level\":%d,\"lux\":%.2f}",
-             state.ambient_light.level,
-             state.ambient_light.lux);
-    return ESP_OK;
-}
-
 /* --- Servo Callbacks --- */
 /* Servo ID mapping: 0=EM3 (bus ID 4, range 0-3000), 1-4=LX (bus IDs 1,2,3,5, range 0-1000).
  * Because servo_service_set_all_positions moves all 5 servos as a group, single-servo
@@ -581,7 +559,6 @@ static const tool_entry_t s_tool_dispatch[] = {
     {"lcd.disable_blink",     cb_lcd_disable_blink},
     {"system.get_info",        cb_system_get_info},
     {"radar.get_status",       cb_radar_get_status},
-    {"light.get_status",       cb_light_get_status},
     {"servo.set_position",     cb_servo_set_position},
     {"servo.get_position",     cb_servo_get_position},
     {"servo.go_home",          cb_servo_go_home},

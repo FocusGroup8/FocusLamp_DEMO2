@@ -173,4 +173,15 @@ menu "Radar Configuration"
             and does not affect other features. Console command
             'radar_ld6002' can stop/restart it at runtime.
 
+    menu "Demo"
+        config PROJECT_DEMO_FAKE_DETECTION_ENABLE
+            bool "Enable demo fake detection (play phone / sedentary timers)"
+            default n
+            help
+                Start the demo fake phone/computer and sedentary detection
+                timers at boot for demonstration without the real VLM
+                pipeline. Disabled by default so the fake broadcasts do not
+                interfere with the real algorithm-driven reminders.
+    endmenu
+
 endmenu

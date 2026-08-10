@@ -76,21 +76,6 @@ static bool check_radar_trigger(const custom_trigger_t *trigger, const event_t *
     return (trigger->config.radar.present == human_present);
 }
 
-static bool check_light_trigger(const custom_trigger_t *trigger)
-{
-    device_state_t state;
-    if (device_state_get(&state) != ESP_OK) {
-        return false;
-    }
-
-    uint8_t level = state.ambient_light.level;
-    if (trigger->config.light_level.above) {
-        return level >= trigger->config.light_level.threshold;
-    } else {
-        return level <= trigger->config.light_level.threshold;
-    }
-}
-
 static bool check_touch_trigger(const custom_trigger_t *trigger, const event_t *event)
 {
     if (event == NULL) return false;
@@ -237,9 +222,9 @@ static void rule_timer_callback(void *arg)
             break;
 
         case CUSTOM_TRIGGER_TYPE_LIGHT_LEVEL:
-            if (check_light_trigger(&s_rules[i].trigger)) {
-                execute_rule(i);
-            }
+            /* Light level trigger disabled: the ambient light sensor module
+             * has been removed from the hardware. */
+            ESP_LOGW(TAG, "Light level trigger skipped (light sensor removed)");
             break;
 
         default:

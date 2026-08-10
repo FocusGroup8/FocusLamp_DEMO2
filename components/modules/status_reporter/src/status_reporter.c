@@ -106,10 +106,6 @@ static int build_status_json(char *buf, int buf_size, const char *trigger,
     float br = state.radar.breath_rate_bpm;
     float dist = state.radar.distance_cm;
 
-    /* Ambient light */
-    uint8_t al_level = state.ambient_light.level;
-    float al_lux = state.ambient_light.lux;
-
     /* Display state (placeholder - lcd_driver doesn't expose getters) */
     bool display_on = true;
     uint8_t display_brightness = 0;
@@ -125,7 +121,6 @@ static int build_status_json(char *buf, int buf_size, const char *trigger,
              "\"servo\":{\"em3_pos\":%d,\"lx_pos\":[%d,%d,%d,%d]},"
              "\"radar\":{\"present\":%s,\"heart_rate_bpm\":%.1f,"
              "\"breath_rate_bpm\":%.1f,\"distance_cm\":%.1f},"
-             "\"ambient_light\":{\"level\":%d,\"lux\":%.1f},"
              "\"system\":{\"free_heap\":%lu,\"wifi_rssi\":%d,\"uptime\":%lu}}",
              PROJECT_NAME,
              SYSTEM_VERSION_MAJOR, SYSTEM_VERSION_MINOR, SYSTEM_VERSION_PATCH,
@@ -144,7 +139,6 @@ static int build_status_json(char *buf, int buf_size, const char *trigger,
              em3_pos, lx0, lx1, lx2, lx3,
              radar_present ? "true" : "false",
              hr, br, dist,
-             al_level, al_lux,
              (unsigned long)free_heap,
              rssi,
              (unsigned long)uptime);

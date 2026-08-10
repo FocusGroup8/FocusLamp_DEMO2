@@ -907,30 +907,9 @@ static const httpd_uri_t motion_greet_uri = { .uri = "/api/motion/greet", .metho
 static const httpd_uri_t motion_home_uri  = { .uri = "/api/motion/home",  .method = HTTP_POST, .handler = motion_home_handler,  .user_ctx = NULL };
 
 /*---------------------------------------------------------------
- * Demo Trio Handlers (5 endpoints)
+ * Demo Trio Handlers (4 endpoints; /api/ambient removed with the light
+ * sensor module — the head board no longer queries ambient brightness)
  *-------------------------------------------------------------*/
-
-/* Handler: GET /api/ambient - 环境光等级查询（0-4） */
-static esp_err_t ambient_get_handler(httpd_req_t *req) {
-  device_state_t state = {0};
-  esp_err_t ret = device_state_get(&state);
-  if (ret != ESP_OK) {
-    return send_error_500(req, "device_state_get failed");
-  }
-
-  char json[64];
-  snprintf(json, sizeof(json), "{\"ok\":true,\"level\":%u}",
-           state.ambient_light.level);
-  ESP_LOGI(TAG, "GET /api/ambient -> %s", json);
-  return send_json_response(req, json);
-}
-
-static const httpd_uri_t ambient_get_uri = {
-    .uri = "/api/ambient",
-    .method = HTTP_GET,
-    .handler = ambient_get_handler,
-    .user_ctx = NULL,
-};
 
 /* Handler: POST /api/arm/gesture - 拇指手势驱动机械臂上下（servo0 单步） */
 static esp_err_t arm_gesture_handler(httpd_req_t *req) {
@@ -1015,6 +994,9 @@ static esp_err_t detect_phone_handler(httpd_req_t *req) {
   }
 
   const char *text = NULL;
+  /* TTS 播报只接受短指令触发，云端（语音板）将短指令映射为完整文案，
+   * 与欢迎语机制一致。基座板为 VLM 检测的唯一播报源：
+   * 灯头板只转发 /api/detect/phone，不再直接注入 TTS。 */
   if (strcmp(s->valuestring, "phone") == 0) {
     text = "提醒玩手机";
   } else if (strcmp(s->valuestring, "computer") == 0) {
@@ -1084,6 +1066,45 @@ static const httpd_uri_t companion_stop_uri = {
     .user_ctx = NULL,
 };
 
+/* Handler: POST /api/chat/state - 语音板上报对话状态
+ *
+ * Body: {"active":true|false}
+ * The voice board reports whether a voice dialogue is active
+ * (LISTENING/SPEAKING). focus_app uses this to pause the focus countdown
+ * during voice dialogue.
+ */
+static esp_err_t chat_state_handler(httpd_req_t *req) {
+  char body[REST_BODY_BUF_SIZE];
+  if (read_post_body(req, body, sizeof(body)) != 0) {
+    return send_error_500(req, "read body failed");
+  }
+
+  bool active = false;
+  cJSON *root = cJSON_Parse(body);
+  if (root) {
+    cJSON *a = cJSON_GetObjectItem(root, "active");
+    if (cJSON_IsBool(a)) {
+      active = cJSON_IsTrue(a);
+    }
+    cJSON_Delete(root);
+  }
+
+  esp_err_t ret = device_state_set_voice_active(active);
+  if (ret != ESP_OK) {
+    return send_error_500(req, "device_state_set_voice_active failed");
+  }
+
+  ESP_LOGI(TAG, "POST /api/chat/state active=%s", active ? "true" : "false");
+  return send_json_response(req, "{\"ok\":true}");
+}
+
+static const httpd_uri_t chat_state_uri = {
+    .uri = "/api/chat/state",
+    .method = HTTP_POST,
+    .handler = chat_state_handler,
+    .user_ctx = NULL,
+};
+
 /*---------------------------------------------------------------
  * Init / Deinit
  *-------------------------------------------------------------*/
@@ -1126,12 +1147,13 @@ static const httpd_uri_t *const s_rest_uris[] = {
     &motion_dance_uri,
     &motion_greet_uri,
     &motion_home_uri,
-    /* Demo trio (5) */
-    &ambient_get_uri,
+    /* Demo trio (4; /api/ambient removed with light sensor) */
     &arm_gesture_uri,
     &detect_phone_uri,
     &companion_start_uri,
     &companion_stop_uri,
+    /* Voice board chat state */
+    &chat_state_uri,
 };
 #define REST_URI_COUNT (sizeof(s_rest_uris) / sizeof(s_rest_uris[0]))
 

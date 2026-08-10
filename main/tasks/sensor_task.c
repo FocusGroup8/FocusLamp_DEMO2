@@ -1,11 +1,12 @@
 /*
  * sensor_task.c - 传感器采集任务实现
  *
- * 初始化雷达模块及分析器，处理 UART 事件与解析帧，读取环境光并发布事件。
+ * 初始化雷达模块及分析器，处理 UART 事件与解析帧。
  * 雷达模块为必须依赖，初始化失败则退出本任务；分析器初始化失败仅告警继续运行。
  *
  * 当 CONFIG_PROJECT_RADAR_LD6002_ENABLE 开启时，雷达由独立的 radar_ld6002
- * 模块处理，本任务仅保留环境光采集，避免与 radar_ld6002 争用同一 UART。
+ * 模块处理，本任务仅维持运行标志，避免与 radar_ld6002 争用同一 UART。
+ * （环境光采集已随光感模块移除。）
  */
 
 #include "sensor_task.h"
@@ -31,9 +32,8 @@
 
 static const char *TAG = "sensor_task";
 
-/* 任务状态：雷达任务句柄与运行标志 */
-static TaskHandle_t s_radar_task_handle  = NULL;
-static bool         s_radar_task_running = false;
+/* 任务状态：运行标志 */
+static bool s_radar_task_running = false;
 
 void sensor_task(void *pvParameters)
 {
@@ -78,17 +78,19 @@ void sensor_task(void *pvParameters)
     s_radar_task_running = true;
     ESP_LOGI(TAG, "Radar sensor task initialized");
 #else
-    ESP_LOGI(TAG, "Radar handled by radar_ld6002; sensor_task runs ambient-light only");
+    ESP_LOGI(TAG, "Radar handled by radar_ld6002; sensor_task keeps running flag only (light sensor removed)");
     s_radar_task_running = true;
 #endif
 
+#if !CONFIG_PROJECT_RADAR_LD6002_ENABLE
     uint32_t elapsed_ms = 0;
     const TickType_t start_tick = xTaskGetTickCount();
+#endif
 
     while (1) {
+#if !CONFIG_PROJECT_RADAR_LD6002_ENABLE
         elapsed_ms = pdTICKS_TO_MS(xTaskGetTickCount() - start_tick);
 
-#if !CONFIG_PROJECT_RADAR_LD6002_ENABLE
         /* 处理来自雷达驱动的 UART 事件 */
         uart_event_t uart_event = {0};
         BaseType_t has_event = xQueueReceive(radar_event_queue, &uart_event, pdMS_TO_TICKS(100));
@@ -105,16 +107,7 @@ void sensor_task(void *pvParameters)
         while (xQueueReceive(frame_queue, &frame, 0) == pdPASS) {
             radar_frame_handler_handle(&frame, elapsed_ms);
         }
-#endif
 
-        /* 读取环境光传感器并送入 PID 平滑 */
-        float lux = 0.0f;
-        esp_err_t lret = sensor_service_get_light_lux(&lux);
-        if (lret == ESP_OK) {
-            sensor_service_feed_sample(lux);
-        }
-
-#if !CONFIG_PROJECT_RADAR_LD6002_ENABLE
         /* 检测雷达超时 */
         if (radar_module_is_timeout()) {
             static uint8_t s_radar_timeout_count = 0;

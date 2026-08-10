@@ -189,27 +189,6 @@ static void on_touch_release(event_t *event, void *context)
 
 /* ===================== Sensor Event Handlers ===================== */
 
-static void on_sensor_ambient_light_changed(event_t *event, void *context)
-{
-    (void)context;
-    if (event->data != NULL && event->data_size == sizeof(float)) {
-        float lux = *(const float *)event->data;
-        /* Map lux to 0-4 level */
-        uint8_t level = 0;
-        if (lux > 1000.0f) {
-            level = 4;
-        } else if (lux > 500.0f) {
-            level = 3;
-        } else if (lux > 100.0f) {
-            level = 2;
-        } else if (lux > 20.0f) {
-            level = 1;
-        }
-        device_state_set_ambient_light(level, lux);
-        ESP_LOGD(TAG, "Ambient light: %.2f lux, level %d", lux, level);
-    }
-}
-
 static void on_radar_presence(event_t *event, void *context)
 {
     (void)context;
@@ -671,10 +650,6 @@ esp_err_t app_event_handler_init(void)
     if (ret != ESP_OK) return ret;
 
     ret = event_bus_subscribe(EV_APP_FOCUS_TIMER_DONE, on_app_focus_timer_done, NULL);
-    if (ret != ESP_OK) return ret;
-
-    /* === Sensor Events === */
-    ret = event_bus_subscribe(EV_SENSOR_AMBIENT_LIGHT_CHANGED, on_sensor_ambient_light_changed, NULL);
     if (ret != ESP_OK) return ret;
 
     /* === Radar Events === */

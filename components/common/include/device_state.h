@@ -70,11 +70,6 @@ typedef struct {
 } device_servo_state_t;
 
 typedef struct {
-    uint8_t  level;          /* 0-4 */
-    float    lux;
-} device_ambient_light_state_t;
-
-typedef struct {
     uint8_t  last_point;     /* Last active touch point */
     uint8_t  last_event;     /* touch_event_t */
     uint32_t last_event_time_ms;
@@ -93,8 +88,12 @@ typedef struct {
     device_audio_state_t        audio;
     device_radar_state_t        radar;
     device_servo_state_t        servo;
-    device_ambient_light_state_t ambient_light;
     device_key_state_t          key;
+
+    /* Voice board chat state (reported via POST /api/chat/state):
+     * true while the voice board is in a dialogue (LISTENING/SPEAKING).
+     * Used by focus_app to pause the countdown during voice dialogue. */
+    bool voice_active;
 } device_state_t;
 
 /* ===================== Public API ===================== */
@@ -139,14 +138,14 @@ esp_err_t device_state_set_radar(bool present, float heart_rate, float breath_ra
 esp_err_t device_state_set_servo(int16_t em3_pos, const int16_t lx_pos[4], bool valid);
 
 /**
- * @brief Update ambient light state.
- */
-esp_err_t device_state_set_ambient_light(uint8_t level, float lux);
-
-/**
  * @brief Update key/touch state.
  */
 esp_err_t device_state_set_key(uint8_t point, uint8_t event, uint32_t event_time_ms, uint8_t active_points);
+
+/**
+ * @brief Set the voice board chat state (true = dialogue active).
+ */
+esp_err_t device_state_set_voice_active(bool active);
 
 #ifdef __cplusplus
 }

@@ -5,37 +5,9 @@ menu "Light Control Module Configuration"
         default n
         help
             Enable or disable the light control module.
-            This module provides light control functionality including manual control and automatic adjustment.
-
-    config LIGHT_CONTROL_AUTO_MODE
-        bool "Enable Automatic Light Adjustment"
-        default n
-        depends on PROJECT_ENABLE_LIGHT_CONTROL && PROJECT_ENABLE_LIGHT_SENSOR
-        help
-            Enable automatic light adjustment based on ambient light sensor.
-            This feature requires the light sensor driver to be enabled.
-            If disabled, only manual control is available.
-
-    config LIGHT_CONTROL_TASK_STACK_SIZE
-        int "Light Control Task Stack Size"
-        default 4096
-        depends on PROJECT_ENABLE_LIGHT_CONTROL && LIGHT_CONTROL_AUTO_MODE
-        help
-            Stack size for the light control task in bytes.
-
-    config LIGHT_CONTROL_TASK_PRIORITY
-        int "Light Control Task Priority"
-        default 5
-        depends on PROJECT_ENABLE_LIGHT_CONTROL && LIGHT_CONTROL_AUTO_MODE
-        help
-            Priority for the light control task (0-31, higher number = higher priority).
-
-    config LIGHT_CONTROL_TASK_INTERVAL_MS
-        int "Light Control Task Interval (ms)"
-        default 1000
-        depends on PROJECT_ENABLE_LIGHT_CONTROL && LIGHT_CONTROL_AUTO_MODE
-        help
-            Interval between light sensor readings in milliseconds.
+            This module provides manual light control via the UART light
+            controller. Automatic light adjustment based on the ambient light
+            sensor was removed together with the light sensor module.
 
     config LIGHT_CONTROL_DEFAULT_BRIGHTNESS
         int "Default LED Brightness"

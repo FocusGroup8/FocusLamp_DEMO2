@@ -16,8 +16,7 @@ extern "C" {
 
 /* ===================== Sensor Type Enumeration ===================== */
 typedef enum {
-    SENSOR_TYPE_AMBIENT_LIGHT = 0,
-    SENSOR_TYPE_RADAR,
+    SENSOR_TYPE_RADAR = 0,
 } sensor_type_t;
 
 /* ===================== Radar Data Structure ===================== */
@@ -29,17 +28,11 @@ typedef void (*sensor_cb_t)(sensor_type_t type, void *data, size_t data_size);
 
 /**
  * @brief Initialize sensor service.
- *        Subscribes to EV_SENSOR_* events and initializes light_sensor_driver and radar_driver.
+ *        Subscribes to EV_SENSOR_* events and initializes radar_driver.
+ *        (The ambient light sensor module has been removed.)
  * @return esp_err_t
  */
 esp_err_t sensor_service_init(void);
-
-/**
- * @brief Get ambient light level in lux.
- * @param[out] lux  Measured illuminance
- * @return esp_err_t
- */
-esp_err_t sensor_service_get_light_lux(float *lux);
 
 /**
  * @brief Get radar sensor data.
@@ -66,29 +59,6 @@ esp_err_t sensor_service_stop_monitoring(void);
  * @return esp_err_t
  */
 esp_err_t sensor_service_set_sampling_interval(uint32_t interval_ms);
-
-/**
- * @brief Feed a raw light sensor sample for averaging and smoothing.
- *        Called periodically (e.g. every 100ms) by sensor_task.
- *        Internal PID-like filter accumulates 10-second block averages,
- *        applies EMA smoothing, and publishes a smoothed value once per minute.
- * @param lux  Raw lux reading
- */
-void sensor_service_feed_sample(float lux);
-
-/**
- * @brief Get the current smoothed (EMA-filtered) lux value.
- * @param[out] lux  Smoothed illuminance
- * @return esp_err_t
- */
-esp_err_t sensor_service_get_smoothed_lux(float *lux);
-
-/**
- * @brief Convert lux value to brightness level (0-4).
- * @param lux  Illuminance in lux
- * @return uint8_t  Level 0 (dark) through 4 (very bright)
- */
-uint8_t sensor_service_lux_to_level(float lux);
 
 /**
  * @brief Register a callback for sensor data updates.

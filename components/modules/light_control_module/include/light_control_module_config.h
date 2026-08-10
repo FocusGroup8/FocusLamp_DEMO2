@@ -4,6 +4,9 @@
  *
  * This file maps Kconfig options to C macros for the light control module.
  *
+ * NOTE: The ambient light sensor module has been removed, so the automatic
+ * light adjustment (AUTO_MODE / task) configuration is no longer present.
+ *
  * @author CottonLin
  * @date 2026-04-28
  * @version 1.0.0
@@ -26,27 +29,6 @@ extern "C"
 #define LIGHT_CONTROL_ENABLE CONFIG_PROJECT_ENABLE_LIGHT_CONTROL
 
 #if (LIGHT_CONTROL_ENABLE == 1)
-
-#ifdef CONFIG_LIGHT_CONTROL_AUTO_MODE
-/** @brief Enable automatic light adjustment mode */
-#define LIGHT_CONTROL_AUTO_MODE 1
-#else
-/** @brief Disable automatic light adjustment mode */
-#define LIGHT_CONTROL_AUTO_MODE 0
-#endif
-
-#if (LIGHT_CONTROL_AUTO_MODE == 1)
-
-/** @brief Light control task stack size */
-#define LIGHT_CONTROL_TASK_STACK_SIZE CONFIG_LIGHT_CONTROL_TASK_STACK_SIZE
-
-/** @brief Light control task priority */
-#define LIGHT_CONTROL_TASK_PRIORITY CONFIG_LIGHT_CONTROL_TASK_PRIORITY
-
-/** @brief Light control task interval in milliseconds */
-#define LIGHT_CONTROL_TASK_INTERVAL_MS CONFIG_LIGHT_CONTROL_TASK_INTERVAL_MS
-
-#endif
 
 /** @brief Default LED brightness */
 #define LIGHT_CONTROL_DEFAULT_BRIGHTNESS CONFIG_LIGHT_CONTROL_DEFAULT_BRIGHTNESS

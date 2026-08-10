@@ -32,6 +32,16 @@
 #include "event_def.h"
 #include "data_type.h"
 
+/* The real implementation helpers below (static callbacks, MCP tools, mic
+ * control) are compiled even in stub mode because they are not inside the
+ * XIAOZHI_MANAGER_ENABLE guard. On the base board the module is disabled
+ * (sdkconfig), so these helpers are unused there; suppress the warnings. */
+#if (XIAOZHI_MANAGER_ENABLE != 1)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wunused-variable"
+#endif
+
 static const char *TAG = "XIAOZHI_MGR";
 
 static xiaozhi_manager_state_t s_state = XIAOZHI_MANAGER_STATE_IDLE;
@@ -761,3 +771,7 @@ esp_err_t xiaozhi_manager_start_listening(int mode) { (void)mode; return ESP_ERR
 esp_err_t xiaozhi_manager_stop_listening(void) { return ESP_ERR_NOT_SUPPORTED; }
 
 #endif /* XIAOZHI_MANAGER_ENABLE */
+
+#if (XIAOZHI_MANAGER_ENABLE != 1)
+#pragma GCC diagnostic pop
+#endif

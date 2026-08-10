@@ -8,7 +8,6 @@
 #include "led_service.h"
 #include "lcd_service.h"
 #include "audio_service.h"
-#include "xiaozhi_manager.h"
 #include "lamp_head_controller.h"
 #include "tts_bridge.h"
 #include "data_type.h"
@@ -67,15 +66,16 @@ static void focus_app_stop_white_noise(void)
 
 static void focus_app_timer_callback(void *arg)
 {
-    /* 语音对话时暂停倒计时：检测小智是否正在说话或聆听 */
-    xiaozhi_manager_state_t xz_state = xiaozhi_manager_get_state();
-    bool voice_active = (xz_state == XIAOZHI_MANAGER_STATE_SPEAKING ||
-                         xz_state == XIAOZHI_MANAGER_STATE_LISTENING);
+    /* 语音对话时暂停倒计时：读取语音板上报的对话状态
+     * （语音板经 POST /api/chat/state 写入 device_state.voice_active） */
+    device_state_t state = {0};
+    device_state_get(&state);
+    bool voice_active = state.voice_active;
 
     if (voice_active) {
         if (!s_paused) {
             s_paused = true;
-            ESP_LOGI(TAG, "Countdown paused: voice dialogue active (state=%d)", xz_state);
+            ESP_LOGI(TAG, "Countdown paused: voice dialogue active");
         }
         event_bus_publish_simple(EV_APP_FOCUS_TIMER_TICK);
         return;
@@ -89,8 +89,6 @@ static void focus_app_timer_callback(void *arg)
     s_elapsed_sec++;
 
     /* 在位连续≥60s（倒计时运行中，即非语音对话）播报久坐提醒 */
-    device_state_t state = {0};
-    device_state_get(&state);
     if (state.radar.present) {
         s_seated_sec++;
         if (s_seated_sec >= FOCUS_SEATED_REMIND_SEC && !s_seated_notified) {

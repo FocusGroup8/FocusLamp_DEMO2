@@ -7,7 +7,7 @@
 | 电源管理 | PWR_CTRL | GPIO23 | M3-23 | 系统电源控制（MOSFET 开关） |
 | 电源管理 | ESP_EN | GPIO45 | M3-45 | ESP32-P4 主控使能 |
 | RGB LED | LED_DIN | GPIO6 | M3-24 | WS2812 LED 灯带数据输入 (RMT) |
-| 环境光 | TEMT_OUT | GPIO21 | M3-33 | TEMT6000 环境光传感器模拟输出 (ADC) |
+| ~~环境光~~ | ~~TEMT_OUT~~ | ~~GPIO21~~ | ~~M3-33~~ | ~~TEMT6000 环境光传感器模拟输出~~（已随光感模块移除） |
 | 触摸 A | TTP_A | GPIO9 | M3-34 | 触摸点 A 输入 (TTP223) |
 | 触摸 B | TTP_B | GPIO22 | M3-35 | 触摸点 B 输入 (TTP223) |
 | 触摸 C | TTP_C | GPIO10 | M3-36 | 触摸点 C 输入 (TTP223) |
@@ -62,7 +62,7 @@
 | GPIO22 | TTP_B | 触摸 B |
 | GPIO10 | TTP_C | 触摸 C |
 | GPIO23 | TTP_D | 触摸 D |
-| GPIO21 | TEMT_OUT | 环境光 (ADC 输入) |
+| ~~GPIO21~~ | ~~TEMT_OUT~~ | ~~环境光 (ADC 输入)~~（已随光感模块移除） |
 
 ### UART 接口
 | UART | TX | RX | 用途 |

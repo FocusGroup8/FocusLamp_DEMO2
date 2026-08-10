@@ -1,5 +1,9 @@
 /*
  * bsp_adc.h - ADC initialization and reading for FocusLamp BSP
+ *
+ * NOTE: The ambient light sensor module (TEMT6000 on GPIO21/ADC1_CH5) has
+ * been removed from the hardware. bsp_adc_init() is no longer called by
+ * app_init; the API below is retained for potential future analog sensors.
  */
 
 #pragma once

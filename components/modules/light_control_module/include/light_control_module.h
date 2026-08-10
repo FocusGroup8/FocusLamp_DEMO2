@@ -6,18 +6,17 @@
  * which controls lights via UART communication with an ESP32-C3 device.
  *
  * The module provides:
- * - Automatic light adjustment based on ambient light sensor
  * - Manual light control
  * - UART communication with ESP32-C3 light controller
  *
  * Configuration is managed through Kconfig system:
  * - PROJECT_ENABLE_LIGHT_CONTROL: Enable/disable the module
- * - LIGHT_CONTROL_AUTO_MODE: Enable automatic light adjustment
- * - LIGHT_CONTROL_TASK_STACK_SIZE: Task stack size
- * - LIGHT_CONTROL_TASK_PRIORITY: Task priority
- * - LIGHT_CONTROL_TASK_INTERVAL_MS: Task interval
+ * - LIGHT_CONTROL_DEFAULT_BRIGHTNESS: Default LED brightness
  * - LIGHT_CONTROL_DEFAULT_WARM/COLD: Default CCT LED brightness
  * - LIGHT_CONTROL_DEFAULT_COLOR_R/G/B: Default WS2812 color
+ *
+ * NOTE: Automatic light adjustment based on the ambient light sensor was
+ * removed together with the light sensor module. Only manual control remains.
  *
  * @author CottonLin
  * @date 2026-04-28
@@ -50,11 +49,9 @@ extern "C"
     /**
      * @brief Initialize the light control module
      *
-     * This function initializes the light control module and starts the
-     * automatic light adjustment task (if enabled).
+     * This function initializes the light control module.
      *
      * @note This function initializes the UART light controller internally.
-     * @note If LIGHT_CONTROL_AUTO_MODE is enabled, light_sensor_driver must be initialized first.
      *
      * @return esp_err_t
      *      - ESP_OK: Success
@@ -80,9 +77,9 @@ extern "C"
      * @param[in] enable true to enable, false to disable
      *
      * @return esp_err_t
-     *      - ESP_OK: Success
+     *      - ESP_OK: Success (disable)
      *      - ESP_ERR_INVALID_STATE: Module not initialized
-     *      - ESP_ERR_NOT_SUPPORTED: Auto mode not available (light sensor disabled)
+     *      - ESP_ERR_NOT_SUPPORTED: Auto mode not available (light sensor removed)
      */
     esp_err_t light_control_module_set_auto_mode(bool enable);
 
@@ -150,7 +147,7 @@ extern "C"
      * @return esp_err_t
      *      - ESP_OK: Success
      *      - ESP_ERR_INVALID_STATE: Module not initialized
-     *      - ESP_ERR_NOT_SUPPORTED: Light sensor not available
+     *      - ESP_ERR_NOT_SUPPORTED: Light sensor not available (module removed)
      */
     esp_err_t light_control_module_get_lux(float* lux);
 

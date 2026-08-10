@@ -101,7 +101,7 @@
 - 直接操作硬件外设（RMT/SPI/I2C/UART/I2S/ADC）
 - 不包含业务逻辑，只提供底层硬件抽象
 - 每个驱动有独立的 init/set/get 接口
-- 驱动列表：power_driver、led_driver、light_sensor_driver、touch_driver、lcd_driver、audio_driver、servo_driver、radar_driver、uart2_driver
+- 驱动列表：power_driver、led_driver、touch_driver、lcd_driver、audio_driver、servo_driver、radar_driver、uart2_driver（light_sensor_driver 已随光感模块移除）
 
 ### 5. services 层（服务层）
 - 封装驱动层，提供面向功能的高级接口
@@ -143,14 +143,14 @@
             → focus_app 启动
 ```
 
-### 3.2 典型数据流 — 环境光感应
+### 3.2 典型数据流 — 雷达感应（环境光感应已随光感模块移除）
 
 ```
-TEMT6000 (模拟输出) → light_sensor_driver (ADC读取)
+雷达模块 → radar_driver (UART解析)
   → sensor_service (数据处理)
-    → 发布 EV_SENSOR_AMBIENT_LIGHT_CHANGED 事件
-      → led_service (自动亮度调节)
-      → lcd_service (自动背光调节)
+    → 发布 EV_RADAR_* 事件
+      → app_event_handler (更新 device_state：在场/心率/呼吸/HRV)
+      → focus_app (在位久坐提醒，雷达为主播报源)
 ```
 
 ### 3.3 典型数据流 — 双板通信

@@ -26,10 +26,20 @@ static const char *TAG = "radar_data_task";
 static TaskHandle_t s_radar_data_task_handle  = NULL;
 static bool         s_radar_data_task_running = false;
 
+/* project_config.h also defines these; keep the local (finer-grained) values
+ * without triggering -Wmacro-redefined. */
+#ifndef RADAR_TASK_PERIOD_MS
 #define RADAR_TASK_PERIOD_MS    20
+#endif
+#ifndef RADAR_DATA_TIMEOUT_MS
 #define RADAR_DATA_TIMEOUT_MS   15000
+#endif
+#ifndef RADAR_TASK_STACK_SIZE
 #define RADAR_TASK_STACK_SIZE   TASK_STACK_RADAR
+#endif
+#ifndef RADAR_TASK_PRIORITY
 #define RADAR_TASK_PRIORITY     PRIORITY_RADAR
+#endif
 #define RADAR_TASK_NAME         "radar_data_task"
 
 static void radar_data_task_cleanup(void)

@@ -47,6 +47,7 @@ void servo_task(void *pvParameters)
             frame.time_ms = esp_timer_get_time() / 1000;
 
             /* 帧由 servo_service 内部处理 */
+            (void)frame;
         }
 
         /* 处理回放状态 */

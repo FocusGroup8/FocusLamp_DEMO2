@@ -113,6 +113,12 @@ esp_err_t focuslamp_bridge_motion_dance(void);
 esp_err_t focuslamp_bridge_motion_greet(void);
 esp_err_t focuslamp_bridge_motion_home(void);
 
+/* Chat state reporting (voice board -> base board)
+ * Reports whether a voice dialogue is active (LISTENING/SPEAKING) so the
+ * base board's focus_app can pause the countdown during dialogue.
+ * POST /api/chat/state {"active":true|false} */
+esp_err_t focuslamp_bridge_chat_state(bool active);
+
 #ifdef __cplusplus
 }
 #endif

@@ -10,7 +10,9 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -27,6 +29,7 @@
 
 #include "audio_bridge.h"
 #include "device_controller.h"
+#include "focuslamp_bridge.h"
 #include "mipi_dsi_bridge.h"
 #include "task_manager.h"
 #include "wake_word_engine.h"
@@ -63,6 +66,30 @@ static bool s_chat_config_saved = false;
 static bool s_mic_active = false;
 static bool s_mic_paused_for_tts = false;
 static SemaphoreHandle_t s_mic_mutex = NULL;
+
+/* Async TTS speak queue + task.
+ * xiaozhi_manager_speak() enqueues a request and returns immediately, so
+ * the calling task (REST /api/tts/speak handler, MCP notification.speak /
+ * audio_speaker.play_tts) is never blocked. A dedicated task processes
+ * requests one at a time running the state machine (abort current TTS /
+ * open audio channel / inject text). This fixes the previous synchronous
+ * behavior that blocked the HTTP handler for up to 6s, causing TTS
+ * injection to fail silently and the device to appear unresponsive. */
+#define SPEAK_TEXT_MAX_LEN 256
+#define SPEAK_QUEUE_LEN 8
+#define SPEAK_TASK_STACK_SIZE 4096
+
+typedef struct {
+  char text[SPEAK_TEXT_MAX_LEN];
+  int priority;
+} speak_request_t;
+
+static QueueHandle_t s_speak_queue = NULL;
+static TaskHandle_t s_speak_task = NULL;
+
+/* Forward declarations */
+static void speak_task_func(void *arg);
+static esp_err_t speak_process_request(const speak_request_t *req);
 
 /* Forward declarations for MCP tool callbacks */
 static esp_mcp_value_t
@@ -303,25 +330,6 @@ static void mic_start_if_needed(void) {
     xSemaphoreGive(s_mic_mutex);
 }
 
-static void mic_stop_if_needed(void) {
-  if (s_mic_mutex &&
-      xSemaphoreTake(s_mic_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
-    ESP_LOGW(TAG, "Failed to take mic mutex in mic_stop_if_needed");
-    return;
-  }
-  if (!s_mic_active) {
-    if (s_mic_mutex)
-      xSemaphoreGive(s_mic_mutex);
-    return;
-  }
-  audio_bridge_mic_stop();
-  s_mic_active = false;
-  s_mic_paused_for_tts = false;
-  ESP_LOGI(TAG, "Microphone capture stopped");
-  if (s_mic_mutex)
-    xSemaphoreGive(s_mic_mutex);
-}
-
 static void mic_pause_for_tts(void) {
   if (s_mic_mutex &&
       xSemaphoreTake(s_mic_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
@@ -418,12 +426,9 @@ static void xiaozhi_event_callback(esp_xiaozhi_chat_event_t event,
                                (void *)"speaking");
         break;
       case ESP_XIAOZHI_CHAT_TTS_STATE_STOP:
-        /* TTS finished — return to LISTENING to continue conversation.
-         * Aligned with official esp_xiaozhi state machine:
-         *   kDeviceStateSpeaking -> kDeviceStateListening
-         * This allows user to continue speaking without saying wake
-         * word again. Conversation ends only on SERVER_GOODBYE or
-         * AUDIO_CHANNEL_CLOSED. */
+        /* TTS finished — return to LISTENING to continue the conversation.
+         * After a touch-triggered welcome broadcast the audio channel stays
+         * open so the user can keep talking without saying the wake word. */
         s_state = XIAOZHI_MANAGER_STATE_LISTENING;
         /* Flush any stale OPUS frames from the decode queue.
          * Without this, leftover frames continue writing to I2S
@@ -804,6 +809,17 @@ static esp_err_t register_mcp_tools(void) {
     return ret;
   }
 
+  /* FocusLamp (base board) MCP tools must be registered here too: the
+   * reconnect path recreates the MCP engine and re-runs this function.
+   * Previously they were only registered from app_main, so after any
+   * reconnect the cloud's tools/list no longer contained self.focuslamp.*
+   * and the LLM could not invoke focus.start / companion.start. */
+  ret = focuslamp_bridge_register_mcp_tools(s_mcp_engine);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to register focuslamp_bridge MCP tools");
+    return ret;
+  }
+
   ESP_LOGI(TAG, "All MCP tools registered successfully");
   return ESP_OK;
 }
@@ -946,6 +962,39 @@ esp_err_t xiaozhi_manager_init(const xiaozhi_manager_config_t *config) {
 
   esp_xiaozhi_chat_free_info(&info);
 
+  /* Create async TTS speak queue + task. Placed last so no error path
+   * above needs to clean them up. */
+  s_speak_queue = xQueueCreate(SPEAK_QUEUE_LEN, sizeof(speak_request_t));
+  if (!s_speak_queue) {
+    ESP_LOGE(TAG, "Failed to create speak queue");
+    esp_xiaozhi_chat_stop(s_chat_handle);
+    esp_xiaozhi_chat_deinit(s_chat_handle);
+    s_chat_handle = 0;
+    mipi_dsi_bridge_deinit();
+    device_controller_deinit();
+    task_manager_deinit();
+    vSemaphoreDelete(s_mic_mutex);
+    s_mic_mutex = NULL;
+    return ESP_ERR_NO_MEM;
+  }
+  BaseType_t speak_task_ok = xTaskCreate(speak_task_func, "xiaozhi_speak",
+                                         SPEAK_TASK_STACK_SIZE, NULL,
+                                         tskIDLE_PRIORITY + 5, &s_speak_task);
+  if (speak_task_ok != pdPASS) {
+    ESP_LOGE(TAG, "Failed to create speak task");
+    vQueueDelete(s_speak_queue);
+    s_speak_queue = NULL;
+    esp_xiaozhi_chat_stop(s_chat_handle);
+    esp_xiaozhi_chat_deinit(s_chat_handle);
+    s_chat_handle = 0;
+    mipi_dsi_bridge_deinit();
+    device_controller_deinit();
+    task_manager_deinit();
+    vSemaphoreDelete(s_mic_mutex);
+    s_mic_mutex = NULL;
+    return ESP_ERR_NO_MEM;
+  }
+
   s_state = XIAOZHI_MANAGER_STATE_INITIALIZED;
   ESP_LOGI(TAG, "Xiaozhi manager initialized successfully");
 
@@ -983,6 +1032,16 @@ esp_err_t xiaozhi_manager_deinit(void) {
   if (s_mic_mutex) {
     vSemaphoreDelete(s_mic_mutex);
     s_mic_mutex = NULL;
+  }
+
+  /* Stop async speak task and free queue */
+  if (s_speak_task) {
+    vTaskDelete(s_speak_task);
+    s_speak_task = NULL;
+  }
+  if (s_speak_queue) {
+    vQueueDelete(s_speak_queue);
+    s_speak_queue = NULL;
   }
 
   s_mcp_engine = NULL;
@@ -1114,53 +1173,46 @@ esp_err_t xiaozhi_manager_send_audio(const char *data, size_t data_len) {
 
 esp_mcp_t *xiaozhi_manager_get_mcp_engine(void) { return s_mcp_engine; }
 
-esp_err_t xiaozhi_manager_speak(const char *text, int priority) {
-  ESP_RETURN_ON_FALSE(text, ESP_ERR_INVALID_ARG, TAG, "Invalid text");
-  ESP_RETURN_ON_FALSE(s_chat_handle, ESP_ERR_INVALID_STATE, TAG,
-                      "Not initialized");
-
-  ESP_LOGI(TAG, "Speak request: \"%s\" (priority=%d)", text, priority);
-
-  /* Proactive TTS injection — direct text injection without wake word.
-   *
-   * Send the command text directly as a listen detect message.
-   * The server's textHandle.py processes non-wake-word detect messages by
-   * calling startToChat(original_text) directly, which sends it to the LLM
-   * and returns TTS — without the wake word greeting.
-   *
-   * This means the user only hears the preset broadcast content (e.g.
-   * "该喝水啦！") without the preceding wake word acknowledgment.
-   *
-   * Requirements:
-   *   - Audio channel must be open (LISTENING state)
-   *   - If not open, open it first
-   *   - If currently speaking, abort first
-   */
+/*---------------------------------------------------------------
+ * Internal: Process a single speak request (runs in speak task context)
+ *
+ * Same state machine as the original synchronous flow, but executed in
+ * the dedicated speak task so the caller never blocks:
+ *   1. If currently speaking, abort and wait for TTS_STOP -> LISTENING
+ *   2. If connected but channel closed, open channel, wait for LISTENING
+ *   3. Only inject the text when in LISTENING state
+ *-------------------------------------------------------------*/
+static esp_err_t speak_process_request(const speak_request_t *req) {
+  ESP_LOGI(TAG, "Speak process: \"%s\" (prio=%d) state=%d", req->text,
+           req->priority, (int)s_state);
 
   /* If currently speaking, abort first and wait for TTS_STOP event
-   * to transition state back to LISTENING. The abort is asynchronous —
-   * the server sends TTS stop after processing the abort request. */
+   * to transition state back to LISTENING (or channel closed -> CONNECTED).
+   * The abort is asynchronous — the server sends TTS stop after processing
+   * the abort request. Do NOT bail out here; fall through so the
+   * CONNECTED branch below can re-open the channel if needed. */
   if (s_state == XIAOZHI_MANAGER_STATE_SPEAKING) {
-    ESP_LOGI(TAG, "Aborting current TTS for speak request");
+    ESP_LOGI(TAG, "Aborting current TTS for speak: \"%s\"", req->text);
     esp_xiaozhi_chat_send_abort_speaking(
         s_chat_handle,
         ESP_XIAOZHI_CHAT_ABORT_SPEAKING_REASON_WAKE_WORD_DETECTED);
-    /* Wait for TTS_STOP event to set state back to LISTENING.
-     * Typical abort->TTS_STOP latency is 100-500ms. */
+    /* Wait for the abort to take effect (TTS_STOP -> LISTENING, or
+     * CHANNEL_CLOSED -> CONNECTED). Typical latency is 100-500ms. */
     int wait_ms = 0;
     while (s_state == XIAOZHI_MANAGER_STATE_SPEAKING && wait_ms < 3000) {
       vTaskDelay(pdMS_TO_TICKS(50));
       wait_ms += 50;
     }
-    if (s_state != XIAOZHI_MANAGER_STATE_LISTENING) {
+    if (s_state == XIAOZHI_MANAGER_STATE_SPEAKING) {
       ESP_LOGW(TAG, "TTS abort not processed after %d ms (state=%d)", wait_ms,
-               s_state);
+               (int)s_state);
       return ESP_ERR_INVALID_STATE;
     }
   }
 
-  /* If not connected or audio channel not open, open it first */
+  /* If connected but audio channel not open, open it first */
   if (s_state == XIAOZHI_MANAGER_STATE_CONNECTED) {
+    ESP_LOGI(TAG, "Opening audio channel for speak: \"%s\"", req->text);
     esp_err_t ret = xiaozhi_manager_open_audio_channel();
     if (ret != ESP_OK) {
       ESP_LOGE(TAG, "Failed to open audio channel for speak: %s",
@@ -1178,14 +1230,14 @@ esp_err_t xiaozhi_manager_speak(const char *text, int priority) {
     }
     if (s_state != XIAOZHI_MANAGER_STATE_LISTENING) {
       ESP_LOGW(TAG, "Audio channel not ready after %d ms (state=%d)", wait_ms,
-               s_state);
+               (int)s_state);
       return ESP_ERR_INVALID_STATE;
     }
   }
 
   /* Only proceed when in LISTENING state (audio channel open) */
   if (s_state != XIAOZHI_MANAGER_STATE_LISTENING) {
-    ESP_LOGW(TAG, "Cannot speak in state %d, need LISTENING state", s_state);
+    ESP_LOGW(TAG, "Cannot speak in state %d, need LISTENING", (int)s_state);
     return ESP_ERR_INVALID_STATE;
   }
 
@@ -1193,7 +1245,7 @@ esp_err_t xiaozhi_manager_speak(const char *text, int priority) {
    * startToChat(text) without wake word greeting. This is the key change:
    * no wake word means no "你好小智" TTS response, so the user only
    * hears the actual broadcast content. */
-  esp_err_t ret = esp_xiaozhi_chat_send_wake_word(s_chat_handle, text);
+  esp_err_t ret = esp_xiaozhi_chat_send_wake_word(s_chat_handle, req->text);
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to send command text: %s", esp_err_to_name(ret));
     return ret;
@@ -1207,7 +1259,48 @@ esp_err_t xiaozhi_manager_speak(const char *text, int priority) {
     return ret;
   }
 
-  ESP_LOGI(TAG, "Direct text inject: \"%s\" (no wake word)", text);
+  ESP_LOGI(TAG, "Direct text inject: \"%s\" (no wake word)", req->text);
+  return ESP_OK;
+}
+
+/*---------------------------------------------------------------
+ * Internal: Async speak task
+ *-------------------------------------------------------------*/
+static void speak_task_func(void *arg) {
+  (void)arg;
+  speak_request_t req;
+  while (s_speak_task) {
+    if (xQueueReceive(s_speak_queue, &req, portMAX_DELAY) != pdTRUE) {
+      continue;
+    }
+    esp_err_t err = speak_process_request(&req);
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "Speak \"%s\" NOT broadcast: %s (state=%d)", req.text,
+               esp_err_to_name(err), (int)s_state);
+    }
+  }
+  vTaskDelete(NULL);
+}
+
+esp_err_t xiaozhi_manager_speak(const char *text, int priority) {
+  ESP_RETURN_ON_FALSE(text, ESP_ERR_INVALID_ARG, TAG, "Invalid text");
+  ESP_RETURN_ON_FALSE(s_chat_handle, ESP_ERR_INVALID_STATE, TAG,
+                      "Not initialized");
+  ESP_RETURN_ON_FALSE(s_speak_queue, ESP_ERR_INVALID_STATE, TAG,
+                      "Speak queue not ready");
+
+  /* Asynchronous enqueue — return immediately. The speak task processes
+   * the request in the background, so the REST handler / MCP tool is never
+   * blocked for the up-to-6s that the old synchronous flow took. */
+  speak_request_t req = {0};
+  req.priority = priority;
+  snprintf(req.text, sizeof(req.text), "%s", text);
+
+  if (xQueueSend(s_speak_queue, &req, 0) != pdTRUE) {
+    ESP_LOGW(TAG, "Speak queue full, dropping \"%s\"", text);
+    return ESP_ERR_INVALID_STATE;
+  }
+
   return ESP_OK;
 }
 

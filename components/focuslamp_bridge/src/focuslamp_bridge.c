@@ -14,6 +14,7 @@
 
 #include "focuslamp_bridge.h"
 #include "focuslamp_bridge_config.h"
+#include "mipi_dsi_bridge.h"
 
 #include "esp_mcp_data.h"
 #include "esp_mcp_engine.h"
@@ -338,6 +339,18 @@ esp_err_t focuslamp_bridge_motion_home(void) {
   return http_post("/api/motion/home", NULL, resp, sizeof(resp));
 }
 
+esp_err_t focuslamp_bridge_chat_state(bool active) {
+  char body[32];
+  snprintf(body, sizeof(body), "{\"active\":%s}", active ? "true" : "false");
+  char resp[64] = {0};
+  esp_err_t ret = http_post("/api/chat/state", body, resp, sizeof(resp));
+  if (ret != ESP_OK) {
+    ESP_LOGW(TAG, "Chat state report (active=%d) failed: %s", active,
+             esp_err_to_name(ret));
+  }
+  return ret;
+}
+
 /*---------------------------------------------------------------
  * MCP tool callbacks
  *-------------------------------------------------------------*/
@@ -457,28 +470,49 @@ mcp_tool_focus_start(const esp_mcp_property_list_t *properties) {
   int duration = esp_mcp_property_list_get_property_int(properties, "duration");
   if (duration <= 0) duration = 30;
   ESP_LOGI(TAG, "[MCP] focuslamp.focus.start: duration=%d", duration);
-  return esp_mcp_value_create_bool(focuslamp_bridge_focus_start(duration) == ESP_OK);
+
+  /* Base board: focus mode start. Head board: sync mode for VLM/presence. */
+  bool ok = focuslamp_bridge_focus_start(duration) == ESP_OK;
+  if (mipi_dsi_bridge_mode_set("focus") != ESP_OK) {
+    ESP_LOGW(TAG, "[MCP] focus.start: head board mode sync failed");
+  }
+  return esp_mcp_value_create_bool(ok);
 }
 
 static esp_mcp_value_t
 mcp_tool_focus_stop(const esp_mcp_property_list_t *properties) {
   (void)properties;
   ESP_LOGI(TAG, "[MCP] focuslamp.focus.stop");
-  return esp_mcp_value_create_bool(focuslamp_bridge_focus_stop() == ESP_OK);
+
+  bool ok = focuslamp_bridge_focus_stop() == ESP_OK;
+  if (mipi_dsi_bridge_mode_set("normal") != ESP_OK) {
+    ESP_LOGW(TAG, "[MCP] focus.stop: head board mode sync failed");
+  }
+  return esp_mcp_value_create_bool(ok);
 }
 
 static esp_mcp_value_t
 mcp_tool_companion_start(const esp_mcp_property_list_t *properties) {
   (void)properties;
   ESP_LOGI(TAG, "[MCP] focuslamp.companion.start");
-  return esp_mcp_value_create_bool(focuslamp_bridge_companion_start(0) == ESP_OK);
+
+  bool ok = focuslamp_bridge_companion_start(0) == ESP_OK;
+  if (mipi_dsi_bridge_mode_set("companion") != ESP_OK) {
+    ESP_LOGW(TAG, "[MCP] companion.start: head board mode sync failed");
+  }
+  return esp_mcp_value_create_bool(ok);
 }
 
 static esp_mcp_value_t
 mcp_tool_companion_stop(const esp_mcp_property_list_t *properties) {
   (void)properties;
   ESP_LOGI(TAG, "[MCP] focuslamp.companion.stop");
-  return esp_mcp_value_create_bool(focuslamp_bridge_companion_stop() == ESP_OK);
+
+  bool ok = focuslamp_bridge_companion_stop() == ESP_OK;
+  if (mipi_dsi_bridge_mode_set("normal") != ESP_OK) {
+    ESP_LOGW(TAG, "[MCP] companion.stop: head board mode sync failed");
+  }
+  return esp_mcp_value_create_bool(ok);
 }
 
 static esp_mcp_value_t

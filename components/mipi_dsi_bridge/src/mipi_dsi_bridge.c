@@ -870,6 +870,22 @@ esp_err_t mipi_dsi_bridge_ping(void) {
   return ret;
 }
 
+esp_err_t mipi_dsi_bridge_mode_set(const char *mode) {
+  ESP_RETURN_ON_FALSE(mode, ESP_ERR_INVALID_ARG, TAG, "Invalid mode");
+
+  char body[32];
+  snprintf(body, sizeof(body), "{\"mode\":\"%s\"}", mode);
+  char resp[64] = {0};
+  esp_err_t ret = http_post("/api/mode/set", body, resp, sizeof(resp));
+
+  if (ret == ESP_OK) {
+    ESP_LOGI(TAG, "Mode sync to head board: %s", mode);
+  } else {
+    ESP_LOGW(TAG, "Mode sync \"%s\" failed: %s", mode, esp_err_to_name(ret));
+  }
+  return ret;
+}
+
 #else /* MIPI_DSI_BRIDGE_ENABLE == 0 */
 
 /* Stub implementations when component is disabled */
@@ -881,5 +897,9 @@ esp_err_t mipi_dsi_bridge_register_mcp_tools(esp_mcp_t *mcp) {
   return ESP_ERR_NOT_SUPPORTED;
 }
 esp_err_t mipi_dsi_bridge_ping(void) { return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t mipi_dsi_bridge_mode_set(const char *mode) {
+  (void)mode;
+  return ESP_ERR_NOT_SUPPORTED;
+}
 
 #endif /* MIPI_DSI_BRIDGE_ENABLE */

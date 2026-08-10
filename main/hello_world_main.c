@@ -8,6 +8,7 @@
 #include <string.h>
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "connection_manager.h"
 #include "heartbeat_service.h"
@@ -22,6 +23,9 @@
 #include "tts_http_api.h"
 
 static const char *TAG = "MAIN";
+
+/* Forward declaration: async chat state reporter (defined below) */
+static void chat_state_report(bool active);
 
 /*---------------------------------------------------------------
  * WiFi event callback
@@ -129,9 +133,14 @@ static void xiaozhi_event_callback(xiaozhi_manager_event_t event, void *data, vo
         /* No longer auto-sends wake word here.
          * The wake word should already have been sent by the trigger source
          * (ESP-SR or button) that opened the audio channel. */
+        /* Report active dialogue to base board so focus countdown pauses.
+         * Async: must not block the chat task on HTTP. */
+        chat_state_report(true);
         break;
     case XIAOZHI_MANAGER_EVENT_AUDIO_CHANNEL_CLOSED:
         ESP_LOGI(TAG, "[Xiaozhi] Audio channel closed — back to idle");
+        /* Report dialogue ended to base board so focus countdown resumes */
+        chat_state_report(false);
         break;
     case XIAOZHI_MANAGER_EVENT_TTS_START:
         ESP_LOGI(TAG, "[Xiaozhi] TTS started");
@@ -151,6 +160,50 @@ static void xiaozhi_event_callback(xiaozhi_manager_event_t event, void *data, vo
     case XIAOZHI_MANAGER_EVENT_ERROR:
         ESP_LOGE(TAG, "[Xiaozhi] Error occurred");
         break;
+    }
+}
+
+/*---------------------------------------------------------------
+ * Async chat state reporter
+ *
+ * The xiaozhi event callback runs in the chat task context. Doing a
+ * synchronous HTTP POST there would block the whole voice interaction
+ * for up to FOCUSLAMP_BRIDGE_HTTP_TIMEOUT_MS (10s) if the base board is
+ * unreachable. So chat state reports are queued to a tiny dedicated task.
+ *-------------------------------------------------------------*/
+#define CHAT_STATE_QUEUE_LEN 4
+
+typedef struct {
+    bool active;
+} chat_state_report_t;
+
+static QueueHandle_t s_chat_state_queue = NULL;
+
+static void chat_state_task(void *arg)
+{
+    (void)arg;
+    chat_state_report_t rpt;
+    while (s_chat_state_queue) {
+        if (xQueueReceive(s_chat_state_queue, &rpt, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        esp_err_t err = focuslamp_bridge_chat_state(rpt.active);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "[ChatState] report active=%d failed: %s", rpt.active,
+                     esp_err_to_name(err));
+        }
+    }
+    vTaskDelete(NULL);
+}
+
+static void chat_state_report(bool active)
+{
+    if (!s_chat_state_queue) {
+        return;
+    }
+    chat_state_report_t rpt = {.active = active};
+    if (xQueueSend(s_chat_state_queue, &rpt, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "[ChatState] queue full, dropping report active=%d", active);
     }
 }
 
@@ -242,6 +295,19 @@ void app_main(void)
         ESP_LOGW(TAG, "FocusLamp bridge init failed: %s", esp_err_to_name(err));
     }
 
+    /* Start async chat state reporter (queue + task) */
+    s_chat_state_queue = xQueueCreate(CHAT_STATE_QUEUE_LEN, sizeof(chat_state_report_t));
+    if (s_chat_state_queue) {
+        if (xTaskCreate(chat_state_task, "chat_state", 3072, NULL,
+                        tskIDLE_PRIORITY + 4, NULL) != pdPASS) {
+            ESP_LOGW(TAG, "Failed to create chat state task");
+            vQueueDelete(s_chat_state_queue);
+            s_chat_state_queue = NULL;
+        } else {
+            ESP_LOGI(TAG, "Chat state reporter started");
+        }
+    }
+
     /* Step 2b: Initialize Connection Manager (WiFi + WebSocket health monitoring) */
     conn_mgr_config_t conn_cfg = {
         .wifi_init_timeout_ms        = 30000,
@@ -296,18 +362,11 @@ void app_main(void)
         ESP_LOGE(TAG, "Xiaozhi Manager init failed: %s", esp_err_to_name(err));
     }
 
-    /* Step 4b: Register FocusLamp MCP tools (enables voice control of FocusLamp) */
-    esp_mcp_t *mcp_engine = xiaozhi_manager_get_mcp_engine();
-    if (mcp_engine != NULL) {
-        err = focuslamp_bridge_register_mcp_tools(mcp_engine);
-        if (err == ESP_OK) {
-            ESP_LOGI(TAG, "FocusLamp MCP tools registered to Xiaozhi engine");
-        } else {
-            ESP_LOGW(TAG, "FocusLamp MCP tools registration failed: %s", esp_err_to_name(err));
-        }
-    } else {
-        ESP_LOGW(TAG, "MCP engine not available, skipping FocusLamp MCP tools registration");
-    }
+    /* FocusLamp MCP tools are now registered inside xiaozhi_manager's
+     * register_mcp_tools(), which is also re-run after each reconnect.
+     * (Registered here before, they were lost after the MCP engine was
+     * recreated on reconnect, so the cloud could no longer invoke
+     * self.focuslamp.* tools.) */
 
     /* Step 5: Initialize Wake Word Engine BEFORE xiaozhi_manager_start()
      * so PCM callback is registered before mic_task starts running. */

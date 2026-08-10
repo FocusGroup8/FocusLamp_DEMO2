@@ -422,7 +422,13 @@ esp_err_t ws_manager_server_start(void)
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = WS_MANAGER_SERVER_PORT;
-    config.max_open_sockets = WS_MANAGER_SERVER_MAX_CONN + 2; /* Reserve for HTTP + control */
+    /* Reserve extra sockets for HTTP requests (TTS inject from head/base
+     * boards, status/report, root page). NOTE: max_open_sockets is capped at
+     * CONFIG_LWIP_MAX_SOCKETS - 3 (httpd reserves 3 sockets internally).
+     * With LWIP_MAX_SOCKETS=10 the max allowed is 7 (4 WS + 3 HTTP). Exceeding
+     * it makes httpd_start fail (ESP_ERR_INVALID_ARG), taking down the whole
+     * HTTP server. To allow more, raise CONFIG_LWIP_MAX_SOCKETS via menuconfig. */
+    config.max_open_sockets = WS_MANAGER_SERVER_MAX_CONN + 3;
     config.close_fn = ws_session_close_cb;
 
     ESP_LOGI(TAG, "Starting WebSocket server on port %d", config.server_port);

@@ -94,9 +94,12 @@ static SemaphoreHandle_t s_mutex = NULL;
  *-------------------------------------------------------------*/
 static volatile uint32_t s_diag_feed_count = 0;       /* pcm_callback feed invocations */
 static volatile uint32_t s_diag_fetch_count = 0;      /* afe_processing_task fetch invocations */
+/* 临时调试日志已注释：detect 相关计数器不再使用，避免 unused 警告 */
+#if 0
 static volatile uint32_t s_diag_detect_count = 0;     /* MultiNet detect invocations */
 static volatile uint32_t s_diag_detecting_count = 0;  /* ESP_MN_STATE_DETECTING count */
 static volatile uint32_t s_diag_timeout_count = 0;    /* ESP_MN_STATE_TIMEOUT count */
+#endif
 
 /*---------------------------------------------------------------
  * Stored commands (for re-registration on language switch)
@@ -359,11 +362,14 @@ static void afe_processing_task(void *arg)
         }
 
         s_diag_fetch_count++;
+        /* 临时调试日志已注释：[DIAG] fetch 统计，减少 UART 输出量 */
+#if 0
         if ((s_diag_fetch_count % 50U) == 1U) {
             ESP_LOGI(TAG, "[DIAG] fetch#%lu: data_size=%d, mn_input=%d/%d",
                      (unsigned long)s_diag_fetch_count, (int)res->data_size,
                      s_mn_input_samples, s_mn_chunk_size);
         }
+#endif
 
         /* Accumulate fetch output into MultiNet input buffer */
         int samples = res->data_size / sizeof(int16_t);
@@ -381,6 +387,8 @@ static void afe_processing_task(void *arg)
          * Multiple detections may occur if AFE fetch chunk is larger
          * than MultiNet chunk (loop handles this). */
         while (s_mn_input_samples >= s_mn_chunk_size && s_afe_task_running) {
+            /* 临时调试日志已注释：[DIAG] peak/mean 统计，减少 UART 输出量 */
+#if 0
             /* Diagnostic: compute peak and mean of detect input buffer
              * to verify AEC output is not over-suppressed.
              * peak < 100 suggests AEC NLP too aggressive;
@@ -393,9 +401,12 @@ static void afe_processing_task(void *arg)
                 diag_sum += s_mn_input_buf[i];
             }
             int32_t diag_mean = diag_sum / s_mn_chunk_size;
+#endif
 
             esp_mn_state_t mn_state = s_mn_handle->detect(s_mn_data, s_mn_input_buf);
 
+            /* 临时调试日志已注释：[DIAG] detect 统计打印，减少 UART 输出量 */
+#if 0
             s_diag_detect_count++;
             if (mn_state == ESP_MN_STATE_DETECTING) {
                 s_diag_detecting_count++;
@@ -409,6 +420,7 @@ static void afe_processing_task(void *arg)
                          (unsigned long)s_diag_detecting_count,
                          (unsigned long)s_diag_timeout_count);
             }
+#endif
 
             if (mn_state == ESP_MN_STATE_DETECTED) {
                 esp_mn_results_t *results = s_mn_handle->get_results(s_mn_data);
@@ -479,10 +491,13 @@ static void pcm_callback(const int16_t *pcm_data, int sample_count, void *ctx)
     int feed_channels = s_afe_handle->get_feed_channel_num(s_afe_data);
 
     s_diag_feed_count++;
+    /* 临时调试日志已注释：[DIAG] feed 统计，减少 UART 输出量 */
+#if 0
     if ((s_diag_feed_count % 50U) == 1U) {
         ESP_LOGI(TAG, "[DIAG] feed#%lu: samples=%d, channels=%d",
                  (unsigned long)s_diag_feed_count, sample_count, feed_channels);
     }
+#endif
 
     if (feed_channels == 2) {
         /* AEC mode: interleave mic + reference PCM data.

@@ -187,9 +187,14 @@ esp_mcp_t *xiaozhi_manager_get_mcp_engine(void);
  * Implementation: direct text as listen detect message without wake word.
  * The server treats the text as ASR input and responds with TTS only.
  *
+ * This is an ASYNCHRONOUS API: the request is enqueued and processed in
+ * the background by a dedicated task, and the function returns immediately.
+ * The caller must NOT assume the TTS has been broadcast when this returns;
+ * only that the request was accepted. Failures to broadcast are logged.
+ *
  * @param text      Short command text to speak (e.g., "提醒我休息")
  * @param priority  Priority level (0-3, higher = can interrupt lower)
- * @return ESP_OK on success
+ * @return ESP_OK if the request was enqueued, error code otherwise
  */
 esp_err_t xiaozhi_manager_speak(const char *text, int priority);
 

@@ -865,7 +865,10 @@ static void mic_task(void *arg) {
   esp_opus_enc_get_frame_size(s_opus_encoder, &in_size, &out_size);
   ESP_LOGI(TAG, "OPUS encoder: in_size=%d, out_size=%d", in_size, out_size);
 
+  /* 临时调试日志已注释：麦克风帧电平打印（frame_count），减少 UART 输出量 */
+#if 0
   int frame_count = 0;
+#endif
 
   while (s_mic_task_running) {
     /* Read one 60ms frame from I2S RX (960 samples * 4 bytes = 3840 bytes)
@@ -899,6 +902,8 @@ static void mic_task(void *arg) {
       s_pcm_callback(pcm16_buf, MIC_FRAME_SAMPLES, s_pcm_callback_ctx);
     }
 
+    /* 临时调试日志已注释：麦克风帧电平打印（每 50 帧），减少 UART 输出量 */
+#if 0
     /* Debug: log first few raw I2S samples and PCM values every 50 frames */
     frame_count++;
     if (frame_count <= 3 || (frame_count % 50 == 0)) {
@@ -915,6 +920,7 @@ static void mic_task(void *arg) {
                (unsigned)i2s_rx_buf[2], (unsigned)i2s_rx_buf[3], pcm16_buf[0],
                pcm16_buf[1], pcm16_buf[2], pcm16_buf[3], (long)max_val);
     }
+#endif
 
     /* Encode to OPUS */
     esp_audio_enc_in_frame_t in_frame = {

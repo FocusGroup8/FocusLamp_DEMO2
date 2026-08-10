@@ -78,6 +78,18 @@ esp_err_t mipi_dsi_bridge_register_mcp_tools(esp_mcp_t *mcp);
  */
 esp_err_t mipi_dsi_bridge_ping(void);
 
+/**
+ * @brief Sync the voice board's current mode to the head board
+ *
+ * Sends POST /api/mode/set with body {"mode":"focus"|"companion"|"normal"}.
+ * Called by the focus/companion MCP tools so the head board switches its
+ * algorithm result handling (VLM/presence in FOCUS, gestures in COMPANION).
+ *
+ * @param mode  "focus", "companion", or "normal"
+ * @return ESP_OK on HTTP 200, error code otherwise
+ */
+esp_err_t mipi_dsi_bridge_mode_set(const char *mode);
+
 #ifdef __cplusplus
 }
 #endif

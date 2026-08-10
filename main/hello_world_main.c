@@ -114,6 +114,16 @@ static void wake_word_detect_callback(int command_id, const char *command_str,
 }
 
 /*---------------------------------------------------------------
+ * Barge-in (voice interrupt) — 后续测试项（暂未启用）
+ *
+ * wake_word_engine 已实现 VAD 打断（BARGE_IN_PEAK_THRESHOLD /
+ * BARGE_IN_FRAME_COUNT 可调），启用方式：
+ *   1. xiaozhi_manager TTS_START/STOP 调用 wake_word_engine_set_tts_active()
+ *   2. 本文件 wake_cfg.barge_in_cb = barge_in_callback;
+ * 需实测调参（阈值/回声误触发），确认后恢复。
+ *-------------------------------------------------------------*/
+
+/*---------------------------------------------------------------
  * Xiaozhi event callback
  *-------------------------------------------------------------*/
 static void xiaozhi_event_callback(xiaozhi_manager_event_t event, void *data, void *ctx)
@@ -224,6 +234,13 @@ static void xiaozhi_audio_callback(const uint8_t *data, int len, void *ctx)
 void app_main(void)
 {
     ESP_LOGI(TAG, "=== Smart Voice Assistant for WT01P4C5-S1 ===");
+
+    /* Reduce protocol library log verbosity: esp_xiaozhi/mcp print every MCP
+     * message at INFO, which stalls the WS receive path and delays TTS audio
+     * frame delivery to the decode queue → audible speaker stutter. */
+    esp_log_level_set("ESP_XIAOZHI_CHAT", ESP_LOG_WARN);
+    esp_log_level_set("esp_mcp_mgr", ESP_LOG_WARN);
+    esp_log_level_set("ESP_XIAOZHI_MCP", ESP_LOG_WARN);
 
     /* Step 1: Initialize WiFi Manager */
     wifi_manager_register_handler(WIFI_MANAGER_EVENT_CONNECTED, wifi_event_callback);
@@ -378,6 +395,7 @@ void app_main(void)
 #endif
     wake_cfg.detect_cb = wake_word_detect_callback;
     wake_cfg.det_timeout_ms = 2000;
+    /* 语音打断为后续测试项：barge_in_cb 暂不接线（见上方注释） */
 
     err = wake_word_engine_init(&wake_cfg);
     if (err == ESP_OK) {

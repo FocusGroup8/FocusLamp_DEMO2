@@ -47,8 +47,10 @@ static const char *TAG = "AUDIO_BRIDGE";
 /* Decode task queue depth: enough to buffer several frames while I2S drains.
  * Each queue item carries a pointer to a dynamically allocated buffer,
  * so memory usage = depth * sizeof(void*) for the queue itself +
- * depth * OPUS_FRAME_MAX_SIZE for the data buffers (allocated on demand). */
-#define DECODE_QUEUE_DEPTH 8
+ * depth * OPUS_FRAME_MAX_SIZE for the data buffers (allocated on demand).
+ * Raised from 8 to 16 to absorb network/WS jitter during voice chat,
+ * which previously under-ran the queue and caused audible speaker stutter. */
+#define DECODE_QUEUE_DEPTH 16
 
 /* Decode task configuration — must be large enough for OPUS decoder stack +
  * FPU/PIE/HWLOOP coprocessor lazy save areas (allocated from task stack

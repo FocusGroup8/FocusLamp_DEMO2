@@ -63,6 +63,22 @@ static volatile bool s_paused = false;
 static wake_word_state_t s_state = WAKE_WORD_STATE_IDLE;
 static wake_word_lang_t s_current_lang = WAKE_WORD_LANG_CN;
 
+/* Barge-in (VAD voice interrupt) state — active during TTS playback.
+ * While TTS plays, the AFE keeps running with AEC; the engine runs a
+ * lightweight peak VAD on the echo-cancelled output instead of MultiNet,
+ * and fires the barge-in callback when sustained speech is detected. */
+static volatile bool s_tts_active = false;
+static volatile int s_barge_in_frames = 0;   /* consecutive VAD hits */
+static volatile bool s_barge_in_triggered = false;
+static wake_word_barge_in_cb_t s_barge_in_cb = NULL;
+static void *s_barge_in_cb_ctx = NULL;
+
+/* Barge-in VAD tuning: peak threshold of AEC-cancelled chunk and the number
+ * of consecutive frames required. Adjust after field measurement of the AEC
+ * residual level (too low → TTS echo false-triggers; too high → misses speech). */
+#define BARGE_IN_PEAK_THRESHOLD 1200
+#define BARGE_IN_FRAME_COUNT 3
+
 /* Model data */
 static srmodel_list_t *s_models = NULL;
 static esp_afe_sr_data_t *s_afe_data = NULL;
@@ -344,7 +360,12 @@ static void afe_processing_task(void *arg)
              s_mn_chunk_size, s_mn_buf_capacity);
 
     while (s_afe_task_running) {
-        if (!s_detecting || s_paused) {
+        if (!s_detecting) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        /* Fully paused (not TTS) — no feeding, no VAD */
+        if (s_paused && !s_tts_active) {
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
@@ -357,6 +378,31 @@ static void afe_processing_task(void *arg)
         if (res == NULL || res->ret_value == ESP_FAIL) {
             if (res != NULL) {
                 ESP_LOGW(TAG, "AFE fetch failed: %d", res->ret_value);
+            }
+            continue;
+        }
+
+        /* Barge-in VAD: while TTS plays, run a peak VAD on the AEC-cancelled
+         * output (MultiNet stays disabled to avoid the echo crash risk). */
+        if (s_tts_active) {
+            int n = res->data_size / sizeof(int16_t);
+            int32_t peak = 0;
+            for (int i = 0; i < n; i++) {
+                int32_t a = res->data[i] < 0 ? -res->data[i] : res->data[i];
+                if (a > peak) peak = a;
+            }
+            if (peak > BARGE_IN_PEAK_THRESHOLD) {
+                s_barge_in_frames++;
+            } else {
+                s_barge_in_frames = 0;
+            }
+            if (s_barge_in_frames >= BARGE_IN_FRAME_COUNT && !s_barge_in_triggered) {
+                s_barge_in_triggered = true;
+                ESP_LOGI(TAG, "Barge-in: speech detected during TTS (peak=%ld)",
+                         (long)peak);
+                if (s_barge_in_cb) {
+                    s_barge_in_cb(s_barge_in_cb_ctx);
+                }
             }
             continue;
         }
@@ -480,7 +526,12 @@ static void pcm_callback(const int16_t *pcm_data, int sample_count, void *ctx)
 {
     (void)ctx;
 
-    if (!s_detecting || s_paused) {
+    if (!s_detecting) {
+        return;
+    }
+    /* Fully paused (not TTS) — stop feeding. During TTS (paused + tts_active)
+     * we keep feeding mic+ref so the AFE can run AEC for barge-in VAD. */
+    if (s_paused && !s_tts_active) {
         return;
     }
 
@@ -540,6 +591,8 @@ esp_err_t wake_word_engine_init(const wake_word_engine_config_t *config)
     s_config = *config;
     s_det_threshold = (config->det_threshold > 0.0f) ? config->det_threshold :
                       ((float)WAKE_WORD_ENGINE_DET_THRESHOLD / 10000.0f);
+    s_barge_in_cb = config->barge_in_cb;
+    s_barge_in_cb_ctx = config->barge_in_cb_ctx;
 
     /* Create mutex for thread safety */
     s_mutex = xSemaphoreCreateMutex();
@@ -787,6 +840,25 @@ esp_err_t wake_word_engine_resume(void)
     s_mn_input_samples = 0;
 
     ESP_LOGI(TAG, "Wake word detection resumed");
+    return ESP_OK;
+}
+
+esp_err_t wake_word_engine_set_tts_active(bool active)
+{
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    s_tts_active = active;
+    s_barge_in_frames = 0;
+    s_barge_in_triggered = false;
+
+    if (active) {
+        ESP_LOGI(TAG, "TTS active: barge-in VAD enabled (threshold=%d, frames=%d)",
+                 BARGE_IN_PEAK_THRESHOLD, BARGE_IN_FRAME_COUNT);
+    } else {
+        ESP_LOGI(TAG, "TTS inactive: barge-in VAD disabled");
+    }
     return ESP_OK;
 }
 

@@ -418,6 +418,8 @@ static void xiaozhi_event_callback(esp_xiaozhi_chat_event_t event,
          * speech ~200-700), causing FST beam search to dereference
          * invalid pointers and trigger Load access fault. */
         wake_word_engine_pause();
+        /* 语音打断（barge-in）为后续测试项：已实现于 wake_word_engine 但
+         * 暂不启用（未调用 set_tts_active），保持 TTS 期间无打断原行为。 */
         if (s_config.event_cb) {
           s_config.event_cb(XIAOZHI_MANAGER_EVENT_TTS_START, NULL,
                             s_config.event_cb_ctx);
@@ -440,6 +442,7 @@ static void xiaozhi_event_callback(esp_xiaozhi_chat_event_t event,
          * resets input buffer, discarding any TTS echo audio that
          * accumulated during the pause period. */
         wake_word_engine_resume();
+        /* 语音打断（barge-in）为后续测试项：随 set_tts_active 一起停用 */
         if (s_config.event_cb) {
           s_config.event_cb(XIAOZHI_MANAGER_EVENT_TTS_STOP, NULL,
                             s_config.event_cb_ctx);
@@ -1143,6 +1146,19 @@ esp_err_t xiaozhi_manager_send_wake_word(const char *wake_word) {
     /* Non-fatal: server may still process audio based on detect message */
   }
 
+  return ESP_OK;
+}
+
+esp_err_t xiaozhi_manager_interrupt_speaking(void) {
+  ESP_RETURN_ON_FALSE(s_chat_handle, ESP_ERR_INVALID_STATE, TAG,
+                      "Not initialized");
+
+  if (s_state == XIAOZHI_MANAGER_STATE_SPEAKING) {
+    ESP_LOGI(TAG, "Barge-in: interrupting current TTS");
+    return esp_xiaozhi_chat_send_abort_speaking(
+        s_chat_handle,
+        ESP_XIAOZHI_CHAT_ABORT_SPEAKING_REASON_WAKE_WORD_DETECTED);
+  }
   return ESP_OK;
 }
 

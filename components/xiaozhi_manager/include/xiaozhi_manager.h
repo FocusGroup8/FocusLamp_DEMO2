@@ -143,6 +143,17 @@ xiaozhi_manager_state_t xiaozhi_manager_get_state(void);
 esp_err_t xiaozhi_manager_send_wake_word(const char *wake_word);
 
 /**
+ * @brief  Interrupt current TTS playback (barge-in)
+ *
+ * Aborts the current speaking if TTS is playing. Called by the wake word
+ * engine's barge-in VAD when user speech is detected during playback, so
+ * the user can take over the conversation.
+ *
+ * @return ESP_OK on success (or if not currently speaking)
+ */
+esp_err_t xiaozhi_manager_interrupt_speaking(void);
+
+/**
  * @brief  Open audio channel manually
  *
  * Opens the audio channel for sending audio data.

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdbool.h>
+
 #include "esp_err.h"
 #include "wake_word_engine_config.h"
 #include "wake_word_engine_types.h"
@@ -60,6 +62,19 @@ esp_err_t wake_word_engine_pause(void);
  * @return ESP_OK on success
  */
 esp_err_t wake_word_engine_resume(void);
+
+/**
+ * @brief Mark TTS playback active/inactive (enables barge-in VAD)
+ *
+ * While active, the AFE keeps running with AEC so the engine can detect
+ * user speech (barge-in) on the echo-cancelled signal. MultiNet wake word
+ * detection stays disabled during this window. Call with true on TTS_START
+ * and false on TTS_STOP.
+ *
+ * @param active  true while TTS is playing
+ * @return ESP_OK on success
+ */
+esp_err_t wake_word_engine_set_tts_active(bool active);
 
 /**
  * @brief Switch language model at runtime
@@ -160,6 +175,7 @@ static inline esp_err_t wake_word_engine_start(void) { return ESP_ERR_NOT_SUPPOR
 static inline esp_err_t wake_word_engine_stop(void) { return ESP_ERR_NOT_SUPPORTED; }
 static inline esp_err_t wake_word_engine_pause(void) { return ESP_ERR_NOT_SUPPORTED; }
 static inline esp_err_t wake_word_engine_resume(void) { return ESP_ERR_NOT_SUPPORTED; }
+static inline esp_err_t wake_word_engine_set_tts_active(bool active) { (void)active; return ESP_ERR_NOT_SUPPORTED; }
 static inline esp_err_t wake_word_engine_set_language(wake_word_lang_t lang) { (void)lang; return ESP_ERR_NOT_SUPPORTED; }
 static inline wake_word_lang_t wake_word_engine_get_language(void) { return WAKE_WORD_LANG_CN; }
 static inline esp_err_t wake_word_engine_add_command(int command_id, const char *phrase) { (void)command_id; (void)phrase; return ESP_ERR_NOT_SUPPORTED; }

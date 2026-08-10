@@ -1,11 +1,19 @@
 /*
- * tts_http_api.c - HTTP endpoint for TTS text injection
+ * tts_http_api.c - HTTP endpoints for remote control from the head/base board
  *
- * Provides POST /api/tts/speak endpoint so the dowm (FocusLamp base)
- * board can send TTS text to be played through this device's speaker.
+ * Provides:
+ *   POST /api/tts/speak  - TTS text injection (played through this speaker)
+ *   POST /api/chat/end   - end the current xiaozhi voice conversation
+ *
+ * The dowm (FocusLamp base) board sends TTS text; the head board can also
+ * end an active voice session (long-press on the head light).
  *
  * Request:  POST /api/tts/speak
  * Body:     {"text": "播报的文字内容", "priority": 1}
+ * Response: {"ok": true}
+ *
+ * Request:  POST /api/chat/end
+ * Body:     {} (optional, ignored)
  * Response: {"ok": true}
  */
 
@@ -110,6 +118,54 @@ static const httpd_uri_t tts_speak_uri = {
 };
 
 /*---------------------------------------------------------------
+ * HTTP handler: POST /api/chat/end
+ *
+ * Ends the current xiaozhi voice conversation (closes the audio channel,
+ * aborting any ongoing TTS). The wake word engine stays active, so a new
+ * conversation can still be started by voice afterwards.
+ *-------------------------------------------------------------*/
+static esp_err_t chat_end_handler(httpd_req_t *req)
+{
+    /* Drain the (ignored) request body, if any */
+    if (req->content_len > 0) {
+        char *body = malloc(req->content_len + 1);
+        if (body) {
+            int received = 0;
+            while (received < req->content_len) {
+                int ret = httpd_req_recv(req, body + received, req->content_len - received);
+                if (ret <= 0) {
+                    if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
+                        continue;
+                    }
+                    break;
+                }
+                received += ret;
+            }
+            free(body);
+        }
+    }
+
+    ESP_LOGI(TAG, "Chat end requested");
+
+    esp_err_t ret = xiaozhi_manager_close_audio_channel();
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "xiaozhi_manager_close_audio_channel failed: %s", esp_err_to_name(ret));
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    const char *resp = "{\"ok\":true}";
+    httpd_resp_send(req, resp, strlen(resp));
+    return ESP_OK;
+}
+
+static const httpd_uri_t chat_end_uri = {
+    .uri      = "/api/chat/end",
+    .method   = HTTP_POST,
+    .handler  = chat_end_handler,
+    .user_ctx = NULL,
+};
+
+/*---------------------------------------------------------------
  * Init
  *-------------------------------------------------------------*/
 esp_err_t tts_http_api_init(void)
@@ -125,6 +181,12 @@ esp_err_t tts_http_api_init(void)
         return ret;
     }
 
-    ESP_LOGI(TAG, "TTS API endpoint registered: POST /api/tts/speak");
+    ret = ws_manager_server_register_uri(&chat_end_uri);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register /api/chat/end: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "TTS API endpoints registered: POST /api/tts/speak, POST /api/chat/end");
     return ESP_OK;
 }

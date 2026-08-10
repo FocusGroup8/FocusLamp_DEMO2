@@ -39,6 +39,17 @@ typedef void (*wake_word_detect_cb_t)(int command_id, const char *command_str,
                                       wake_word_lang_t lang, float prob, void *ctx);
 
 /**
+ * @brief Barge-in (voice interrupt) callback
+ *
+ * Called when the engine detects user speech (VAD on the AEC-cancelled
+ * signal) while TTS is playing. The application should abort the current
+ * TTS playback so the user can take over the conversation.
+ *
+ * @param ctx  User context
+ */
+typedef void (*wake_word_barge_in_cb_t)(void *ctx);
+
+/**
  * @brief Wake word engine configuration
  */
 typedef struct {
@@ -47,6 +58,8 @@ typedef struct {
     void *detect_cb_ctx;                 /*!< User context for callback */
     float det_threshold;                 /*!< Detection threshold (0.0 ~ 0.9999), 0 = use default */
     int det_timeout_ms;                  /*!< Detection timeout in ms for command phrase */
+    wake_word_barge_in_cb_t barge_in_cb; /*!< Barge-in callback (NULL to disable) */
+    void *barge_in_cb_ctx;               /*!< User context for barge-in callback */
 } wake_word_engine_config_t;
 
 #define WAKE_WORD_ENGINE_DEFAULT_CONFIG() { \
@@ -55,6 +68,8 @@ typedef struct {
     .detect_cb_ctx = NULL,                 \
     .det_threshold = 0.0,                  \
     .det_timeout_ms = 2000,                \
+    .barge_in_cb = NULL,                   \
+    .barge_in_cb_ctx = NULL,               \
 }
 
 #ifdef __cplusplus

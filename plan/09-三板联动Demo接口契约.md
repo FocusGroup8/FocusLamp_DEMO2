@@ -17,20 +17,21 @@
 
 | 板卡 | 工程（绝对路径） | 角色 | 已具备能力 |
 |---|---|---|---|
-| 灯头板 | `c:\Projects\Part-time-job\Focus_demo2\FocusLamp_DEMO2-feature-camera-fps-optimization` | 摄像头/大屏/灯头灯/灯头触摸 | MIPI DSI 大屏表情、灯头灯(暖/冷双通道)、OV5647 推流、TTP223 单击/双击/长按、MCP algorithm.result 接收 VLM 结果、WebSocket 服务器 |
-| 基座板 | `c:\Projects\Part-time-job\Focus_demo2\FocusLamp_DEMO2-dowm` | 小屏/底灯/机械臂/雷达心率/光感 | 小屏 LCD 信息页、底部呼吸灯、机械臂动作库、雷达 HRV 心率、环境光传感器(0-4级)、REST API、`tts_bridge`、focus_app/companion_app |
-| 语音板 | `c:\Projects\Part-time-job\Focus_demo2\FocusLamp_DEMO2-feature-tts-broadcast` | 语音对话/TTS 播报 | esp_xiaozhi 对话、唤醒词、`POST /api/tts/speak`、focuslamp_bridge(HTTP→基座板)、mipi_dsi_bridge(HTTP→灯头板) |
+| 灯头板 | `c:\Projects\Part-time-job\Focus_demo2\FocusLamp_DEMO2-feature-camera-fps-optimization` | 摄像头/大屏/灯头灯/灯头触摸 | MIPI DSI 大屏表情、灯头灯(暖/冷双通道)、OV5647 推流、TTP223 单击/双击/长按、MCP algorithm.result 接收 VLM 结果、WebSocket 服务器、`POST /api/mode/set`(语音板模式同步) |
+| 基座板 | `c:\Projects\Part-time-job\Focus_demo2\FocusLamp_DEMO2-dowm` | 小屏/底灯/机械臂/雷达心率 | 小屏 LCD 信息页、底部呼吸灯、机械臂动作库、雷达 HRV 心率、REST API、`tts_bridge`、focus_app/companion_app、`POST /api/chat/state`(语音对话状态) |
+| 语音板 | `c:\Projects\Part-time-job\Focus_demo2\FocusLamp_DEMO2-feature-tts-broadcast` | 语音对话/TTS 播报 | esp_xiaozhi 对话、唤醒词、`POST /api/tts/speak`、focuslamp_bridge(HTTP→基座板)、mipi_dsi_bridge(HTTP→灯头板)、异步 TTS 注入队列 |
 
 ## 2. 系统交互总览
 
 ```mermaid
 flowchart LR
     VLM[外部 VLM 引擎 PC] -- MCP algorithm.result<br/>WS /mcp|/algo --> HEAD[灯头板]
-    HEAD -- POST /api/tts/speak<br/>欢迎语 --> TTS[语音板]
-    HEAD -- GET /api/ambient<br/>环境光查询 --> BASE[基座板]
-    HEAD -- POST /api/arm/gesture<br/>拇指上/下 --> BASE
+    HEAD -- POST /api/tts/speak<br/>欢迎语(短指令) --> TTS[语音板]
+    HEAD -- POST /api/arm/gesture<br/>拇指上/下 --> BASE[基座板]
     HEAD -- POST /api/detect/phone<br/>VLM 玩手机/电脑 --> BASE
     TTS -- MCP self.focuslamp.*<br/>HTTP REST --> BASE
+    TTS -- POST /api/mode/set<br/>模式同步 focus/companion/normal --> HEAD
+    TTS -- POST /api/chat/state<br/>对话状态(active) --> BASE
     BASE -- POST /api/tts/speak<br/>经 tts_bridge --> TTS
     BASE -- HTTP REST<br/>/api/led/* /api/eyes/* --> HEAD
 ```
@@ -42,7 +43,7 @@ flowchart LR
 | 板卡 | 配置项 | 默认值 | 说明 |
 |---|---|---|---|
 | 灯头板 | `CONFIG_TTS_INJECT_TARGET_IP` | `192.168.1.110` | 语音板 IP（欢迎语注入） |
-| 灯头板 | `CONFIG_BASE_BRIDGE_TARGET_IP` | `192.168.1.120` | 基座板 IP（环境光/手势/检测转发） |
+| 灯头板 | `CONFIG_BASE_BRIDGE_TARGET_IP` | `192.168.1.120` | 基座板 IP（手势/检测转发） |
 | 基座板 | `CONFIG_TTS_BRIDGE_TARGET_IP` | `192.168.1.110` | 语音板 IP（已有，tts_bridge） |
 | 基座板 | `CONFIG_STATUS_REPORTER_TARGET_IP` | `192.168.1.100` | 灯头板 IP（已有，灯头控制） |
 | 语音板 | `CONFIG_FOCUSLAMP_BRIDGE_TARGET_IP` | `192.168.1.120` | 基座板 IP（已有） |
@@ -54,29 +55,31 @@ flowchart LR
 
 | 端点 | 方法 | 请求体 | 响应 | 实现 | 调用方 |
 |---|---|---|---|---|---|
-| `GET /api/ambient` | GET | 无 | `{"ok":true,"level":0-4}` | 读 `device_state.ambient_light.level` | 灯头板 |
 | `POST /api/arm/gesture` | POST | `{"gesture":"thumb_up"\|"thumb_down"}` | `{"ok":true}` | 机械臂单步动作（arm_service）：thumb_up→servo0=1850、thumb_down→servo0=1150，500ms；先 stop 当前动作再执行 | 灯头板 |
-| `POST /api/detect/phone` | POST | `{"source":"phone"\|"computer"}` | `{"ok":true}` | `tts_bridge_speak` 播报对应文案 | 灯头板 |
+| `POST /api/detect/phone` | POST | `{"source":"phone"\|"computer"}` | `{"ok":true}` | 映射短指令"提醒玩手机"/"提醒玩电脑" → `tts_bridge_speak` 播报 | 灯头板 |
 | `POST /api/companion/start` | POST | `{"duration":0}` | `{"ok":true}` | `companion_app_start()` | 语音板 |
 | `POST /api/companion/stop` | POST | `{}` | `{"ok":true}` | `companion_app_stop()`（未运行视为成功） | 语音板 |
+| `POST /api/chat/state` | POST | `{"active":true\|false}` | `{"ok":true}` | `device_state_set_voice_active()`，focus_app 据此暂停/恢复倒计时 | 语音板 |
 
 ### 4.2 新增 MCP 工具（语音板 focuslamp_bridge）
 
 | 工具名 | 参数 | 映射 REST |
 |---|---|---|
-| `self.focuslamp.companion.start` | 无 | `POST {FOCUSLAMP_BRIDGE_TARGET_IP}/api/companion/start` |
-| `self.focuslamp.companion.stop` | 无 | `POST {FOCUSLAMP_BRIDGE_TARGET_IP}/api/companion/stop` |
+| `self.focuslamp.focus.start` | `duration`(分钟,默认30) | `POST {FOCUSLAMP_BRIDGE_TARGET_IP}/api/focus/start` + `POST {MIPI_DSI_BRIDGE_TARGET_IP}/api/mode/set` `{"mode":"focus"}` |
+| `self.focuslamp.focus.stop` | 无 | `POST /api/focus/stop` + `POST /api/mode/set` `{"mode":"normal"}` |
+| `self.focuslamp.companion.start` | 无 | `POST {FOCUSLAMP_BRIDGE_TARGET_IP}/api/companion/start` + `POST {MIPI_DSI_BRIDGE_TARGET_IP}/api/mode/set` `{"mode":"companion"}` |
+| `self.focuslamp.companion.stop` | 无 | `POST {FOCUSLAMP_BRIDGE_TARGET_IP}/api/companion/stop` + `POST {MIPI_DSI_BRIDGE_TARGET_IP}/api/mode/set` `{"mode":"normal"}` |
 
-已有工具（核对即可）：`self.focuslamp.focus.start` → `POST /api/focus/start`。
+> 说明：focus/companion start/stop 时，语音板并行向灯头板 `POST /api/mode/set` 同步模式（`algo_result_set_mode` 切换算法结果处理：FOCUS 启用 VLM/在位检测、COMPANION 启用手势）。
 
 ### 4.3 新增能力（灯头板，无对外新端点）
 
 | 能力 | 触发 | 动作 | 依赖新模块 |
 |---|---|---|---|
-| 欢迎语 TTS 注入 | `touch_handler` TAP | 交替选择 2 条欢迎语 → `POST {TTS_INJECT_TARGET_IP}/api/tts/speak` `{"text":...,"priority":1}` | `tts_inject` HTTP 客户端模块 |
-| 环境光结合亮度 | TAP / DOUBLE_TAP | `GET {BASE_BRIDGE_TARGET_IP}/api/ambient` → 映射亮度（见 §5.3） | `base_bridge` HTTP 客户端模块 |
-| VLM 结果转发 | `mcp_cb_algo_result` | `vlm_judgment=="是"` 且 `vlm_trigger_source` 为手机/电脑 → `POST /api/detect/phone`（节流 ≥60s） | `base_bridge` |
+| 欢迎语 TTS 注入 | `touch_handler` TAP | 交替选择 3 条短指令"欢迎语1/2/3" → `POST {TTS_INJECT_TARGET_IP}/api/tts/speak` `{"text":...,"priority":1}`（云端映射完整文案，用户手动同步） | `tts_inject` HTTP 客户端模块 |
+| VLM 结果转发 | `mcp_cb_algo_result` | `vlm_judgment=="yes"`(英文枚举) 且 `vlm_trigger_source` 为 phone/computer → `POST /api/detect/phone`（节流 ≥60s） | `base_bridge` |
 | 手势转发 | `mcp_cb_algo_result`（复用 VLM `gesture` 字段） | `gesture` 变化为 Thumb_Up/Thumb_Down → `POST /api/arm/gesture`（节流 ≥1s） | `base_bridge` |
+| 模式同步接收 | 语音板 `POST /api/mode/set` | `focus`→`ALGO_MODE_FOCUS`、`companion`→`ALGO_MODE_COMPANION`、其余→`ALGO_MODE_NORMAL`，切换算法结果处理 | REST API |
 
 ### 4.4 小屏心率渲染（基座板 lcd_service）
 
@@ -88,29 +91,31 @@ flowchart LR
 
 ## 5. 数据字段与业务规则
 
-### 5.1 玩手机/电脑文案（与需求逐字一致，存基座板）
+### 5.1 玩手机/电脑播报（基座板唯一播报源）
 
-| source | 文案 |
-|---|---|
-| phone | 识别到您正在玩手机，快把手机放下，好好专注把工作完成吧 |
-| computer | 识别到您正在玩电脑游戏，快停下来活动一下，然后先专注把工作完成再玩吧~ |
+TTS 播报只接受短指令触发，基座板将 source 映射为短指令经 `tts_bridge_speak` 注入语音板，云端（语音板配置）将短指令映射为完整文案，由用户手动同步。
 
-### 5.2 欢迎语（灯头板已有 `s_welcome_messages[]`）
-
-交替选择："嗨~主人，想我了吗？Focus一直都在哦" / "哈哈哈，主人，你摸的我脑袋痒痒的，好像有什么长出来了~"
-
-### 5.3 环境光 → 亮度映射（两板统一，沿用基座板现有映射）
-
-| 光感等级 | 说明 | 基础亮度 |
+| source | 基座板短指令 | 云端完整文案 |
 |---|---|---|
-| 0 | 很暗 | 80 |
-| 1 | 较暗 | 65 |
-| 2 | 正常室内光 | 50 |
-| 3 | 较亮 | 35 |
-| 4 | 很亮 | 25 |
+| phone | 提醒玩手机 | 识别到您正在玩手机，快把手机放下，好好专注把工作完成吧 |
+| computer | 提醒玩电脑 | 识别到您正在玩电脑游戏，快停下来活动一下，然后先专注把工作完成再玩吧~ |
 
-- **单击灯头亮灯**：目标亮度 = 环境光基础亮度（非固定档位）
-- **双击调档**：五档 = 环境光基础亮度 + `{0,10,20,30,40}`，上限截断 100，循环切换
+### 5.2 欢迎语（灯头板 `s_welcome_messages[]`，3 条短指令交替）
+
+交替选择："欢迎语1" → "欢迎语2" → "欢迎语3" → 循环。云端将短指令映射为完整欢迎文案，由用户手动同步。
+
+### 5.3 灯头灯亮度（固定五档，无环境光）
+
+| 档位索引 | 亮度 |
+|---|---|
+| 0 | 20% |
+| 1 | 40% |
+| 2 | 60%（默认） |
+| 3 | 80% |
+| 4 | 100% |
+
+- **单击灯头亮灯**：按当前档位亮度点亮（`s_brightness_levels[current]`）
+- **双击调档**：档位+1（`{20,40,60,80,100}`）循环切换，NVS 保存
 
 ### 5.4 专注模式在位久坐
 
@@ -129,13 +134,10 @@ flowchart LR
 sequenceDiagram
     participant U as 用户
     participant H as 灯头板
-    participant B as 基座板
     participant T as 语音板
     U->>H: 单击灯头
-    H->>B: GET /api/ambient
-    B-->>H: level(0-4)
-    H->>H: 灯头灯按环境光亮度点亮 + 大屏表情→开心
-    H->>T: POST /api/tts/speak(欢迎语)
+    H->>H: 灯头灯按当前档位亮度点亮 + 大屏表情→开心
+    H->>T: POST /api/tts/speak(欢迎语1/2/3 交替)
     T-->>H: {"ok":true}
     T-->>U: TTS 播放欢迎语
 ```
@@ -146,11 +148,8 @@ sequenceDiagram
 sequenceDiagram
     participant U as 用户
     participant H as 灯头板
-    participant B as 基座板
     U->>H: 双击灯头
-    H->>B: GET /api/ambient
-    B-->>H: level(0-4)
-    H->>H: 亮度档位+1(五档循环, 结合环境光) + NVS 保存
+    H->>H: 亮度档位+1({20,40,60,80,100} 循环) + NVS 保存
 ```
 
 ### 6.3 场景3：外部 VLM 检测玩手机/电脑
@@ -161,10 +160,10 @@ sequenceDiagram
     participant H as 灯头板
     participant B as 基座板
     participant T as 语音板
-    V-->>H: MCP algorithm.result(trigger_source=手机/电脑, judgment=是)
+    V-->>H: MCP algorithm.result(trigger_source=phone/computer, judgment="yes")
     H->>B: POST /api/detect/phone{source}
-    B->>T: tts_bridge_speak(文案)
-    T-->>U: TTS 播报
+    B->>T: tts_bridge_speak(短指令"提醒玩手机/提醒玩电脑")
+    T-->>U: TTS 播报(云端映射完整文案)
 ```
 
 ### 6.4 场景5：语音开启专注模式
@@ -178,12 +177,15 @@ sequenceDiagram
     U->>T: 语音"开启专注模式"
     T->>T: esp_xiaozhi 云端 ASR/LLM → self.focuslamp.focus.start
     T->>B: POST /api/focus/start{duration:30}
+    T->>H: POST /api/mode/set{"mode":"focus"}
     B->>B: focus_app_start(30): 倒计时/语音暂停联动
     B->>B: 小屏: 专注模式+心率+倒计时
-    B->>H: /api/led/off? + /api/led/on(环境光) + /api/eyes/expression(neutral)
+    B->>H: /api/led/off? + /api/led/on + /api/eyes/expression(neutral)
     B->>T: tts_bridge_speak("专注模式已开启")
     B->>B: 在位≥60s → tts_bridge_speak(久坐)
     B-->>H: (VLM转发) /api/detect/phone
+    T->>B: 对话中 POST /api/chat/state{"active":true} → 倒计时暂停
+    T->>B: 对话结束 POST /api/chat/state{"active":false} → 倒计时恢复
 ```
 
 ### 6.5 场景6：语音开启陪伴模式
@@ -197,6 +199,7 @@ sequenceDiagram
     U->>T: 语音"开启陪伴模式"
     T->>T: esp_xiaozhi 云端 → self.focuslamp.companion.start
     T->>B: POST /api/companion/start
+    T->>H: POST /api/mode/set{"mode":"companion"}
     B->>B: companion_app_start(): 底灯呼吸 + 小屏陪伴+心率
     B->>H: /api/led/off + /api/eyes/expression(happy)
     B->>T: tts_bridge_speak("主人，跟Focus聊聊天吧~")

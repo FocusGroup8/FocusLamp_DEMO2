@@ -34,7 +34,6 @@
 
 #include "websocket_manager.h"
 
-#include "base_bridge.h"
 #include "tts_inject.h"
 
 #include <string.h>
@@ -43,8 +42,9 @@ static const char *TAG = "TOUCH_HANDLER";
 
 /*---------------------------------------------------------------
  * Welcome messages (3 phrase commands, alternated on each tap).
- * The voice board (cloud) plays back the full greeting text
- * configured for each phrase command (欢迎语1/2/3).
+ * TTS playback only accepts short phrase triggers; the voice board (cloud)
+ * maps each phrase command (欢迎语1/2/3) to the full greeting text.
+ * The user must sync the corresponding cloud commands manually.
  *-------------------------------------------------------------*/
 static const char *s_welcome_messages[] = {
     "欢迎语1",
@@ -55,18 +55,14 @@ static const char *s_welcome_messages[] = {
 static uint8_t s_welcome_idx = 0; /* Alternating index into s_welcome_messages */
 
 /*---------------------------------------------------------------
- * Brightness levels: offsets added on top of the ambient base.
- * Double-tap cycles: base + {0,10,20,30,40}, capped at 100%.
+ * Brightness levels: fixed absolute 5-level brightness.
+ * The ambient light sensor module has been removed (hardware returns a
+ * fixed value), so head light brightness is no longer ambient-adjusted.
+ * Double-tap cycles 20% -> 40% -> 60% -> 80% -> 100% -> 20% ...
  *-------------------------------------------------------------*/
-static const uint8_t s_brightness_levels[] = {0, 10, 20, 30, 40};
+static const uint8_t s_brightness_levels[] = {20, 40, 60, 80, 100};
 #define BRIGHTNESS_LEVEL_COUNT 5
-#define BRIGHTNESS_DEFAULT_LEVEL 2 /* Index 2 = +20% above ambient base */
-
-/* Ambient light level (0-4) to base brightness mapping, shared with the
- * base board (contract §5.3): 0=80, 1=65, 2=50, 3=35, 4=25. */
-static const uint8_t s_ambient_base_brightness[] = {80, 65, 50, 35, 25};
-#define AMBIENT_LEVEL_COUNT 5
-#define AMBIENT_LEVEL_DEFAULT 2 /* Level 2 = normal indoor light (50%) */
+#define BRIGHTNESS_DEFAULT_LEVEL 2 /* Index 2 = 60% default */
 
 /*---------------------------------------------------------------
  * Module state (forward-declared for NVS functions)
@@ -81,7 +77,7 @@ static SemaphoreHandle_t s_wake_mutex = NULL;
  *
  * The gesture callback runs in the FreeRTOS timer service task (Tmr Svc),
  * whose stack is only ~2KB — too small for esp_http_client (asprintf etc.).
- * All HTTP-heavy work (ambient query, TTS injection) is therefore deferred
+ * All HTTP-heavy work (TTS injection) is therefore deferred
  * to a dedicated task via this queue.
  *-------------------------------------------------------------*/
 typedef enum {
@@ -150,68 +146,26 @@ static void nvs_reset_config(void)
 }
 
 /*---------------------------------------------------------------
- * Ambient light query helper
- *
- * Queries the base board for the ambient light level (0-4) and maps it to
- * the base brightness (contract §5.3). Falls back to the default level on
- * any failure so the touch flow always has a usable brightness.
+ * Current absolute brightness (from the fixed brightness level table).
+ * No ambient light dependency: the light sensor module was removed, so the
+ * head light always uses the fixed 5-level table (contract update).
  *-------------------------------------------------------------*/
-static uint8_t get_ambient_base_brightness(void)
+static uint8_t get_current_brightness(void)
 {
-    int level = AMBIENT_LEVEL_DEFAULT;
-    esp_err_t err = base_bridge_get_ambient(&level);
-    if (err != ESP_OK || level < 0 || level >= AMBIENT_LEVEL_COUNT) {
-        ESP_LOGW(TAG, "Ambient query failed (%s), fallback to level %d", err != ESP_OK ? esp_err_to_name(err) : "range",
-                 AMBIENT_LEVEL_DEFAULT);
-        level = AMBIENT_LEVEL_DEFAULT;
-    }
-    return s_ambient_base_brightness[level];
+    return s_brightness_levels[s_brightness_level_idx];
 }
 
 /*---------------------------------------------------------------
- * LED blink helper
- *
- * Blinks LED on-off-on with 100ms intervals for visual feedback.
- *-------------------------------------------------------------*/
-static void led_blink_feedback(void)
-{
-#if CONFIG_EXAMPLE_ENABLE_LED
-    if (!led_is_initialized())
-        return;
-
-    /* Blink pattern: ON(100ms) -> OFF(100ms) -> ON(100ms) */
-    led_set_brightness_with_cct(80);
-    vTaskDelay(pdMS_TO_TICKS(100));
-    led_off();
-    vTaskDelay(pdMS_TO_TICKS(100));
-    led_set_brightness_with_cct(80);
-    vTaskDelay(pdMS_TO_TICKS(100));
-    led_off();
-#else
-    (void)0;
-#endif
-}
-
-/*---------------------------------------------------------------
- * LED blink task (runs in task context, not from callback)
- *-------------------------------------------------------------*/
-static void led_blink_task(void *arg)
-{
-    (void)arg;
-    led_blink_feedback();
-    vTaskDelete(NULL);
-}
-
-/*---------------------------------------------------------------
- * TAP action: ambient-based light on + happy expression + welcome TTS.
+ * TAP action: head light on + happy expression + welcome TTS.
+ * Brightness is the current fixed level (no ambient dependency).
  * Runs in the dedicated action task (adequate stack for HTTP).
  *-------------------------------------------------------------*/
 static void handle_tap_action(void)
 {
     ESP_LOGI(TAG, "TAP action - welcome sequence");
 
-    /* 1. Turn on head LED at the ambient-based brightness (contract A4) */
-    uint8_t target_brightness = get_ambient_base_brightness();
+    /* 1. Turn on head LED at the current fixed brightness level */
+    uint8_t target_brightness = get_current_brightness();
 #if CONFIG_EXAMPLE_ENABLE_LED
     if (led_is_initialized()) {
         led_set_brightness_with_cct_fade(target_brightness, 300);
@@ -230,7 +184,7 @@ static void handle_tap_action(void)
         xSemaphoreGive(s_wake_mutex);
     }
 
-    /* 4. Inject a welcome message via the voice board (alternating, A3) */
+    /* 4. Inject a welcome message via the voice board (alternating, §5.2) */
     const char *welcome = s_welcome_messages[s_welcome_idx];
     s_welcome_idx       = (s_welcome_idx + 1) % WELCOME_MSG_COUNT;
     ESP_LOGI(TAG, "Welcome TTS inject: \"%s\"", welcome);
@@ -241,23 +195,18 @@ static void handle_tap_action(void)
 }
 
 /*---------------------------------------------------------------
- * DOUBLE_TAP action: cycle brightness (ambient base + offset).
+ * DOUBLE_TAP action: cycle fixed 5-level brightness (no ambient base).
+ * Each double tap advances one level; after the highest level it wraps
+ * around to the lowest (20% -> 100% -> 20%).
  * Runs in the dedicated action task (adequate stack for HTTP).
  *-------------------------------------------------------------*/
 static void handle_double_tap_action(void)
 {
     ESP_LOGI(TAG, "DOUBLE_TAP action - cycling brightness");
 
-    /* Ambient-based base brightness + level offset, capped at 100% (A4) */
-    uint8_t base_brightness = get_ambient_base_brightness();
-
-    /* Cycle to next brightness level */
+    /* Cycle to next brightness level (absolute value, no ambient) */
     s_brightness_level_idx = (s_brightness_level_idx + 1) % BRIGHTNESS_LEVEL_COUNT;
-    int32_t target_abs     = base_brightness + s_brightness_levels[s_brightness_level_idx];
-    if (target_abs > 100) {
-        target_abs = 100;
-    }
-    uint8_t target_brightness = (uint8_t)target_abs;
+    uint8_t target_brightness = s_brightness_levels[s_brightness_level_idx];
 
 #if CONFIG_EXAMPLE_ENABLE_LED
     if (led_is_initialized()) {
@@ -265,8 +214,8 @@ static void handle_double_tap_action(void)
     }
 #endif
 
-    ESP_LOGI(TAG, "Brightness level %d: base=%d offset=%d -> %d%%", s_brightness_level_idx + 1,
-             base_brightness, s_brightness_levels[s_brightness_level_idx], target_brightness);
+    ESP_LOGI(TAG, "Brightness level %d/%d: %d%%", s_brightness_level_idx + 1,
+             BRIGHTNESS_LEVEL_COUNT, target_brightness);
 
     /* Save brightness level to NVS */
     nvs_save_brightness_level();
@@ -366,15 +315,15 @@ static esp_err_t rest_api_touch_wake_handler(httpd_req_t *req)
 /*---------------------------------------------------------------
  * REST API: /api/touch/brightness (GET)
  *
- * Returns current brightness level info (level index and offset).
- * The absolute brightness is ambient-base + offset on the head board.
+ * Returns current brightness level info (level index and absolute %).
+ * The absolute brightness is the fixed level from the 5-level table.
  *-------------------------------------------------------------*/
 static esp_err_t rest_api_touch_brightness_handler(httpd_req_t *req)
 {
     uint8_t current = s_brightness_levels[s_brightness_level_idx];
     char resp[128];
     snprintf(resp, sizeof(resp),
-             "{\"code\":0,\"message\":\"success\",\"data\":{\"level_index\":%d,\"offset\":%d,\"total_levels\":%d}}",
+             "{\"code\":0,\"message\":\"success\",\"data\":{\"level_index\":%d,\"brightness\":%d,\"total_levels\":%d}}",
              s_brightness_level_idx + 1, current, BRIGHTNESS_LEVEL_COUNT);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, resp);
@@ -385,17 +334,14 @@ static esp_err_t rest_api_touch_brightness_handler(httpd_req_t *req)
  * REST API: /api/touch/reset (POST)
  *
  * Resets all touch configuration to defaults (NVS erase) and restores
- * the default level combined with the ambient-based base brightness.
+ * the default fixed brightness level.
  * Called remotely via MCP tool from wifi_test.
  *-------------------------------------------------------------*/
 static esp_err_t rest_api_touch_reset_handler(httpd_req_t *req)
 {
     nvs_reset_config();
 
-    uint8_t target = get_ambient_base_brightness() + s_brightness_levels[s_brightness_level_idx];
-    if (target > 100) {
-        target = 100;
-    }
+    uint8_t target = s_brightness_levels[s_brightness_level_idx];
 
 #if CONFIG_EXAMPLE_ENABLE_LED
     if (led_is_initialized()) {

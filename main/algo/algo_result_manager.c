@@ -10,7 +10,6 @@
 #include "cJSON.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "tts_inject.h"
 
 #if CONFIG_EXAMPLE_DEMO_EXPRESSIVE_EYES
 #include "expressive_eyes_display.h"
@@ -23,19 +22,17 @@ static const char *TAG = "algo_mgr";
 /*---------------------------------------------------------------
  * Constants
  *-------------------------------------------------------------*/
-/* VLM phone/computer detection: forward to base board + TTS to voice board.
- * Throttled to >=60s per source; a source change forwards immediately. */
+/* VLM phone/computer detection: forward to base board (which owns the TTS
+ * broadcast text per contract §5.1/§6.3). Throttled to >=60s per source;
+ * a source change forwards immediately. */
 #define VLM_FORWARD_THROTTLE_US (60LL * 1000LL * 1000LL) /* 60s */
 
 /* Gesture thumb up/down: forward to base board arm.
  * Throttled to >=1s, only on gesture change. */
 #define GESTURE_FORWARD_THROTTLE_US (1LL * 1000LL * 1000LL) /* 1s */
 
-/* TTS cooldown for sedentary reminder */
-#define SEDENTARY_TTS_COOLDOWN_US (60 * 1000000LL) /* 60s */
-
 /* Presence thresholds */
-#define SEDENTARY_THRESHOLD_S 60 /* 60s presence triggers sedentary TTS */
+#define SEDENTARY_THRESHOLD_S 60 /* 60s presence marks sedentary (TTS handled by base board radar) */
 #define PRESENCE_FALSE_RESET_S 5 /* 5s absence resets sedentary timer */
 
 /*---------------------------------------------------------------
@@ -47,7 +44,6 @@ static int64_t s_last_vlm_forward_us   = 0;
 static char s_last_gesture[32]         = {0};
 static int64_t s_last_gesture_us       = 0;
 static float s_sedentary_timer_s       = 0.0f;
-static int64_t s_last_sedentary_tts_ts = 0;
 static int64_t s_presence_false_ts     = 0;
 static bool s_initialized              = false;
 
@@ -127,12 +123,14 @@ static void handle_focus(const cJSON *focus_item)
 }
 
 /*---------------------------------------------------------------
- * Sub-handler: VLM game → forward to base board + TTS (Normal/Focus modes)
+ * Sub-handler: VLM game → forward to base board (Normal/Focus modes)
  *
- * Trigger: judgment=="是" AND trigger_source contains 手机/电脑.
- * Actions:
- *   1. base_bridge_post_detect_phone(source) → base board (arm response)
- *   2. tts_inject_speak(message) → voice board (user reminder)
+ * Trigger: judgment=="yes" AND trigger_source == phone/computer.
+ * Action:
+ *   base_bridge_post_detect_phone(source) → base board.
+ *   The base board owns the TTS text (contract §5.1/§6.3) and broadcasts
+ *   it to the voice board via tts_bridge; the head board does NOT inject
+ *   TTS directly to avoid duplicate broadcast.
  * Throttle: same source >=60s; source change forwards immediately.
  *-------------------------------------------------------------*/
 static void handle_vlm_game(const cJSON *vlm_item)
@@ -144,8 +142,8 @@ static void handle_vlm_game(const cJSON *vlm_item)
     if (!cJSON_IsString(judgment) || !judgment->valuestring) {
         return;
     }
-    /* VLM detector outputs Chinese: 是/否/不确定/等待检测 */
-    if (strcmp(judgment->valuestring, "是") != 0) {
+    /* VLM detector outputs English enum: yes/no/uncertain/pending/error */
+    if (strcmp(judgment->valuestring, "yes") != 0) {
         return;
     }
 
@@ -154,14 +152,11 @@ static void handle_vlm_game(const cJSON *vlm_item)
         return;
     }
 
-    const char *source  = NULL;
-    const char *tts_msg = NULL;
-    if (strstr(trigger_source->valuestring, "手机")) {
-        source  = "phone";
-        tts_msg = "检测到您正在玩手机，请注意专注";
-    } else if (strstr(trigger_source->valuestring, "电脑")) {
-        source  = "computer";
-        tts_msg = "检测到您正在使用电脑，请注意专注";
+    const char *source = NULL;
+    if (strcmp(trigger_source->valuestring, "phone") == 0) {
+        source = "phone";
+    } else if (strcmp(trigger_source->valuestring, "computer") == 0) {
+        source = "computer";
     }
     if (!source) {
         return;
@@ -172,28 +167,28 @@ static void handle_vlm_game(const cJSON *vlm_item)
     bool throttle_elapsed = (now_us - s_last_vlm_forward_us) >= VLM_FORWARD_THROTTLE_US;
 
     if (source_changed || throttle_elapsed) {
-        /* Forward detection to base board (failure logged, doesn't block TTS) */
+        /* Forward detection to base board (TTS broadcast happens there) */
         esp_err_t err = base_bridge_post_detect_phone(source);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "VLM forward to base failed: source=%s", source);
         }
 
-        /* TTS reminder to voice board */
-        if (tts_msg) {
-            tts_inject_speak(tts_msg);
-        }
-
-        /* Update throttle state (prevents TTS spam even if HTTP failed) */
+        /* Update throttle state (prevents spam even if HTTP failed) */
         snprintf(s_last_vlm_source, sizeof(s_last_vlm_source), "%s", source);
         s_last_vlm_forward_us = now_us;
-        ESP_LOGI(TAG, "vlm_game: %s detected -> base_bridge + TTS forwarded", source);
+        ESP_LOGI(TAG, "vlm_game: %s detected -> base_bridge forwarded", source);
     } else {
         ESP_LOGD(TAG, "vlm_game: %s throttled", source);
     }
 }
 
 /*---------------------------------------------------------------
- * Sub-handler: Presence → sedentary timer + TTS (Normal/Focus modes)
+ * Sub-handler: Presence → sedentary timer (Normal/Focus modes)
+ *
+ * NOTE: Sedentary TTS is NOT broadcast here. Per project decision the
+ * radar-based sedentary reminder on the base board (focus_app, radar
+ * presence >=60s) is the primary trigger; the camera presence path only
+ * tracks the timer and logs (no duplicate broadcast).
  *-------------------------------------------------------------*/
 static void handle_presence(const cJSON *presence_item)
 {
@@ -215,12 +210,9 @@ static void handle_presence(const cJSON *presence_item)
         s_sedentary_timer_s = (float)dur_s;
 
         if (s_sedentary_timer_s >= SEDENTARY_THRESHOLD_S) {
-            int64_t now = esp_timer_get_time();
-            if (now - s_last_sedentary_tts_ts >= SEDENTARY_TTS_COOLDOWN_US) {
-                s_last_sedentary_tts_ts = now;
-                tts_inject_speak("您已久坐超过一分钟，建议起身活动");
-                ESP_LOGI(TAG, "presence: sedentary %.0fs -> TTS forwarded", s_sedentary_timer_s);
-            }
+            /* Camera-based sedentary reminder disabled: radar on base board
+             * owns the sedentary TTS. Only log the state here. */
+            ESP_LOGD(TAG, "presence: sedentary %.0fs (TTS handled by base board radar)", s_sedentary_timer_s);
         }
     } else {
         /* Track absence duration; reset timer after PRESENCE_FALSE_RESET_S */
@@ -316,13 +308,12 @@ void algo_result_set_mode(algo_mode_t mode)
     s_current_mode = mode;
 
     /* Reset all timers and cooldowns on mode switch */
-    s_sedentary_timer_s     = 0.0f;
-    s_last_vlm_forward_us   = 0;
-    s_last_vlm_source[0]    = '\0';
-    s_last_gesture_us       = 0;
-    s_last_gesture[0]       = '\0';
-    s_last_sedentary_tts_ts = 0;
-    s_presence_false_ts     = 0;
+    s_sedentary_timer_s   = 0.0f;
+    s_last_vlm_forward_us = 0;
+    s_last_vlm_source[0]  = '\0';
+    s_last_gesture_us     = 0;
+    s_last_gesture[0]     = '\0';
+    s_presence_false_ts   = 0;
 
     /* Focus mode: 30min countdown would start here (spec §3.7) */
     if (mode == ALGO_MODE_FOCUS) {
@@ -344,7 +335,6 @@ esp_err_t algo_result_manager_init(void)
     s_last_gesture[0]       = '\0';
     s_last_gesture_us       = 0;
     s_sedentary_timer_s     = 0.0f;
-    s_last_sedentary_tts_ts = 0;
     s_presence_false_ts     = 0;
     s_initialized           = true;
     ESP_LOGI(TAG, "Algo result manager initialized (HTTP bridge mode)");

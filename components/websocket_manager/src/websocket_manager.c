@@ -796,6 +796,40 @@ static bool ws_raw_send_all(int fd, const uint8_t *data, size_t len, int64_t sen
     return true;
 }
 
+/* Build a server-side WebSocket frame (FIN + opcode + length, server side
+ * needs no masking) and send it with full partial-write handling.
+ * Returns ESP_OK on success, ESP_FAIL on connection error / 5s timeout. */
+static esp_err_t ws_send_ws_frame(int client_fd, uint8_t opcode, const uint8_t *data, size_t len,
+                                  int64_t send_start_us)
+{
+    uint8_t ws_hdr[10];
+    size_t ws_hdr_len;
+    ws_hdr[0] = 0x80 | opcode; /* FIN bit + opcode */
+    if (len <= 125) {
+        ws_hdr[1]  = (uint8_t)len;
+        ws_hdr_len = 2;
+    } else if (len <= 0xFFFF) {
+        ws_hdr[1]  = 126;
+        ws_hdr[2]  = (uint8_t)((unsigned)len >> 8);
+        ws_hdr[3]  = (uint8_t)((unsigned)len & 0xFF);
+        ws_hdr_len = 4;
+    } else {
+        ws_hdr[1]      = 127;
+        uint64_t len64 = (uint64_t)len;
+        for (int i = 0; i < 8; i++) {
+            ws_hdr[2 + i] = (uint8_t)(len64 >> ((7 - i) * 8));
+        }
+        ws_hdr_len = 10;
+    }
+    if (!ws_raw_send_all(client_fd, ws_hdr, ws_hdr_len, send_start_us)) {
+        return ESP_FAIL;
+    }
+    if (!ws_raw_send_all(client_fd, data, len, send_start_us)) {
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
 esp_err_t ws_manager_server_send_binary(int client_fd, const char *data, int len)
 {
     if (!s_server_running || s_server == NULL) {
@@ -819,37 +853,15 @@ esp_err_t ws_manager_server_send_binary(int client_fd, const char *data, int len
     buf->start_time_us = esp_timer_get_time();
 
     /* [FIX 2026-08-08] Send the whole WS frame with a raw blocking send()
-     * loop, bypassing httpd_ws_send_frame_async entirely. httpd's WS send
-     * path calls send_fn ONCE and only checks for <0; a partial write (send()
-     * returning fewer bytes than requested when the TCP window / cwnd is
-     * smaller than the frame) is treated as success, delivering a truncated
-     * WS frame that makes the client reset the connection (observed as
-     * repeated web_ui disconnects even though ws: failed=0). We build the WS
-     * header ourselves (FIN + binary opcode + length, server side needs no
-     * masking) and send header + payload with full partial-write handling. */
-    uint8_t ws_hdr[10];
-    size_t ws_hdr_len;
-    ws_hdr[0] = 0x80 | HTTPD_WS_TYPE_BINARY; /* FIN bit + binary opcode */
-    if (buf->len <= 125) {
-        ws_hdr[1]  = (uint8_t)buf->len;
-        ws_hdr_len = 2;
-    } else if (buf->len <= 0xFFFF) {
-        ws_hdr[1]  = 126;
-        ws_hdr[2]  = (uint8_t)((unsigned)buf->len >> 8);
-        ws_hdr[3]  = (uint8_t)((unsigned)buf->len & 0xFF);
-        ws_hdr_len = 4;
-    } else {
-        ws_hdr[1]      = 127;
-        uint64_t len64 = (uint64_t)buf->len;
-        for (int i = 0; i < 8; i++) {
-            ws_hdr[2 + i] = (uint8_t)(len64 >> ((7 - i) * 8));
-        }
-        ws_hdr_len = 10;
-    }
-
+     * loop, bypassing httpd_ws_send_frame_async entirely (see ws_send_ws_frame):
+     * httpd's WS send path calls send_fn ONCE and treats a partial write as
+     * success, delivering a truncated frame that makes the client reset the
+     * connection (observed as repeated web_ui disconnects even though
+     * ws: failed=0). We build the frame ourselves (FIN + binary opcode +
+     * length, server side needs no masking) with full partial-write handling. */
     int64_t send_start_us = esp_timer_get_time();
-    bool ok               = ws_raw_send_all(client_fd, ws_hdr, ws_hdr_len, send_start_us) &&
-                            ws_raw_send_all(client_fd, buf->data, (size_t)buf->len, send_start_us);
+    bool ok               = (ws_send_ws_frame(client_fd, HTTPD_WS_TYPE_BINARY, buf->data, (size_t)buf->len,
+                                       send_start_us) == ESP_OK);
 
     int64_t dur_us = esp_timer_get_time() - buf->start_time_us;
     esp_err_t ret  = ESP_OK;
@@ -954,6 +966,76 @@ esp_err_t ws_manager_server_send_camera_text(const char *data, int len)
         /* Connection-level send failure: mark dead so the slot is reclaimed
          * quickly instead of retrying against a broken socket every frame. */
         camera_client_record_failure();
+    }
+    return ret;
+}
+
+esp_err_t ws_manager_server_send_camera_pair(const char *text, int text_len, const char *bin, int bin_len)
+{
+    if (!s_server_running || s_server == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* Only the /camera client receives this header+JPEG pair. /mcp and /algo
+     * clients expect JSON-RPC only and would log warnings on unexpected
+     * frames. */
+    if (s_camera_client_fd < 0) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (bin_len > WS_FRAME_BUF_SIZE) {
+        ESP_LOGW(TAG, "Frame too large (%d > %d), dropping", bin_len, WS_FRAME_BUF_SIZE);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    /* Send the frame_header text frame and the JPEG binary frame as one
+     * atomic batch inside s_server_mutex: no other task can interleave a
+     * frame on the same socket in between, which previously corrupted the
+     * WS stream when text (sync) and binary (async httpd) were sent on
+     * separate paths. Both frames use the raw blocking send() path. */
+    esp_err_t ret = ESP_OK;
+    if (s_server_mutex) {
+        xSemaphoreTake(s_server_mutex, portMAX_DELAY);
+    }
+
+    int64_t send_start_us = esp_timer_get_time();
+    bool ok               = (ws_send_ws_frame(s_camera_client_fd, HTTPD_WS_TYPE_TEXT, (const uint8_t *)text,
+                                      (size_t)text_len, send_start_us) == ESP_OK) &&
+                            (ws_send_ws_frame(s_camera_client_fd, HTTPD_WS_TYPE_BINARY, (const uint8_t *)bin,
+                                      (size_t)bin_len, send_start_us) == ESP_OK);
+
+    int64_t dur_us = esp_timer_get_time() - send_start_us;
+    if (ok) {
+        s_send_stats.total_sent++;
+        s_send_stats.consecutive_failures  = 0;
+        s_send_stats.last_error            = 0;
+        s_send_stats.last_send_duration_us = dur_us;
+        if (s_send_stats.avg_send_duration_us == 0) {
+            s_send_stats.avg_send_duration_us = dur_us;
+        } else {
+            float new_avg = WS_SEND_DURATION_EWMA_ALPHA * (float)dur_us +
+                            (1.0f - WS_SEND_DURATION_EWMA_ALPHA) * (float)s_send_stats.avg_send_duration_us;
+            s_send_stats.avg_send_duration_us = (int64_t)new_avg;
+        }
+        camera_client_reset_failures();
+    } else {
+        s_send_stats.total_failed++;
+        s_send_stats.consecutive_failures++;
+        s_send_stats.last_send_duration_us = dur_us;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            /* Sustained congestion (5s send timeout): drop this pair but do
+             * NOT mark the connection dead — congestion is not a disconnect. */
+            s_send_stats.last_error = EAGAIN;
+            ret                     = ESP_FAIL;
+        } else {
+            /* Connection-level error (e.g. ECONNRESET/EBADF): mark dead so
+             * the camera slot is reclaimed quickly. */
+            s_send_stats.last_error = errno;
+            camera_client_record_failure();
+            ret = ESP_FAIL;
+        }
+    }
+
+    if (s_server_mutex) {
+        xSemaphoreGive(s_server_mutex);
     }
     return ret;
 }

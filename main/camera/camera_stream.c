@@ -588,39 +588,38 @@ static void camera_stream_task(void *arg)
             continue;
         }
 
-        /* Send frame_header text frame (JSON) before the binary JPEG payload.
-         * Algorithm client (docker main-client) uses seq to detect drops and
-         * out-of-order frames. timestamp is intentionally omitted: ESP32 has
-         * no SNTP, so esp_timer_get_time() is uptime (not Unix epoch). The
-         * algorithm client falls back to its local time.time()*1000 when the
-         * "timestamp" field is absent (header.get('timestamp', frame_timestamp)).
-         * Only the /camera client receives this text; /mcp and /algo clients
-         * are not disturbed (see ws_manager_server_send_camera_text). */
+        /* Send frame_header text frame (JSON) + JPEG binary frame as one
+         * atomic batch (ws_manager_server_send_camera_pair). The algorithm
+         * client (docker main-client) pairs the header with the following
+         * binary frame to obtain the frame sequence for drop / out-of-order
+         * detection. timestamp is intentionally omitted: ESP32 has no SNTP,
+         * so esp_timer_get_time() is uptime (not Unix epoch); the algorithm
+         * client falls back to its local time.time()*1000 when the
+         * "timestamp" field is absent. Only the /camera client receives the
+         * pair; /mcp and /algo clients are not disturbed. Sending both frames
+         * inside one s_server_mutex critical section prevents interleaving
+         * with frames sent by other tasks (previously a WS corruption issue). */
         s_frame_seq++;
         char header_buf[64];
         int header_len =
             snprintf(header_buf, sizeof(header_buf), "{\"type\":\"frame_header\",\"seq\":%u}", (unsigned)s_frame_seq);
+        ret = ESP_OK;
         if (header_len > 0 && header_len < (int)sizeof(header_buf)) {
-            /* [TEMP A/B 2026-08-08] frame_header text send disabled to verify
-             * whether text frames mixed into the binary stream (sent
-             * synchronously from the stream task while binary frames are sent
-             * asynchronously by the httpd worker on the SAME socket) cause
-             * WS frame interleaving/corruption and client RST ~1s after
-             * connect. Re-enable after verification. */
-            // ws_manager_server_send_camera_text(header_buf, header_len);
+            ret = ws_manager_server_send_camera_pair(header_buf, header_len, (const char *)jpeg_buf, (int)jpeg_size);
+        } else {
+            /* Header build failure: fall back to sending just the binary frame */
+            ret = ws_manager_server_broadcast_binary((const char *)jpeg_buf, (int)jpeg_size);
         }
 
-        /* Broadcast to /camera clients (async via httpd_queue_work).
-         * BBA+PI handle congestion control — here we just update counters.
-         * Send failures are tracked by ws_manager's send stats which BBA reads. */
-        ret = ws_manager_server_broadcast_binary((const char *)jpeg_buf, (int)jpeg_size);
-        if (ret != ESP_OK) {
-            s_state.frames_failed++;
-        } else {
+        /* Send failures are tracked by ws_manager's send stats which BBA reads.
+         * ESP_ERR_NOT_FOUND (no /camera client) is not counted as a failure. */
+        if (ret == ESP_OK) {
             s_state.frames_sent++;
             s_state.frame_size_sum += jpeg_size;
             s_state.frame_size_count++;
             window_bytes_sent += jpeg_size; /* For PI bitrate measurement */
+        } else if (ret != ESP_ERR_NOT_FOUND) {
+            s_state.frames_failed++;
         }
 
         /* Periodic stats log (every 10 seconds) */

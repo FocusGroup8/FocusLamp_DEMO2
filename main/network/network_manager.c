@@ -881,7 +881,7 @@ static esp_err_t mcp_cb_eyes_get_expression(const void *args_json, char *respons
  *-------------------------------------------------------------*/
 
 /* Copy a cJSON string field into a fixed buffer with truncation + NUL guard. */
-static void algo_copy_str(cJSON *parent, const char *key, char *dst, size_t dst_size)
+static void algo_copy_str(const cJSON *parent, const char *key, char *dst, size_t dst_size)
 {
     if (dst_size == 0) {
         return;
@@ -1104,6 +1104,55 @@ static esp_err_t rest_api_eyes_get_expression_handler(httpd_req_t *req)
 }
 
 /*---------------------------------------------------------------
+ * REST API: POST /api/mode/set
+ *
+ * Voice board -> head board mode sync (focus/companion/normal).
+ * Body: {"mode":"focus"|"companion"|"normal"}
+ * This is the HTTP counterpart of the WebSocket "mode.set" notification;
+ * both call algo_result_set_mode() to switch the algorithm result handling
+ * (e.g. enable VLM/presence in FOCUS, gestures in COMPANION).
+ *-------------------------------------------------------------*/
+static esp_err_t rest_api_mode_set_handler(httpd_req_t *req)
+{
+    char buf[128] = {0};
+    int recv      = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (recv <= 0) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    cJSON *mode_item = cJSON_GetObjectItem(root, "mode");
+    if (!cJSON_IsString(mode_item) || !mode_item->valuestring) {
+        cJSON_Delete(root);
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    if (strcmp(mode_item->valuestring, "focus") == 0) {
+        algo_result_set_mode(ALGO_MODE_FOCUS);
+        ESP_LOGI(TAG, "REST: mode.set -> FOCUS");
+    } else if (strcmp(mode_item->valuestring, "companion") == 0) {
+        algo_result_set_mode(ALGO_MODE_COMPANION);
+        ESP_LOGI(TAG, "REST: mode.set -> COMPANION");
+    } else {
+        algo_result_set_mode(ALGO_MODE_NORMAL);
+        ESP_LOGI(TAG, "REST: mode.set -> NORMAL");
+    }
+
+    cJSON_Delete(root);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"code\":0,\"message\":\"success\",\"data\":{}}");
+    return ESP_OK;
+}
+
+/*---------------------------------------------------------------
  * Register REST API endpoints on the HTTP server
  *-------------------------------------------------------------*/
 static void safe_register_uri(const httpd_uri_t *uri)
@@ -1247,7 +1296,16 @@ static void register_rest_api_handlers(void)
     };
     safe_register_uri(&api_eyes_get_expression);
 
-    ESP_LOGI(TAG, "REST API endpoints registered: /api/camera/*, /api/display/*, /api/led/*, /api/eyes/*, /api/status");
+    /* Mode sync: voice board -> head board (focus/companion/normal) */
+    const httpd_uri_t api_mode_set = {
+        .uri     = "/api/mode/set",
+        .method  = HTTP_POST,
+        .handler = rest_api_mode_set_handler,
+    };
+    safe_register_uri(&api_mode_set);
+
+    ESP_LOGI(TAG,
+             "REST API endpoints registered: /api/camera/*, /api/display/*, /api/led/*, /api/eyes/*, /api/mode/set, /api/status");
 }
 
 /*---------------------------------------------------------------

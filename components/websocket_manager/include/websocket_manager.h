@@ -180,6 +180,22 @@ esp_err_t ws_manager_server_broadcast_binary(const char *data, int len);
 esp_err_t ws_manager_server_send_camera_text(const char *data, int len);
 
 /**
+ * @brief Send a frame_header text frame + JPEG binary frame to the /camera
+ *        client as one atomic batch (single s_server_mutex critical section).
+ *
+ * Both frames use the raw blocking send() path so they cannot interleave with
+ * frames from other tasks on the same socket. The algorithm client pairs the
+ * text frame with the following binary frame to obtain the frame sequence.
+ *
+ * @param text      frame_header JSON text payload
+ * @param text_len  text payload length
+ * @param bin       JPEG binary payload
+ * @param bin_len   binary payload length
+ * @return ESP_OK on success, ESP_ERR_NOT_FOUND if no /camera client is connected
+ */
+esp_err_t ws_manager_server_send_camera_pair(const char *text, int text_len, const char *bin, int bin_len);
+
+/**
  * @brief Get number of connected clients
  *
  * @return Number of connected clients

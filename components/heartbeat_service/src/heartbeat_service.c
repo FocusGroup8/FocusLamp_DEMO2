@@ -78,14 +78,7 @@ static void heartbeat_timer_callback(void *arg)
             }
         }
 
-        /* Send Ping frame */
-        httpd_ws_frame_t ping_pkt = {
-            .type    = HTTPD_WS_TYPE_PING,
-            .final   = true,
-            .payload = NULL,
-            .len     = 0,
-        };
-        /* Use ws_manager to send ping */
+        /* Send Ping frame (via ws_manager; a raw httpd ping frame is not used) */
         esp_err_t ret = ws_manager_server_send_text(s_client_fds[i], "", 0);
         /* Note: proper Ping would use httpd_ws_send_frame_async, but we use
          * the existing ws_manager API. The ping_interval in esp_websocket_client

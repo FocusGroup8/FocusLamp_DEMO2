@@ -9,6 +9,8 @@
 #include "cJSON.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "sdkconfig.h"
 
 #include <stdio.h>
@@ -24,6 +26,10 @@ static const char *TAG = "TTS_INJECT";
 #endif
 
 #define TTS_INJECT_HTTP_TIMEOUT_MS 2000
+/* WiFi 链路（ESP-Hosted）存在间歇性抖动，单次 POST 偶发失败。
+ * 增加重试以提升欢迎语/提醒注入可靠性（临时诊断期间观察值）。 */
+#define TTS_INJECT_RETRY_COUNT 3
+#define TTS_INJECT_RETRY_DELAY_MS 300
 
 esp_err_t tts_inject_speak(const char *text)
 {
@@ -52,34 +58,47 @@ esp_err_t tts_inject_speak(const char *text)
 
     ESP_LOGI(TAG, "Sending TTS: \"%s\" -> %s", text, url);
 
-    esp_http_client_config_t config = {
-        .url        = url,
-        .method     = HTTP_METHOD_POST,
-        .timeout_ms = TTS_INJECT_HTTP_TIMEOUT_MS,
-    };
-
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-    if (!client) {
-        ESP_LOGE(TAG, "Failed to init HTTP client");
-        free(json_str);
-        return ESP_ERR_NO_MEM;
-    }
-
-    esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_post_field(client, json_str, strlen(json_str));
-
-    esp_err_t err = esp_http_client_perform(client);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "POST /api/tts/speak failed: %s", esp_err_to_name(err));
-    } else {
-        int status = esp_http_client_get_status_code(client);
-        ESP_LOGI(TAG, "TTS inject response: HTTP %d", status);
-        if (status != 200) {
-            err = ESP_FAIL;
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 1; attempt <= TTS_INJECT_RETRY_COUNT; attempt++) {
+        if (attempt > 1) {
+            ESP_LOGW(TAG, "TTS inject retry (%d/%d)", attempt, TTS_INJECT_RETRY_COUNT);
+            vTaskDelay(pdMS_TO_TICKS(TTS_INJECT_RETRY_DELAY_MS));
         }
+
+        esp_http_client_config_t config = {
+            .url        = url,
+            .method     = HTTP_METHOD_POST,
+            .timeout_ms = TTS_INJECT_HTTP_TIMEOUT_MS,
+        };
+
+        esp_http_client_handle_t client = esp_http_client_init(&config);
+        if (!client) {
+            ESP_LOGE(TAG, "Failed to init HTTP client");
+            continue;
+        }
+
+        esp_http_client_set_header(client, "Content-Type", "application/json");
+        esp_http_client_set_post_field(client, json_str, strlen(json_str));
+
+        err = esp_http_client_perform(client);
+        if (err == ESP_OK) {
+            int status = esp_http_client_get_status_code(client);
+            if (status == 200) {
+                ESP_LOGI(TAG, "TTS inject response: HTTP %d (attempt %d)", status, attempt);
+                esp_http_client_cleanup(client);
+                free(json_str);
+                return ESP_OK;
+            }
+            ESP_LOGW(TAG, "TTS inject HTTP %d (attempt %d)", status, attempt);
+            err = ESP_FAIL;
+        } else {
+            ESP_LOGW(TAG, "POST /api/tts/speak failed (attempt %d): %s",
+                     attempt, esp_err_to_name(err));
+        }
+
+        esp_http_client_cleanup(client);
     }
 
-    esp_http_client_cleanup(client);
     free(json_str);
     return err;
 }

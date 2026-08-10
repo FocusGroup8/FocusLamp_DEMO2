@@ -94,8 +94,8 @@ typedef struct {
     char engage_level_name[32];  /*!< Engagement level name, e.g. "Engaged" */
     float focus_score;           /*!< Focus score 0..1 */
     char gesture[32];            /*!< Gesture name, e.g. "Thumb_Up" */
-    char vlm_judgment[16];       /*!< VLM game detector judgment: 是/否/不确定/等待检测 */
-    char vlm_trigger_source[16]; /*!< VLM trigger source: None/手机/电脑 */
+    char vlm_judgment[16];       /*!< VLM game detector judgment: yes/no/uncertain/pending/error */
+    char vlm_trigger_source[16]; /*!< VLM trigger source: None/phone/computer */
     char vlm_reason[128];        /*!< VLM detection reason text */
     bool present;                /*!< User presence (true=present, derived from face_position.valid) */
     float presence_duration_s;   /*!< Presence duration in seconds (0.0 when absent) */

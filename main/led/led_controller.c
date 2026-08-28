@@ -68,7 +68,8 @@ static uint32_t percent_to_duty(uint8_t percent)
     if (percent > LED_BRIGHTNESS_MAX) {
         percent = LED_BRIGHTNESS_MAX;
     }
-    /* Scale so 100% brightness = LED_MAX_DUTY_PERCENT of full PWM range */
+    /* Scale so 100% brightness = 100% of full PWM range (duty = percent * 1023 / 100).
+     * Brightness percentage therefore equals the PWM duty cycle percentage directly. */
     uint32_t max_duty = (uint32_t)LED_PWM_MAX_DUTY * LED_MAX_DUTY_PERCENT / 100;
     return (uint32_t)percent * max_duty / LED_BRIGHTNESS_MAX;
 }

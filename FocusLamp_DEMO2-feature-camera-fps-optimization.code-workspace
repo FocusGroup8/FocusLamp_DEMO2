@@ -1,0 +1,20 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../FocusLamp_DEMO2-dowm"
+		},
+		{
+			"path": "../FocusLamp_DEMO2-feature-tts-broadcast"
+		}
+	],
+	"settings": {
+		"clangd.arguments": [
+			"--background-index",
+			"--query-driver=**",
+			"--compile-commands-dir=c:\\Projects\\Espressif_Projects\\mipi_dsi\\build"
+		]
+	}
+}

@@ -34,6 +34,7 @@
 
 #include "tts_inject.h"
 #include "websocket_manager.h"
+#include "base_bridge.h"
 
 #include <string.h>
 
@@ -54,14 +55,13 @@ static const char *s_welcome_messages[] = {
 static uint8_t s_welcome_idx = 0; /* Alternating index into s_welcome_messages */
 
 /*---------------------------------------------------------------
- * Brightness levels: fixed absolute 5-level brightness.
- * The ambient light sensor module has been removed (hardware returns a
- * fixed value), so head light brightness is no longer ambient-adjusted.
- * Double-tap cycles 20% -> 40% -> 60% -> 80% -> 100% -> 20% ...
+ * Brightness levels: fixed 5-level PWM duty cycle.
+ * Duty cycle is expressed as a percentage of the full PWM range
+ * (0-100%). Double-tap cycles 3% -> 7% -> 12% -> 16% -> 20% -> 3% ...
  *-------------------------------------------------------------*/
-static const uint8_t s_brightness_levels[] = {20, 40, 60, 80, 100};
+static const uint8_t s_brightness_levels[] = {3, 7, 12, 16, 20};
 #define BRIGHTNESS_LEVEL_COUNT 5
-#define BRIGHTNESS_DEFAULT_LEVEL 2 /* Index 2 = 60% default */
+#define BRIGHTNESS_DEFAULT_LEVEL 2 /* Index 2 = 12% duty default */
 
 /*---------------------------------------------------------------
  * Module state (forward-declared for NVS functions)
@@ -146,26 +146,49 @@ static void nvs_reset_config(void)
 }
 
 /*---------------------------------------------------------------
- * Current absolute brightness (from the fixed brightness level table).
- * No ambient light dependency: the light sensor module was removed, so the
- * head light always uses the fixed 5-level table (contract update).
+ * Ambient light dependent brightness selection.
+ *
+ * Queries the base board's ambient light level (0-4, from the light
+ * sensor on GPIO21) and maps it to a brightness table index with
+ * environment compensation: darker room -> brighter head light.
+ *   ambient level 0 (dark)   -> index 4 (20% duty, brightest)
+ *   ambient level 4 (bright) -> index 0 (3%  duty, dimmest)
+ * On query failure the current manual level is kept.
+ *
+ * Runs in the action task context, which has an adequate stack for
+ * the synchronous HTTP request to the base board.
  *-------------------------------------------------------------*/
-static uint8_t get_current_brightness(void)
+static int ambient_level_to_brightness_idx(int level)
 {
-    return s_brightness_levels[s_brightness_level_idx];
+    if (level <= 0) return 4;
+    if (level >= 4) return 0;
+    return 4 - level;
+}
+
+static uint8_t get_ambient_brightness_idx(void)
+{
+    int level = -1;
+    if (base_bridge_get_ambient(&level) == ESP_OK && level >= 0 && level <= 4) {
+        int idx = ambient_level_to_brightness_idx(level);
+        ESP_LOGI(TAG, "Ambient level %d -> brightness index %d (%d%%)", level, idx,
+                 s_brightness_levels[idx]);
+        return (uint8_t)idx;
+    }
+    ESP_LOGW(TAG, "Ambient query failed, keeping manual level %d", s_brightness_level_idx);
+    return s_brightness_level_idx;
 }
 
 /*---------------------------------------------------------------
  * TAP action: head light on + happy expression + welcome TTS.
- * Brightness is the current fixed level (no ambient dependency).
+ * Brightness is ambient-light dependent (darker room -> brighter).
  * Runs in the dedicated action task (adequate stack for HTTP).
  *-------------------------------------------------------------*/
 static void handle_tap_action(void)
 {
     ESP_LOGI(TAG, "TAP action - welcome sequence");
 
-    /* 1. Turn on head LED at the current fixed brightness level */
-    uint8_t target_brightness = get_current_brightness();
+    /* 1. Turn on head LED at ambient-light dependent brightness */
+    uint8_t target_brightness = s_brightness_levels[get_ambient_brightness_idx()];
 #if CONFIG_EXAMPLE_ENABLE_LED
     if (led_is_initialized()) {
         led_set_brightness_with_cct_fade(target_brightness, 300);
@@ -197,7 +220,7 @@ static void handle_tap_action(void)
 /*---------------------------------------------------------------
  * DOUBLE_TAP action: cycle fixed 5-level brightness (no ambient base).
  * Each double tap advances one level; after the highest level it wraps
- * around to the lowest (20% -> 100% -> 20%).
+ * around to the lowest (3% -> 7% -> 12% -> 16% -> 20% -> 3%).
  * Runs in the dedicated action task (adequate stack for HTTP).
  *-------------------------------------------------------------*/
 static void handle_double_tap_action(void)

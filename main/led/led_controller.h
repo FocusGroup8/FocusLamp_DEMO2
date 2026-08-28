@@ -32,7 +32,7 @@ extern "C" {
 #define LED_PWM_FREQ_HZ 5000               /*!< PWM frequency 5kHz (above visible flicker) */
 #define LED_PWM_DUTY_RES LEDC_TIMER_10_BIT /*!< 10-bit duty resolution (0-1023) */
 #define LED_PWM_MAX_DUTY 1023              /*!< Full-scale duty value for 10-bit resolution */
-#define LED_MAX_DUTY_PERCENT 30            /*!< Safety limit: max PWM duty capped at 30% to prevent over-brightness */
+#define LED_MAX_DUTY_PERCENT 100           /*!< Max PWM duty as percentage of full scale (100% = full on) */
 
 #define LED_CCT_MIN 0          /*!< Minimum color temperature (warmest) */
 #define LED_CCT_MAX 100        /*!< Maximum color temperature (coolest) */

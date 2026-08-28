@@ -40,7 +40,12 @@ static uint32_t s_frame_seq = 0;
  * Based on empirical estimates at 800x640 YUV420:
  * LOW:  ~10KB/frame @ 5fps  → ~50KB/s  (0.40 Mbps) - very stable
  * MID:  ~10KB/frame @ 10fps → ~100KB/s (0.80 Mbps) - stable, current baseline
- * HIGH: ~13KB/frame @ 12fps → ~156KB/s (1.25 Mbps) - best effort */
+ * HIGH: ~12KB/frame @ 10fps → ~120KB/s (0.96 Mbps) - best effort
+ * [FIX 2026-08-10] HIGH lowered 20q/12fps->18q/10fps (~156KB/s->120KB/s):
+ * the ESP-Hosted (SDIO bridged) link sustained high send-duration/failure
+ * at the former peak during long runs (repeated send:119 + reconnect
+ * cycles); capping the peak keeps the stream within the link's real
+ * throughput while BBA still adapts below it. */
 typedef enum { BBA_LEVEL_LOW = 0, BBA_LEVEL_MID = 1, BBA_LEVEL_HIGH = 2, BBA_LEVEL_COUNT } bba_level_t;
 
 typedef struct {
@@ -51,7 +56,7 @@ typedef struct {
 static const bba_level_config_t s_bba_levels[BBA_LEVEL_COUNT] = {
     [BBA_LEVEL_LOW]  = {.quality = 15, .fps = 5},
     [BBA_LEVEL_MID]  = {.quality = 16, .fps = 10},
-    [BBA_LEVEL_HIGH] = {.quality = 20, .fps = 12},
+    [BBA_LEVEL_HIGH] = {.quality = 18, .fps = 10},
 };
 
 /* BBA evaluation interval (seconds) */
@@ -193,7 +198,7 @@ static bba_level_t bba_evaluate(bba_state_t *bba, const ws_send_stats_t *stats, 
 static const uint32_t s_bba_target_bitrate[BBA_LEVEL_COUNT] = {
     [BBA_LEVEL_LOW]  = 50 * 1024,  /*  50 KB/s (0.40 Mbps) */
     [BBA_LEVEL_MID]  = 100 * 1024, /* 100 KB/s (0.80 Mbps) */
-    [BBA_LEVEL_HIGH] = 156 * 1024, /* 156 KB/s (1.25 Mbps) */
+    [BBA_LEVEL_HIGH] = 120 * 1024, /* 120 KB/s (0.96 Mbps) */
 };
 
 /* Q value range constraints per BBA level.

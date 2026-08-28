@@ -26,6 +26,7 @@
 /* dowm service 层：替代 DEMO2 的 device_controller 模拟层，
  * 让小智 MCP 工具直接驱动真实硬件 */
 #include "led_service.h"
+#include "servo_service.h"
 #include "arm_service.h"
 #include "audio_service.h"
 #include "event_bus.h"
@@ -380,8 +381,12 @@ static esp_mcp_value_t mcp_tool_arm_go_back(const esp_mcp_property_list_t *prope
 {
     (void)properties;
     ESP_LOGI(TAG, "[MCP] self.arm.go_back");
+    /* 先停止当前动作序列（stop_action 内部会释放扭矩） */
     event_t ev = { .type = EV_ARM_SEQUENCE_STOP, .timestamp = event_bus_get_timestamp() };
     event_bus_publish(&ev);
+    /* 再使能舵机并回到 home 位置（go_home 非阻塞，下发指令后即返回） */
+    servo_service_enable();
+    servo_service_go_home(1000);
     return esp_mcp_value_create_bool(true);
 }
 

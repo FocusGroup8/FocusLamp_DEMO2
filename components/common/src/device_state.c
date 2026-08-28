@@ -120,6 +120,19 @@ esp_err_t device_state_set_servo(int16_t em3_pos, const int16_t lx_pos[4], bool 
     return ESP_OK;
 }
 
+esp_err_t device_state_set_ambient_light(uint8_t level, float lux)
+{
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    portENTER_CRITICAL(&s_lock);
+    s_state.ambient_light.level = level;
+    s_state.ambient_light.lux   = lux;
+    portEXIT_CRITICAL(&s_lock);
+    return ESP_OK;
+}
+
 esp_err_t device_state_set_key(uint8_t point, uint8_t event, uint32_t event_time_ms, uint8_t active_points)
 {
     if (!s_initialized) {

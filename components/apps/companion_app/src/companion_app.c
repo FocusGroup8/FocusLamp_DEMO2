@@ -8,14 +8,17 @@
 #include "led_service.h"
 #include "lcd_service.h"
 #include "servo_service.h"
-#include "arm_service.h"
 #include "lamp_head_controller.h"
 #include "tts_bridge.h"
 #include "data_type.h"
 #include "device_state.h"
 #include "error_code.h"
+#include "sensor_service.h"
+#include "system_config.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "companion_app";
 
@@ -23,83 +26,13 @@ static const char *TAG = "companion_app";
 static bool s_initialized = false;
 static bool s_running = false;
 
-static esp_timer_handle_t s_companion_timer = NULL;
-static uint8_t s_hue = 0; /* For RGB gradual cycling */
-
-/* ===================== Predefined Companion Action Sequence ===================== */
-/* Default companion action sequence; adjust servo positions and timing as needed */
-static const action_step_t s_companion_steps[] = {
-    { 0, 500,  800, 200 },
-    { 1, 600,  800, 200 },
-    { 2, 400,  800, 200 },
-    { 0, 512, 1000, 300 },
-};
-
-static const action_sequence_t s_companion_seq = {
-    .steps      = s_companion_steps,
-    .step_count = 4,
-    .loop_count = 0, /* Infinite loop */
-};
-
 /* ===================== Internal Helpers ===================== */
-static void hsv_to_rgb(uint16_t h, uint8_t s, uint8_t v, uint8_t *r, uint8_t *g, uint8_t *b)
+/* 按 README 场景7：底部氛围呼吸灯（固定效果，不结合环境光），头部灯光关闭 */
+static void companion_app_apply_lighting(void)
 {
-    uint8_t s_255 = (uint16_t)s * 255 / 100;
-    uint8_t v_255 = (uint16_t)v * 255 / 100;
-    uint8_t region = (h / 60) % 6;
-    uint8_t remainder = (h % 60) * 255 / 60;
-
-    uint8_t p = (v_255 * (255 - s_255)) / 255;
-    uint8_t q = (v_255 * (255 - (s_255 * remainder) / 255)) / 255;
-    uint8_t t = (v_255 * (255 - (s_255 * (255 - remainder)) / 255)) / 255;
-
-    switch (region) {
-        case 0: *r = v_255; *g = t; *b = p; break;
-        case 1: *r = q; *g = v_255; *b = p; break;
-        case 2: *r = p; *g = v_255; *b = t; break;
-        case 3: *r = p; *g = q; *b = v_255; break;
-        case 4: *r = t; *g = p; *b = v_255; break;
-        default: *r = v_255; *g = p; *b = q; break;
-    }
-}
-
-static void companion_app_update_lighting(void)
-{
-    /* Gradual RGB color cycling */
-    hsv_color_t hsv = {
-        .h = s_hue,
-        .s = 80,
-        .v = 60,
-    };
-    uint8_t r, g, b;
-    hsv_to_rgb(hsv.h, hsv.s, hsv.v, &r, &g, &b);
-    led_service_set_color(r, g, b);
-    ESP_LOGI(TAG, "Companion lighting: HSV(%u,%u,%u) -> RGB(%u,%u,%u)",
-             hsv.h, hsv.s, hsv.v, r, g, b);
-    s_hue = (s_hue + 1) % 360;
-}
-
-static void companion_app_update_expression(void)
-{
-    /* Cycle through friendly expressions */
-    static lcd_expression_t expressions[] = {
-        LCD_EXPRESSION_HAPPY,
-        LCD_EXPRESSION_HAPPY,
-        LCD_EXPRESSION_SURPRISED,
-    };
-    static uint8_t idx = 0;
-    lcd_service_expression_set(expressions[idx]);
-    idx = (idx + 1) % (sizeof(expressions) / sizeof(expressions[0]));
-}
-
-static void companion_app_timer_callback(void *arg)
-{
-    (void)arg;
-    if (!s_running) {
-        return;
-    }
-    companion_app_update_lighting();
-    companion_app_update_expression();
+    led_service_set_effect(LED_EFFECT_BREATHING);
+    lamp_head_led_off();
+    ESP_LOGI(TAG, "Companion lighting: base breathing, head off");
 }
 
 /* ===================== Event Handlers ===================== */
@@ -128,18 +61,6 @@ esp_err_t companion_app_init(void)
         return ret;
     }
 
-    const esp_timer_create_args_t timer_args = {
-        .callback = companion_app_timer_callback,
-        .arg = NULL,
-        .name = "companion_timer",
-        .dispatch_method = ESP_TIMER_TASK,
-    };
-    ret = esp_timer_create(&timer_args, &s_companion_timer);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to create companion timer");
-        return ret;
-    }
-
     s_initialized = true;
     ESP_LOGI(TAG, "Companion app initialized");
     return ESP_OK;
@@ -154,36 +75,28 @@ esp_err_t companion_app_start(void)
         return ERR_BUSY;
     }
 
-    s_hue = 0;
     s_running = true;
 
-    /* 底部灯光氛围呼吸灯 */
-    led_service_set_mode(LED_MODE_AMBIENT);
-    led_service_set_effect(LED_EFFECT_BREATHING);
-
-    /* 头部灯光关闭 */
-    lamp_head_led_off();
+    /* 按 README 场景7：底部氛围呼吸灯，头部灯光关闭 */
+    companion_app_apply_lighting();
 
     /* 大屏幕显示开心表情 */
     lamp_head_set_expression("happy");
 
-    /* 小屏幕显示陪伴模式 */
+    /* 小屏幕显示陪伴模式信息页（不显示表情） */
     lcd_service_mode_set(LCD_MODE_COMPANION);
-    lcd_service_expression_set(LCD_EXPRESSION_HAPPY);
-    /* 表情页叠加"陪伴模式"与心率 */
-    lcd_service_set_companion_overlay(true);
 
-    /* Start arm friendly action loop */
-    arm_service_load_action(&s_companion_seq);
-    arm_service_start_action();
-
-    /* Start periodic timer for lighting updates (100ms) */
-    esp_timer_start_periodic(s_companion_timer, 100000);
+    /* 先归位：使能舵机并回到 home 位置，机械臂保持静止，等待手势触发单步动作 */
+    esp_err_t ret = servo_service_enable();
+    if (ret == ESP_OK) {
+        servo_service_go_home(1000);
+        vTaskDelay(pdMS_TO_TICKS(1200));
+    }
 
     event_bus_publish_simple(EV_APP_STATE_CHANGED);
 
-    /* TTS播报：主人，跟Focus聊聊天吧~ */
-    tts_bridge_speak("主人，跟Focus聊聊天吧~");
+    /* TTS播报：陪伴开启（短指令，云端映射完整文案） */
+    tts_bridge_speak("陪伴开启");
 
     ESP_LOGI(TAG, "Companion app started");
     return ESP_OK;
@@ -198,21 +111,19 @@ esp_err_t companion_app_stop(void)
         return ERR_BUSY;
     }
 
-    if (s_companion_timer != NULL) {
-        esp_timer_stop(s_companion_timer);
+    /* 陪伴模式不运行自动动作序列，退出时仅需归位（手势单步动作可能已使机械臂离开 home） */
+    esp_err_t ret = servo_service_enable();
+    if (ret == ESP_OK) {
+        servo_service_go_home(1000);
+        vTaskDelay(pdMS_TO_TICKS(1200));
     }
-
-    /* Stop arm action */
-    arm_service_stop_action();
 
     /* 恢复头部表情为正常 */
     lamp_head_set_expression("neutral");
 
-    /* 关闭小屏陪伴叠加层 */
-    lcd_service_set_companion_overlay(false);
-
     /* Restore default lighting and LCD */
     led_service_turn_off();
+    lcd_service_set_companion_overlay(false);
     lcd_service_page_switch_to(LCD_PAGE_EXPRESSION);
     lcd_service_expression_set(LCD_EXPRESSION_NORMAL);
 

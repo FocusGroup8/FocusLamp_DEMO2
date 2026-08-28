@@ -32,6 +32,7 @@
 /* Drivers */
 #include "power_driver.h"
 #include "led_driver.h"
+#include "light_sensor_driver.h"
 #include "touch_driver.h"
 #include "servo_driver.h"
 #include "radar_driver.h"
@@ -101,8 +102,14 @@ static esp_err_t step_bsp_init(void)
     ESP_LOGI(TAG, "Skipping bsp_spi_init; LCD driver owns SPI2 bus initialization");
 
     /* I2S/audio_bridge init: DISABLED (no audio hardware) */
-    /* bsp_adc_init: DISABLED (ambient light sensor removed — ADC had no
-     * other consumers) */
+
+    /* ADC（光感 TEMT6000，GPIO21/ADC1_CH5）：bsp_adc_init 提供 adc_oneshot
+     * 句柄，供 light_sensor_driver 读取环境光。 */
+    ret = bsp_adc_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "bsp_adc_init failed");
+        return ret;
+    }
 
     return ESP_OK;
 }
@@ -142,6 +149,16 @@ static esp_err_t step_touch_driver_init(void)
     esp_err_t ret = touch_driver_init();
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "touch_driver_init failed: %s (continuing)", esp_err_to_name(ret));
+        return ESP_OK;  /* 失败不阻断，返回 OK 让后续 step 继续 */
+    }
+    return ESP_OK;
+}
+
+static esp_err_t step_light_sensor_driver_init(void)
+{
+    esp_err_t ret = light_sensor_driver_init();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "light_sensor_driver_init failed: %s (continuing)", esp_err_to_name(ret));
         return ESP_OK;  /* 失败不阻断，返回 OK 让后续 step 继续 */
     }
     return ESP_OK;
@@ -283,7 +300,6 @@ static esp_err_t step_network_manager_init(void)
 #include "game_app.h"
 #include "music_rhythm_app.h"
 #include "arm_action_app.h"
-#include "demo_fake_detection.h"
 
 static esp_err_t step_apps_init(void)
 {
@@ -334,13 +350,6 @@ static esp_err_t step_apps_init(void)
         ESP_LOGW(TAG, "arm_action_app_init failed (optional): %s", esp_err_to_name(ret));
     }
 
-#if CONFIG_PROJECT_DEMO_FAKE_DETECTION_ENABLE
-    ret = demo_fake_detection_init();
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "demo_fake_detection_init failed (optional): %s", esp_err_to_name(ret));
-    }
-#endif /* CONFIG_PROJECT_DEMO_FAKE_DETECTION_ENABLE */
-
     return ESP_OK;
 }
 
@@ -354,6 +363,7 @@ static const init_step_t s_init_steps[] = {
     { "power_driver",           step_power_driver_init,        true  },
     { "led_driver",             step_led_driver_init,          true  },
     { "touch_driver",           step_touch_driver_init,        true  },
+    { "light_sensor_driver",    step_light_sensor_driver_init, true  },
     { "servo_driver",           step_servo_driver_init,        true  },
     { "radar_driver",           step_radar_driver_init,        true  },
     { "power_service",          step_power_service_init,       true  },

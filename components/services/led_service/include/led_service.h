@@ -94,6 +94,14 @@ esp_err_t led_service_set_brightness(uint8_t brightness);
 esp_err_t led_service_set_brightness_level(uint8_t level);
 
 /**
+ * @brief Map ambient light level (0-4) to LED brightness level (1-5).
+ *        Same-direction one-to-one mapping: dark → low, bright → high.
+ * @param ambient_level  Ambient light level (0-4)
+ * @return uint8_t LED brightness level (1-5)
+ */
+uint8_t led_service_level_from_ambient(uint8_t ambient_level);
+
+/**
  * @brief Get current brightness level (0-5).
  * @return uint8_t Current brightness level
  */

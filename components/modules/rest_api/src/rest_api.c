@@ -31,6 +31,7 @@
 #include "lcd_module.h"
 #include "led_service.h"
 #include "servo_service.h"
+#include "servo_driver.h"
 
 /* App headers */
 #include "focus_app.h"
@@ -907,11 +908,38 @@ static const httpd_uri_t motion_greet_uri = { .uri = "/api/motion/greet", .metho
 static const httpd_uri_t motion_home_uri  = { .uri = "/api/motion/home",  .method = HTTP_POST, .handler = motion_home_handler,  .user_ctx = NULL };
 
 /*---------------------------------------------------------------
- * Demo Trio Handlers (4 endpoints; /api/ambient removed with the light
- * sensor module — the head board no longer queries ambient brightness)
+ * Ambient Light Query (1 endpoint)
+ *
+ * GET /api/ambient - 查询环境光等级（0-4）与 lux 值。
+ * 供灯头板 base_bridge_get_ambient() 在"单击亮灯/双击调光"时按环境光
+ * 决定灯头亮度。数据由 sensor_service 每 1min 平滑发布并写入 device_state。
  *-------------------------------------------------------------*/
 
-/* Handler: POST /api/arm/gesture - 拇指手势驱动机械臂上下（servo0 单步） */
+/* Handler: GET /api/ambient */
+static esp_err_t ambient_get_handler(httpd_req_t *req)
+{
+    device_state_t state = {0};
+    device_state_get(&state);
+
+    char json[64];
+    snprintf(json, sizeof(json), "{\"ok\":true,\"level\":%d,\"lux\":%.2f}",
+             state.ambient_light.level, state.ambient_light.lux);
+
+    ESP_LOGI(TAG, "GET /api/ambient: level=%d lux=%.2f",
+             state.ambient_light.level, state.ambient_light.lux);
+    return send_json_response(req, json);
+}
+
+static const httpd_uri_t ambient_get_uri = {
+    .uri = "/api/ambient", .method = HTTP_GET,
+    .handler = ambient_get_handler, .user_ctx = NULL,
+};
+
+/*---------------------------------------------------------------
+ * Demo Trio Handlers (4 endpoints) + Voice chat state
+ *-------------------------------------------------------------*/
+
+/* Handler: POST /api/arm/gesture - 拇指手势驱动机械臂上下（LX 总线 ID5 单步） */
 static esp_err_t arm_gesture_handler(httpd_req_t *req) {
   char body[REST_BODY_BUF_SIZE];
   if (read_post_body(req, body, sizeof(body)) != 0) {
@@ -932,21 +960,12 @@ static esp_err_t arm_gesture_handler(httpd_req_t *req) {
   gesture[sizeof(gesture) - 1] = '\0';
   cJSON_Delete(root);
 
-  /* 单步动作：servo0(EM3) 向上1850 / 向下1150，500ms */
-  static const action_step_t s_gesture_up_steps[]   = { { 0, 1850, 500, 0 } };
-  static const action_step_t s_gesture_down_steps[] = { { 0, 1150, 500, 0 } };
-  static const action_sequence_t s_gesture_up_seq = {
-      .steps = s_gesture_up_steps, .step_count = 1, .loop_count = 1,
-  };
-  static const action_sequence_t s_gesture_down_seq = {
-      .steps = s_gesture_down_steps, .step_count = 1, .loop_count = 1,
-  };
-
-  const action_sequence_t *seq = NULL;
+  /* 单步动作：LX 总线 ID5 关节（机械臂顶部）向上600 / 向下400，2000ms */
+  int16_t target_pos = 0;
   if (strcmp(gesture, "thumb_up") == 0) {
-    seq = &s_gesture_up_seq;
+    target_pos = 600;
   } else if (strcmp(gesture, "thumb_down") == 0) {
-    seq = &s_gesture_down_seq;
+    target_pos = 400;
   } else {
     return send_error_400(req, "unknown gesture");
   }
@@ -955,13 +974,8 @@ static esp_err_t arm_gesture_handler(httpd_req_t *req) {
   arm_service_stop_action();
   servo_service_enable();
 
-  esp_err_t ret = arm_service_load_action(seq);
-  if (ret == ESP_OK) {
-    ret = arm_service_start_action();
-  }
-  if (ret != ESP_OK) {
-    return send_error_500(req, "arm action failed");
-  }
+  /* LX 总线 ID5 运动，time=2000ms 内完成 */
+  servo_lx_move(5, target_pos, 2000);
 
   char json[128];
   snprintf(json, sizeof(json), "{\"ok\":true,\"gesture\":\"%s\"}", gesture);
@@ -1147,7 +1161,8 @@ static const httpd_uri_t *const s_rest_uris[] = {
     &motion_dance_uri,
     &motion_greet_uri,
     &motion_home_uri,
-    /* Demo trio (4; /api/ambient removed with light sensor) */
+    /* Demo trio (4) + ambient light query (1) */
+    &ambient_get_uri,
     &arm_gesture_uri,
     &detect_phone_uri,
     &companion_start_uri,

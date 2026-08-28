@@ -5,8 +5,7 @@
  * 雷达模块为必须依赖，初始化失败则退出本任务；分析器初始化失败仅告警继续运行。
  *
  * 当 CONFIG_PROJECT_RADAR_LD6002_ENABLE 开启时，雷达由独立的 radar_ld6002
- * 模块处理，本任务仅维持运行标志，避免与 radar_ld6002 争用同一 UART。
- * （环境光采集已随光感模块移除。）
+ * 模块处理，本任务仅维持运行标志并负责环境光采集，避免与 radar_ld6002 争用同一 UART。
  */
 
 #include "sensor_task.h"
@@ -78,7 +77,7 @@ void sensor_task(void *pvParameters)
     s_radar_task_running = true;
     ESP_LOGI(TAG, "Radar sensor task initialized");
 #else
-    ESP_LOGI(TAG, "Radar handled by radar_ld6002; sensor_task keeps running flag only (light sensor removed)");
+    ESP_LOGI(TAG, "Radar handled by radar_ld6002; sensor_task runs ambient-light only");
     s_radar_task_running = true;
 #endif
 
@@ -117,6 +116,15 @@ void sensor_task(void *pvParameters)
             s_radar_timeout_count++;
         }
 #endif
+
+        /* 读取环境光传感器（8 次过采样平均）并送入 PID 平滑流水线，
+         * sensor_service 每攒满 10s（5×2s 块）发布一次平滑值
+         * （EV_SENSOR_AMBIENT_LIGHT_CHANGED） */
+        float lux = 0.0f;
+        esp_err_t lret = sensor_service_get_light_lux(&lux);
+        if (lret == ESP_OK) {
+            sensor_service_feed_sample(lux);
+        }
 
         vTaskDelay(pdMS_TO_TICKS(100));
     }

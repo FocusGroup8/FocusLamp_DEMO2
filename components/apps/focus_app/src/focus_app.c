@@ -32,19 +32,41 @@ static uint32_t s_elapsed_sec = 0;
 static uint32_t s_seated_sec = 0;
 static bool s_seated_notified = false;
 
+/* 灯头当前亮度百分比，用于检测环境光档位变化后刷新 */
+static uint8_t s_last_head_pct = 0;
+
 /* ===================== Internal Helpers ===================== */
 static void focus_app_apply_lighting(void)
 {
     /* 底部灯光关闭 */
     led_service_turn_off();
 
-    /* 头部灯光正常显示（结合环境亮度） */
-    lamp_head_led_on_with_ambient();
+    /* 头部灯光正常显示：亮度档位随环境光同向一一对应 */
+    device_state_t state = {0};
+    device_state_get(&state);
+    uint8_t head_pct = lamp_head_percent_from_ambient(state.ambient_light.level);
+    s_last_head_pct  = head_pct;
+    lamp_head_led_on(head_pct);
 
     /* 大屏幕显示正常表情 */
     lamp_head_set_expression("neutral");
 
-    ESP_LOGI(TAG, "Applied focus lighting: base off, head on 60%%, expression neutral");
+    ESP_LOGI(TAG, "Applied focus lighting: base off, head %d%%, expression neutral",
+             head_pct);
+}
+
+/* 专注模式运行中：环境光档位变化时刷新灯头亮度（同向一一对应）。
+ * 由 1s 定时器周期检查，光感平滑发布约 10s/次，实际刷新频率受其约束。 */
+static void focus_app_update_lighting(void)
+{
+    device_state_t state = {0};
+    device_state_get(&state);
+    uint8_t head_pct = lamp_head_percent_from_ambient(state.ambient_light.level);
+    if (head_pct != s_last_head_pct) {
+        s_last_head_pct = head_pct;
+        ESP_LOGI(TAG, "Ambient level %d -> head %d%%", state.ambient_light.level, head_pct);
+        lamp_head_led_on(head_pct);
+    }
 }
 
 static void focus_app_start_white_noise(void)
@@ -70,6 +92,10 @@ static void focus_app_timer_callback(void *arg)
      * （语音板经 POST /api/chat/state 写入 device_state.voice_active） */
     device_state_t state = {0};
     device_state_get(&state);
+
+    /* 环境光档位变化时刷新灯头亮度（专注灯光随环境光自适应） */
+    focus_app_update_lighting();
+
     bool voice_active = state.voice_active;
 
     if (voice_active) {
@@ -95,7 +121,7 @@ static void focus_app_timer_callback(void *arg)
             s_seated_notified = true;
             ESP_LOGI(TAG, "User seated >=%d s, broadcasting sedentary reminder",
                      FOCUS_SEATED_REMIND_SEC);
-            tts_bridge_speak("你已经坐了很久，请站起来活动活动吧~");
+            tts_bridge_speak("久坐提醒");
         }
     } else {
         s_seated_sec = 0;
@@ -105,7 +131,10 @@ static void focus_app_timer_callback(void *arg)
     event_bus_publish_simple(EV_APP_FOCUS_TIMER_TICK);
 
     if (s_elapsed_sec >= s_duration_sec) {
-        /* Focus session complete */
+        /* Focus session complete — broadcast end notice via short command
+         * (cloud maps "专注结束" to the full text, synced manually by user). */
+        ESP_LOGI(TAG, "Focus session complete, broadcasting end notice");
+        tts_bridge_speak("专注结束");
         event_bus_publish_simple(EV_APP_FOCUS_TIMER_DONE);
         focus_app_stop();
         ESP_LOGI(TAG, "Focus session complete");
@@ -184,7 +213,7 @@ esp_err_t focus_app_start(uint32_t duration_minutes)
     event_bus_publish_simple(EV_APP_FOCUS_TIMER_START);
 
     /* TTS播报：专注模式已开启 */
-    tts_bridge_speak("专注模式已开启");
+    tts_bridge_speak("专注开启");
 
     ESP_LOGI(TAG, "Focus session started: %u minutes", duration_minutes);
     return ESP_OK;
@@ -216,6 +245,7 @@ esp_err_t focus_app_stop(void)
     s_running = false;
     s_paused = false;
     s_elapsed_sec = 0;
+    s_last_head_pct = 0;
 
     event_bus_publish_simple(EV_APP_STATE_CHANGED);
     ESP_LOGI(TAG, "Focus session stopped");

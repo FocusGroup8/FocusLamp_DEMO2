@@ -117,6 +117,14 @@ static const uint16_t font_5EA6[16] = { 0x0000, 0x0180, 0x3FF8, 0x3FF8, 0x2220, 
 static const uint16_t font_6761[16] = { 0x0000, 0x0C00, 0x0FF0, 0x1C60, 0x36E0, 0x23C0, 0x07E0, 0x7D7C,
     0x7108, 0x3FF8, 0x0100, 0x1D70, 0x3138, 0x6708, 0x0200, 0x0000 };
 
+/* '心' (UTF-8: 0xE5, 0xBF, 0x83) */
+static const uint16_t font_5FC3[16] = { 0x0000, 0x0180, 0x0080, 0x0080, 0x0600, 0x3608, 0x260C, 0x2606,
+    0x6602, 0x6600, 0x4600, 0x0608, 0x0618, 0x03F0, 0x0000, 0x0000 };
+
+/* '率' (UTF-8: 0xE7, 0x8E, 0x87) */
+static const uint16_t font_7387[16] = { 0x0000, 0x0180, 0x3FFE, 0x2304, 0x326C, 0x1790, 0x0110, 0x1A6C,
+    0x67F4, 0x0180, 0x7FFE, 0x0180, 0x0180, 0x0180, 0x0180, 0x0000 };
+
 /* Font lookup table: UTF-8 bytes -> bitmap */
 const lcd_cn_char_t lcd_cn_font[] = {
     { 0xE4B893, font_4E13 },  /* '专' */
@@ -147,11 +155,13 @@ const lcd_cn_char_t lcd_cn_font[] = {
     { 0xE8BF9B, font_8FDB },  /* '进' */
     { 0xE5BAA6, font_5EA6 },  /* '度' */
     { 0xE69DA1, font_6761 },  /* '条' */
+    { 0xE5BF83, font_5FC3 },  /* '心' */
+    { 0xE78E87, font_7387 },  /* '率' */
 };
 
-const int lcd_cn_font_count = 28;
+const int lcd_cn_font_count = 30;
 
-/* Binary search for UTF-8 key (table is sorted by generation order, linear search is fine for 28 entries) */
+/* Binary search for UTF-8 key (table is sorted by generation order, linear search is fine for 30 entries) */
 const uint16_t *lcd_cn_lookup(uint32_t key)
 {
     for (int i = 0; i < lcd_cn_font_count; i++) {

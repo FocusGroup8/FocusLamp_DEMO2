@@ -51,15 +51,14 @@ void app_task(void *pvParameters)
                 break;
 
             case APP_STATE_FOCUS:
-                /* 专注模式 - 基于雷达的在岗检测 */
-                led_service_set_effect(LED_EFFECT_BREATHING);
+                /* 专注模式 - 底部灯光关闭，灯头亮度由 focus_app 按光感档位控制 */
+                led_service_turn_off();
                 lcd_service_page_switch_to(LCD_PAGE_INFO);
                 break;
 
             case APP_STATE_COMPANION:
-                /* 陪伴模式 - 互动表情 */
-                lcd_service_expression_set(LCD_EXPRESSION_HAPPY);
-                lcd_service_page_switch_to(LCD_PAGE_EXPRESSION);
+                /* 陪伴模式 - LCD 显示模式信息页（不显示表情） */
+                lcd_service_page_switch_to(LCD_PAGE_INFO);
                 break;
 
             case APP_STATE_ARM_ACTION:

@@ -1,7 +1,7 @@
 /*
  * lcd_task.c - LCD 显示任务实现
  *
- * 开机执行 RGB 闪烁测试，随后以 20Hz 频率刷新 LCD 显示内容。
+ * 开启背光并显示表情页，随后以 20Hz 频率刷新 LCD 显示内容。
  */
 
 #include "lcd_task.h"
@@ -21,14 +21,8 @@ void lcd_task(void *pvParameters)
     (void)pvParameters;
     ESP_LOGI(TAG, "lcd_task started");
 
-    /* 开机 RGB 闪烁测试 */
+    /* 开启背光（取消开机 RGB 闪烁测试，直接进入表情页显示） */
     lcd_driver_set_backlight(255);
-    lcd_fill_screen(LCD_COLOR_RED);
-    vTaskDelay(pdMS_TO_TICKS(800));
-    lcd_fill_screen(LCD_COLOR_GREEN);
-    vTaskDelay(pdMS_TO_TICKS(800));
-    lcd_fill_screen(LCD_COLOR_BLUE);
-    vTaskDelay(pdMS_TO_TICKS(800));
     lcd_fill_screen(LCD_COLOR_BLACK);
 
     /* 确保启动时显示表情页（page 0），强制触发页面回调与表情渲染 */

@@ -70,6 +70,11 @@ typedef struct {
 } device_servo_state_t;
 
 typedef struct {
+    uint8_t  level;          /* 0-4（0 最暗 → 4 最亮） */
+    float    lux;            /* 环境光 lux */
+} device_ambient_light_state_t;
+
+typedef struct {
     uint8_t  last_point;     /* Last active touch point */
     uint8_t  last_event;     /* touch_event_t */
     uint32_t last_event_time_ms;
@@ -88,6 +93,7 @@ typedef struct {
     device_audio_state_t        audio;
     device_radar_state_t        radar;
     device_servo_state_t        servo;
+    device_ambient_light_state_t ambient_light;
     device_key_state_t          key;
 
     /* Voice board chat state (reported via POST /api/chat/state):
@@ -136,6 +142,11 @@ esp_err_t device_state_set_radar(bool present, float heart_rate, float breath_ra
  * @brief Update servo state.
  */
 esp_err_t device_state_set_servo(int16_t em3_pos, const int16_t lx_pos[4], bool valid);
+
+/**
+ * @brief Update ambient light state.
+ */
+esp_err_t device_state_set_ambient_light(uint8_t level, float lux);
 
 /**
  * @brief Update key/touch state.

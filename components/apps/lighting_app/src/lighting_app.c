@@ -60,10 +60,11 @@ esp_err_t lighting_app_start(void)
         return ERR_BUSY;
     }
 
-    /* Apply default lighting settings (warm white, medium brightness) */
+    /* Apply default lighting settings (warm white, ~3% brightness)
+     * brightness 有效范围 0-LED_BRIGHTNESS_MAX(30)，此处 1/30 = 3%（原 3/30=10% 的三分之一）。 */
     led_service_set_mode(LED_MODE_WARM);
     led_service_set_effect(LED_EFFECT_STEADY);
-    led_service_set_brightness(180);
+    led_service_set_brightness(1);
 
     s_running = true;
     event_bus_publish_simple(EV_APP_STATE_CHANGED);

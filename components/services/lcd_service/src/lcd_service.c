@@ -461,20 +461,20 @@ bool lcd_service_expression_is_auto_blink(void)
 #define LCD_INFO_TITLE_MAX_LEN 16
 #define LCD_INFO_TIMER_MAX_LEN 12
 
-/* Layout for 160x60 landscape (matches lcd folder project) */
+/* Layout for 160x60 landscape: 3 rows
+   Row1 (Y=0) : mode name + task title
+   Row2       : progress bar (left) + timer (right, right-aligned)
+   Row3 (Y=44): heart rate */
 #define LCD_INFO_MODE_X 4            /* Mode name X */
-#define LCD_INFO_MODE_Y 0            /* Mode name row */
-#define LCD_INFO_TASK_X 4            /* Task name X */
-#define LCD_INFO_TASK_Y 18           /* Task name row */
-#define LCD_INFO_TIMER_Y 18          /* Timer display row (same as task, right-aligned) */
-#define LCD_INFO_TIMER_SIZE 2   /* 12px per char; right-aligned */
+#define LCD_INFO_MODE_Y 0            /* Row 1: mode/task row */
+#define LCD_INFO_TASK_GAP 20         /* Gap between mode name and task title (≈2 ASCII spaces) */
 
-#define LCD_INFO_BAR_Y 36           /* Progress bar Y position */
-#define LCD_INFO_BAR_HEIGHT 6
-#define LCD_INFO_BAR_X 4
-#define LCD_INFO_BAR_WIDTH (LCD_WIDTH - 8)
+#define LCD_INFO_BAR_X 4            /* Row 2: progress bar X (left-aligned) */
+#define LCD_INFO_BAR_Y 23           /* Row 2: progress bar Y (14px high, centered with timer) */
+#define LCD_INFO_BAR_HEIGHT 14
+#define LCD_INFO_TIMER_SIZE 1   /* 8px per char; right-aligned */
 
-#define LCD_INFO_HR_Y 44            /* Heart rate row (Chinese font 16px high) */
+#define LCD_INFO_HR_Y 44            /* Row 3: heart rate row (Chinese font 16px high) */
 #define LCD_INFO_MODE_BAND_H 16     /* Mode name overlay band height (16px) */
 
 typedef struct {
@@ -499,20 +499,25 @@ void lcd_service_mode_set(lcd_mode_t mode)
     s_current_mode = mode;
     switch (mode) {
     case LCD_MODE_FOCUS:
+        lcd_service_set_companion_overlay(false);
         lcd_service_page_switch_to(LCD_PAGE_INFO);
         strncpy(s_mode_name, "专注模式", sizeof(s_mode_name) - 1);
         break;
     case LCD_MODE_COMPANION:
+        /* 陪伴模式：表情页显示开心眼睛，叠加模式名+心率 */
         lcd_service_page_switch_to(LCD_PAGE_EXPRESSION);
         lcd_service_expression_set(LCD_EXPRESSION_HAPPY);
+        lcd_service_set_companion_overlay(true);
         strncpy(s_mode_name, "陪伴模式", sizeof(s_mode_name) - 1);
         break;
     case LCD_MODE_SILENT:
+        lcd_service_set_companion_overlay(false);
         lcd_service_page_switch_to(LCD_PAGE_EXPRESSION);
         lcd_service_expression_set(LCD_EXPRESSION_SLEEPY);
         strncpy(s_mode_name, "静默模式", sizeof(s_mode_name) - 1);
         break;
     case LCD_MODE_CUSTOM:
+        lcd_service_set_companion_overlay(false);
         lcd_service_page_switch_to(LCD_PAGE_INFO);
         break;
     }
@@ -589,6 +594,61 @@ static void format_timer(uint32_t seconds, char *buffer, size_t buffer_size)
     snprintf(buffer, buffer_size, "%02" PRIu32 ":%02" PRIu32, minutes, secs);
 }
 
+/* 计算 UTF-8 字符串像素宽度：中文固定 16px，ASCII 为 8*ascii_size */
+static uint16_t utf8_string_width_px(const char *str, uint8_t ascii_size)
+{
+    uint16_t w = 0;
+    if (str == NULL) {
+        return 0;
+    }
+    while (*str) {
+        uint8_t b0 = (uint8_t)*str;
+        if (b0 >= 0xE0 && b0 <= 0xEF && str[1] && str[2]) {
+            w += 16;
+            str += 3;
+        } else if (b0 >= 0x80) {
+            str++;  /* unsupported multibyte, skip */
+        } else {
+            w += 8 * ascii_size;
+            str++;
+        }
+    }
+    return w;
+}
+
+/* 在 max_px 宽度内绘制 UTF-8 字符串，超出部分截断 */
+static void draw_utf8_truncated(uint16_t x, uint16_t y, const char *str, uint16_t max_px,
+                                lcd_color_t color, lcd_color_t bg, uint8_t ascii_size)
+{
+    if (str == NULL || max_px == 0) {
+        return;
+    }
+    uint16_t cx   = x;
+    uint16_t avail = max_px;
+    while (*str) {
+        uint8_t b0   = (uint8_t)*str;
+        uint16_t cw;
+        bool     is_cn;
+        if (b0 >= 0xE0 && b0 <= 0xEF && str[1] && str[2]) {
+            cw    = 16;
+            is_cn = true;
+        } else if (b0 >= 0x80) {
+            str++;
+            continue;
+        } else {
+            cw    = 8 * ascii_size;
+            is_cn = false;
+        }
+        if (cw > avail) {
+            break;  /* truncated */
+        }
+        lcd_draw_utf8_string_buffer(cx, y, str, color, bg, ascii_size);
+        avail -= cw;
+        cx    += cw;
+        str   += is_cn ? 3 : 1;
+    }
+}
+
 esp_err_t lcd_service_info_init(void)
 {
     if (s_info_state.initialized) {
@@ -654,19 +714,19 @@ esp_err_t lcd_service_info_set_timer(uint32_t seconds)
 static bool s_companion_overlay = false;
 
 /**
- * @brief 绘制心率文本到指定行（中文"心率XX"，无效时显示"心率--"）
+ * @brief 绘制心率文本到指定行（左对齐，中文"心 率：xx bpm"，无效时显示"心 率：-- bpm"）
  */
 static void lcd_service_draw_heart_rate(uint16_t y)
 {
-    char hr_str[16];
+    char hr_str[24];
     device_state_t state = {0};
     device_state_get(&state);
 
     if (state.radar.heart_rate_valid && state.radar.heart_rate_bpm > 0.0f) {
-        snprintf(hr_str, sizeof(hr_str), "心率%u",
+        snprintf(hr_str, sizeof(hr_str), "心 率：%ubpm",
                  (unsigned)(state.radar.heart_rate_bpm + 0.5f));
     } else {
-        snprintf(hr_str, sizeof(hr_str), "心率--");
+        snprintf(hr_str, sizeof(hr_str), "心 率：--bpm");
     }
     lcd_draw_utf8_string_buffer(LCD_INFO_MODE_X, y, hr_str, LCD_COLOR_WHITE,
                                 LCD_COLOR_BLACK, 1);
@@ -709,35 +769,56 @@ void lcd_service_info_update(void)
 
     lcd_fill_rect_buffer(0, 0, LCD_WIDTH, LCD_HEIGHT, LCD_COLOR_BLACK);
 
-    /* Row 1: Mode name (UTF-8 Chinese) */
+    /* ---- Row 1: mode name (left) + task title (after mode name) ---- */
     lcd_draw_utf8_string_buffer(LCD_INFO_MODE_X, LCD_INFO_MODE_Y, s_mode_name, LCD_COLOR_WHITE,
                                 LCD_COLOR_BLACK, 1);
+    uint16_t mode_w = utf8_string_width_px(s_mode_name, 1);
+    uint16_t task_x = LCD_INFO_MODE_X + mode_w + LCD_INFO_TASK_GAP;
+    uint16_t task_w = (task_x < (uint16_t)(LCD_WIDTH - 4)) ? (LCD_WIDTH - 4 - task_x) : 0;
+    draw_utf8_truncated(task_x, LCD_INFO_MODE_Y, s_info_state.task_title, task_w,
+                        LCD_COLOR_WHITE, LCD_COLOR_BLACK, 1);
 
-    /* Row 2: Task name (UTF-8 Chinese or ASCII) */
-    lcd_draw_utf8_string_buffer(LCD_INFO_TASK_X, LCD_INFO_TASK_Y, s_info_state.task_title, LCD_COLOR_WHITE,
-                                LCD_COLOR_BLACK, 1);
+    /* ---- Row 2: timer / "完成" (right-aligned) + progress bar (left) ---- */
+    char   timer_str[LCD_INFO_TIMER_MAX_LEN];
+    bool   done = s_task.completed;
+    /* 与进度条垂直居中：中文"完成"16px，倒计时8px */
+    uint16_t timer_y = LCD_INFO_BAR_Y + LCD_INFO_BAR_HEIGHT / 2 - (done ? 8 : 4);
 
-    /* Row 3: Timer (ASCII, right-aligned) */
-    char timer_str[LCD_INFO_TIMER_MAX_LEN];
-    format_timer(s_info_state.timer_seconds, timer_str, sizeof(timer_str));
-    size_t timer_len = strlen(timer_str);
-    uint16_t timer_x = LCD_WIDTH - timer_len * 8 * LCD_INFO_TIMER_SIZE - 4;
-    lcd_draw_string_buffer(timer_x, LCD_INFO_TIMER_Y, timer_str, LCD_COLOR_WHITE,
-                           LCD_COLOR_BLACK, LCD_INFO_TIMER_SIZE);
+    uint16_t right_w = 0;
+    if (done) {
+        right_w = 32;  /* "完成" 两个字宽 */
+    } else {
+        format_timer(s_info_state.timer_seconds, timer_str, sizeof(timer_str));
+        right_w = (uint16_t)(strlen(timer_str) * 8 * LCD_INFO_TIMER_SIZE);
+    }
+    uint16_t right_x = (right_w + 4 < LCD_WIDTH) ? (LCD_WIDTH - right_w - 4) : LCD_INFO_BAR_X;
+    uint16_t bar_w   = (right_x > (uint16_t)(LCD_INFO_BAR_X + LCD_INFO_TASK_GAP)) ?
+                       (right_x - LCD_INFO_BAR_X - LCD_INFO_TASK_GAP) : 0;
 
-    /* Progress bar (if task is active) */
+    if (done) {
+        lcd_draw_utf8_string_buffer(right_x, timer_y, "完成", LCD_COLOR_WHITE,
+                                    LCD_COLOR_BLACK, 1);
+    } else {
+        lcd_draw_string_buffer(right_x, timer_y, timer_str, LCD_COLOR_WHITE,
+                               LCD_COLOR_BLACK, LCD_INFO_TIMER_SIZE);
+    }
+
+    uint16_t fill_width = 0;
     if (s_task.running && s_task.total_seconds > 0) {
         uint32_t elapsed = s_task.total_seconds - s_task.remaining_seconds;
-        uint16_t fill_width = (uint16_t)((uint32_t)LCD_INFO_BAR_WIDTH * elapsed / s_task.total_seconds);
-        if (fill_width > LCD_INFO_BAR_WIDTH) fill_width = LCD_INFO_BAR_WIDTH;
-
+        fill_width = (uint16_t)((uint32_t)bar_w * elapsed / s_task.total_seconds);
+        if (fill_width > bar_w) fill_width = bar_w;
+    } else if (done) {
+        fill_width = bar_w;  /* 任务完成：进度条满格 */
+    }
+    if (fill_width > 0) {
         /* Background */
-        lcd_fill_rect_buffer(LCD_INFO_BAR_X, LCD_INFO_BAR_Y, LCD_INFO_BAR_WIDTH, LCD_INFO_BAR_HEIGHT, 0x3165);
+        lcd_fill_rect_buffer(LCD_INFO_BAR_X, LCD_INFO_BAR_Y, bar_w, LCD_INFO_BAR_HEIGHT, 0x3165);
         /* Fill */
         lcd_fill_rect_buffer(LCD_INFO_BAR_X, LCD_INFO_BAR_Y, fill_width, LCD_INFO_BAR_HEIGHT, LCD_COLOR_WHITE);
     }
 
-    /* Row 4: Heart rate */
+    /* ---- Row 3: heart rate (left-aligned) ---- */
     lcd_service_draw_heart_rate(LCD_INFO_HR_Y);
 
     lcd_flush_buffer();

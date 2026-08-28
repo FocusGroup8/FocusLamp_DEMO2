@@ -35,6 +35,14 @@ esp_err_t lamp_head_led_on(uint8_t brightness);
 esp_err_t lamp_head_led_on_with_ambient(void);
 
 /**
+ * @brief Map ambient light level (0-4) to head LED brightness percentage.
+ *        Same-direction one-to-one mapping: 20/40/60/80/100%.
+ * @param ambient_level  Ambient light level (0-4)
+ * @return uint8_t Brightness percentage (20-100)
+ */
+uint8_t lamp_head_percent_from_ambient(uint8_t ambient_level);
+
+/**
  * @brief Turn off head LED.
  * @return ESP_OK on success
  */

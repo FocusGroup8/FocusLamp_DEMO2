@@ -26,6 +26,10 @@ void servo_task(void *pvParameters)
     esp_err_t ret = servo_service_enable();
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to enable servos: %s", esp_err_to_name(ret));
+    } else {
+        /* 上电归位：使机械臂回到 home 位置 */
+        servo_service_go_home(1000);
+        vTaskDelay(pdMS_TO_TICKS(1200));
     }
 
     uint32_t update_interval_ms = 50;  /* 20Hz 更新频率 */

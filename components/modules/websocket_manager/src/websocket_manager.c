@@ -437,6 +437,12 @@ esp_err_t ws_manager_server_start(void)
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port    = WS_MANAGER_SERVER_PORT;
+    /* [FIX 2026-08-10] recv_wait_timeout raised 5s->300s (aligned with the
+     * head board): WS/HTTP clients that only send requests and never send
+     * further data were disconnected by the default 5s recv timeout, causing
+     * repeated disconnect cycles in long-run logs. Dead connections are
+     * reclaimed by TCP keepalive + close_fn instead. */
+    config.recv_wait_timeout = 300;
     config.max_uri_handlers =
         40; /* 3(WebSocket URIs: /ws + /mcp + /) + 32(REST) + 5(reserved) */
     config.max_open_sockets = WS_MANAGER_SERVER_MAX_CONN + 2; /* Reserve for HTTP + control */

@@ -25,6 +25,7 @@
 #include "event_bus.h"
 #include "event_def.h"
 #include "led_types.h"
+#include "system_config.h"   /* LED_BRIGHTNESS_MAX */
 #include "device_state.h"
 
 static const char* TAG = "led_service";
@@ -188,7 +189,7 @@ esp_err_t led_service_init(void)
 
     /* Set default state */
     s_current_mode             = LED_MODULE_MODE_SOLID;
-    s_current_color            = (ws2812_rgb_t){.red = 0, .green = 0, .blue = 255};
+    s_current_color            = (ws2812_rgb_t){.red = 255, .green = 255, .blue = 255};
     s_current_brightness_level = 3;
     s_current_brightness       = s_brightness_level_map[s_current_brightness_level];
 
@@ -249,6 +250,12 @@ esp_err_t led_service_set_brightness(uint8_t brightness)
         return ESP_ERR_INVALID_STATE;
     }
 
+    /* 亮度有效范围 0-LED_BRIGHTNESS_MAX(30)。越界值会导致 led_driver_show()
+     * 中 (color*brightness)/30 整数溢出截断，输出接近全亮，故在此钳制。 */
+    if (brightness > LED_BRIGHTNESS_MAX) {
+        brightness = LED_BRIGHTNESS_MAX;
+    }
+
     s_current_brightness = brightness;
     led_driver_set_brightness(brightness);
 
@@ -287,6 +294,15 @@ esp_err_t led_service_set_brightness_level(uint8_t level)
     }
 
     return led_service_set_brightness(s_current_brightness);
+}
+
+uint8_t led_service_level_from_ambient(uint8_t ambient_level)
+{
+    /* 光感档位(0-4) → 亮度档位(1-5)，同向一一对应：暗→低档、亮→高档 */
+    if (ambient_level >= (uint8_t)(LED_BRIGHTNESS_LEVEL_MAX - 1)) {
+        return LED_BRIGHTNESS_LEVEL_MAX;
+    }
+    return (uint8_t)(ambient_level + 1);
 }
 
 uint8_t led_service_get_brightness_level(void)

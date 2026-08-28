@@ -93,7 +93,10 @@ static void wifi_remote_event_handler(void *arg, esp_event_base_t event_base,
             ESP_LOGI(TAG, "WiFi STA started, connecting...");
             esp_wifi_connect();
             break;
-        case WIFI_EVENT_STA_DISCONNECTED:
+        case WIFI_EVENT_STA_DISCONNECTED: {
+            /* 调试：打印断开原因码（802.11 reason code），用于区分热点踢人 vs 认证/握手失败 */
+            wifi_event_sta_disconnected_t *disc = (wifi_event_sta_disconnected_t *)event_data;
+            ESP_LOGW(TAG, "STA disconnected, reason=%d", disc->reason);
             s_connected = false;
             if (WIFI_MANAGER_AUTO_RECONNECT && s_retry_num < WIFI_MANAGER_MAX_RETRY) {
                 esp_wifi_connect();
@@ -112,6 +115,7 @@ static void wifi_remote_event_handler(void *arg, esp_event_base_t event_base,
                 event_bus_publish(&ev);
             }
             break;
+        }
         case WIFI_EVENT_SCAN_DONE:
             ESP_LOGI(TAG, "WiFi scan completed");
             dispatch_event(WIFI_MANAGER_EVENT_SCAN_DONE, NULL);
@@ -306,9 +310,10 @@ esp_err_t wifi_manager_init(void)
 
     ESP_LOGI(TAG, "[5/5] WiFi Remote STA initialized, connecting to SSID:%s", WIFI_MANAGER_SSID);
 
-    /* Wait for connection result */
+    /* Wait for connection result (bounded timeout, don't block boot forever
+     * when the C5 Wi-Fi link fails to establish, e.g. power-on sequencing) */
     EventBits_t bits = xEventGroupWaitBits(s_event_group, WIFI_BITS,
-                                            pdFALSE, pdFALSE, portMAX_DELAY);
+                                            pdFALSE, pdFALSE, pdMS_TO_TICKS(30000));
 
     if (bits & WIFI_CONNECTED_BIT) {
         ESP_LOGI(TAG, "Connected to AP SSID:%s", WIFI_MANAGER_SSID);

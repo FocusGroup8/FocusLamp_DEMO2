@@ -77,10 +77,10 @@ typedef struct {
 #define LED_BREATH_MAX_BRIGHTNESS       30
 #define LED_AUTO_OFF_TIMEOUT_MS         60000
 
-/* Default breath color (green) */
-#define LED_COLOR_BREATH_RED            0
-#define LED_COLOR_BREATH_GREEN          255
-#define LED_COLOR_BREATH_BLUE           32
+/* Default breath color (pink) */
+#define LED_COLOR_BREATH_RED            255
+#define LED_COLOR_BREATH_GREEN          105
+#define LED_COLOR_BREATH_BLUE           180
 
 #ifdef __cplusplus
 }

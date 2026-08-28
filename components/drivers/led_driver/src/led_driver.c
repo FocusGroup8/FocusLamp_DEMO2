@@ -37,6 +37,7 @@ static const char* TAG = "led_driver";
 
 /* LED count from system config */
 #define LED_COUNT               LED_NUM_LEDS
+#define LED_STRIP_COUNT         LED_STRIP_TOTAL_COUNT  /* 物理灯带总长（超出部分保持熄灭） */
 #define LED_BITS_PER_PIXEL      24
 
 /* RMT handles */
@@ -119,7 +120,7 @@ esp_err_t led_driver_init(void)
     }
 
     /* Allocate color buffer */
-    s_led_buffer = (uint8_t*)calloc(LED_COUNT * 3, sizeof(uint8_t));
+    s_led_buffer = (uint8_t*)calloc(LED_STRIP_COUNT * 3, sizeof(uint8_t));
     if (s_led_buffer == NULL) {
         return ESP_ERR_NO_MEM;
     }
@@ -170,9 +171,9 @@ esp_err_t led_driver_init(void)
 
     s_initialized = true;
     s_brightness  = LED_BRIGHTNESS_DEFAULT;
-    memset(s_led_buffer, 0, LED_COUNT * 3);
+    memset(s_led_buffer, 0, LED_STRIP_COUNT * 3);
 
-    ESP_LOGI(TAG, "LED driver initialized (GPIO=%d, count=%d)", LED_DIN_GPIO, LED_COUNT);
+    ESP_LOGI(TAG, "LED driver initialized (GPIO=%d, count=%d, strip=%d)", LED_DIN_GPIO, LED_COUNT, LED_STRIP_COUNT);
     return ESP_OK;
 }
 
@@ -245,12 +246,12 @@ esp_err_t led_driver_show(void)
     }
 
     /* Apply brightness scaling before transmit */
-    uint8_t* scaled_buffer = (uint8_t*)malloc(LED_COUNT * 3);
+    uint8_t* scaled_buffer = (uint8_t*)malloc(LED_STRIP_COUNT * 3);
     if (scaled_buffer == NULL) {
         return ESP_ERR_NO_MEM;
     }
 
-    for (uint8_t i = 0; i < LED_COUNT; i++) {
+    for (uint8_t i = 0; i < LED_STRIP_COUNT; i++) {
         uint8_t g = s_led_buffer[i * 3 + 0];
         uint8_t r = s_led_buffer[i * 3 + 1];
         uint8_t b = s_led_buffer[i * 3 + 2];
@@ -260,7 +261,7 @@ esp_err_t led_driver_show(void)
     }
 
     /* GRB data is already in GRB order in the buffer */
-    esp_err_t ret = led_driver_transmit_raw(scaled_buffer, LED_COUNT);
+    esp_err_t ret = led_driver_transmit_raw(scaled_buffer, LED_STRIP_COUNT);
     free(scaled_buffer);
     return ret;
 }
@@ -281,7 +282,7 @@ esp_err_t led_driver_clear(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    memset(s_led_buffer, 0, LED_COUNT * 3);
+    memset(s_led_buffer, 0, LED_STRIP_COUNT * 3);
     return led_driver_show();
 }
 

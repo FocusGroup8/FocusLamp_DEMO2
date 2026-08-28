@@ -71,7 +71,8 @@ extern "C" {
 #define UART_COMM_QUEUE_SIZE        (10)
 
 /* ===================== LED Parameters ===================== */
-#define LED_NUM_LEDS                (72)
+#define LED_NUM_LEDS                (72)      /* 有效点亮灯珠数 */
+#define LED_STRIP_TOTAL_COUNT       (97)      /* WS2812 物理灯带总长：前 72 个点亮，后 25 个熄灭 */
 #define LED_BRIGHTNESS_DEFAULT      (16)
 #define LED_BRIGHTNESS_MAX          (30)
 #define LED_REFRESH_INTERVAL_MS     (20)

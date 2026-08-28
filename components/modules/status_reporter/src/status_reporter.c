@@ -33,6 +33,16 @@ static SemaphoreHandle_t s_send_mutex = NULL;
 static esp_timer_handle_t s_periodic_timer = NULL;
 static volatile uint32_t s_last_send_time_ms = 0;
 
+/* Consecutive-failure backoff for the periodic report.
+ * [FIX 2026-08-10] When the target board becomes unreachable (long-run
+ * disconnect), keep retrying on an extended interval (10s -> 30s -> 60s,
+ * capped) instead of hammering the network every 10s. Any success resets
+ * the backoff and the interval. */
+static uint32_t s_consecutive_failures = 0;
+#define STATUS_REPORTER_BACKOFF_STEP_MS 20000 /* extra ms per extra failure */
+#define STATUS_REPORTER_BACKOFF_MAX_MS 60000  /* capped backoff */
+#define STATUS_REPORTER_BASE_INTERVAL_MS STATUS_REPORTER_PERIODIC_INTERVAL_MS
+
 /*---------------------------------------------------------------
  * Helpers
  *---------------------------------------------------------------*/
@@ -229,10 +239,44 @@ static esp_err_t do_send(const char *trigger, status_event_type_t event_type)
 
 /*---------------------------------------------------------------
  * Periodic timer callback
+ *
+ * Sends the status report and applies consecutive-failure backoff:
+ * the report interval grows on repeated failures and is restored on the
+ * first success, so an unreachable peer does not trigger a connection
+ * attempt every 10 seconds forever.
  *-------------------------------------------------------------*/
 static void periodic_timer_callback(void *arg)
 {
-    do_send("timer", STATUS_EVENT_NONE);
+    (void)arg;
+
+    esp_err_t ret = do_send("timer", STATUS_EVENT_NONE);
+
+    uint32_t interval_ms = STATUS_REPORTER_BASE_INTERVAL_MS;
+    if (ret == ESP_OK) {
+        if (s_consecutive_failures > 0) {
+            s_consecutive_failures = 0;
+            ESP_LOGI(TAG, "Report recovered, interval reset to %u ms",
+                     (unsigned)interval_ms);
+        }
+        return; /* No timer change on success path with default interval */
+    }
+
+    /* Send failed: extend the interval (bounded backoff) */
+    s_consecutive_failures++;
+    uint32_t backoff = 0;
+    if (s_consecutive_failures > 1) {
+        backoff = STATUS_REPORTER_BACKOFF_STEP_MS * (s_consecutive_failures - 1);
+        if (backoff > STATUS_REPORTER_BACKOFF_MAX_MS) {
+            backoff = STATUS_REPORTER_BACKOFF_MAX_MS;
+        }
+    }
+    interval_ms += backoff;
+
+    esp_timer_stop(s_periodic_timer);
+    esp_timer_start_periodic(s_periodic_timer, interval_ms * 1000);
+    ESP_LOGW(TAG, "Report failed (%s), consecutive=%u, interval=%u ms",
+             esp_err_to_name(ret), (unsigned)s_consecutive_failures,
+             (unsigned)interval_ms);
 }
 
 /*---------------------------------------------------------------

@@ -9,7 +9,6 @@ idf_component_register(
          "unified_help.c"
          "app_console_commands.c"
          "param_registry.c"
-         "demo_fake_detection.c"
          "tasks/radar_data_task.c"
          "tasks/radar_decoder.c"
          "tasks/radar_frame_handler.c"

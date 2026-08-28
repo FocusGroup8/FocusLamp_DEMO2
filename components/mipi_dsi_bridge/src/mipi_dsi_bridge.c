@@ -72,6 +72,8 @@ mcp_tool_led_off(const esp_mcp_property_list_t *properties);
 static esp_mcp_value_t
 mcp_tool_led_set_brightness(const esp_mcp_property_list_t *properties);
 static esp_mcp_value_t
+mcp_tool_led_set_level(const esp_mcp_property_list_t *properties);
+static esp_mcp_value_t
 mcp_tool_led_set_color_temp(const esp_mcp_property_list_t *properties);
 static esp_mcp_value_t
 mcp_tool_touch_wake(const esp_mcp_property_list_t *properties);
@@ -362,11 +364,12 @@ mcp_tool_led_on(const esp_mcp_property_list_t *properties) {
   int color_temp =
       esp_mcp_property_list_get_property_int(properties, "color_temp");
 
-  /* Default: when called without parameters, brightness defaults to 100 (full
-   * on). esp_mcp_property_list_get_property_int returns 0 for unset properties,
-   * so brightness=0 means "not specified" for an "on" command — override to
-   * 100. */
-  if (brightness <= 0) {
+  /* 亮度 0-100 直接透传（0=最暗）。brightness 参数缺失时 SDK 会在参数校验
+   * 阶段报错、不会进入本回调，因此不需要"未指定→100"的兜底，0 必须原样下发。 */
+  if (brightness < 0) {
+    brightness = 0;
+  }
+  if (brightness > 100) {
     brightness = 100;
   }
 
@@ -409,12 +412,48 @@ mcp_tool_led_set_brightness(const esp_mcp_property_list_t *properties) {
   int brightness =
       esp_mcp_property_list_get_property_int(properties, "brightness");
 
-  /* Default to 100 if not specified */
-  if (brightness <= 0) {
+  /* 亮度 0-100 直接透传（0=最暗）。brightness 参数缺失时 SDK 会在参数校验
+   * 阶段报错、不会进入本回调，因此不需要"未指定→100"的兜底，0 必须原样下发。 */
+  if (brightness < 0) {
+    brightness = 0;
+  }
+  if (brightness > 100) {
     brightness = 100;
   }
 
   ESP_LOGI(TAG, "[MCP] mipi_dsi.led.set_brightness: %d", brightness);
+
+  char body[32];
+  snprintf(body, sizeof(body), "{\"brightness\":%d}", brightness);
+
+  char resp[64] = {0};
+  esp_err_t ret = http_post("/api/led/brightness", body, resp, sizeof(resp));
+
+  if (ret == ESP_OK) {
+    return esp_mcp_value_create_bool(true);
+  }
+  return esp_mcp_value_create_bool(false);
+}
+
+static esp_mcp_value_t
+mcp_tool_led_set_level(const esp_mcp_property_list_t *properties) {
+  /* 灯头LED 5档亮度，与灯头板触摸双击调光档位一致 */
+  static const uint8_t s_brightness_levels[5] = {3, 7, 12, 16, 20};
+
+  int level = esp_mcp_property_list_get_property_int(properties, "level");
+
+  /* 档位越界钳制（SDK 的 range 约束已保证 1-5，这里做防御） */
+  if (level < 1) {
+    level = 1;
+  }
+  if (level > 5) {
+    level = 5;
+  }
+
+  int brightness = s_brightness_levels[level - 1];
+
+  ESP_LOGI(TAG, "[MCP] mipi_dsi.led.set_level: level=%d -> brightness=%d%%",
+           level, brightness);
 
   char body[32];
   snprintf(body, sizeof(body), "{\"brightness\":%d}", brightness);
@@ -727,6 +766,22 @@ esp_err_t mipi_dsi_bridge_register_mcp_tools(esp_mcp_t *mcp) {
       esp_mcp_property_create_with_range("brightness", 0, 100);
   esp_mcp_tool_add_property(led_set_bright, led_sb_prop);
   esp_mcp_add_tool(mcp, led_set_bright);
+
+  /* self.mipi_dsi.led.set_level */
+  esp_mcp_tool_t *led_set_level = esp_mcp_tool_create(
+      "self.mipi_dsi.led.set_level",
+      "设置灯头板载LED亮度档位 (level 1-5)。level=1 最低亮度(3%), "
+      "level=2(7%), level=3(12%), level=4(16%), level=5 最亮(20%)。"
+      "用户说\"最低亮度/最暗/亮度调到最低\"时调用 level=1；"
+      "说\"最亮/最高亮度/亮度调到最高\"时调用 level=5",
+      mcp_tool_led_set_level);
+  if (!led_set_level) {
+    return ESP_ERR_NO_MEM;
+  }
+  esp_mcp_property_t *led_sl_prop =
+      esp_mcp_property_create_with_range("level", 1, 5);
+  esp_mcp_tool_add_property(led_set_level, led_sl_prop);
+  esp_mcp_add_tool(mcp, led_set_level);
 
   /* self.mipi_dsi.led.set_color_temp */
   esp_mcp_tool_t *led_set_ct =

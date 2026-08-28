@@ -183,12 +183,15 @@ static esp_err_t http_get(const char *path, char *resp_buf, int resp_size) {
 
 /* LED control */
 esp_err_t focuslamp_bridge_led_on(int brightness) {
-  char body[32];
-  if (brightness > 0) {
-    snprintf(body, sizeof(body), "{\"brightness\":%d}", brightness);
-  } else {
-    snprintf(body, sizeof(body), "{\"brightness\":100}");
+  /* 亮度 0-100 直接透传（0=最暗），避免"最暗"被强改成 100 */
+  if (brightness < 0) {
+    brightness = 0;
   }
+  if (brightness > 100) {
+    brightness = 100;
+  }
+  char body[32];
+  snprintf(body, sizeof(body), "{\"brightness\":%d}", brightness);
   char resp[64] = {0};
   return http_post("/api/led/on", body, resp, sizeof(resp));
 }
@@ -357,7 +360,10 @@ esp_err_t focuslamp_bridge_chat_state(bool active) {
 static esp_mcp_value_t
 mcp_tool_led_on(const esp_mcp_property_list_t *properties) {
   int brightness = esp_mcp_property_list_get_property_int(properties, "brightness");
-  if (brightness <= 0) brightness = 100;
+  /* 亮度 0-100 直接透传（0=最暗）。brightness 参数缺失时 SDK 会在参数校验
+   * 阶段报错、不会进入本回调，因此不需要"未指定→100"的兜底，0 必须原样下发。 */
+  if (brightness < 0) brightness = 0;
+  if (brightness > 100) brightness = 100;
   ESP_LOGI(TAG, "[MCP] focuslamp.led.on: brightness=%d", brightness);
   return esp_mcp_value_create_bool(focuslamp_bridge_led_on(brightness) == ESP_OK);
 }
@@ -372,7 +378,10 @@ mcp_tool_led_off(const esp_mcp_property_list_t *properties) {
 static esp_mcp_value_t
 mcp_tool_led_set_brightness(const esp_mcp_property_list_t *properties) {
   int brightness = esp_mcp_property_list_get_property_int(properties, "brightness");
-  if (brightness <= 0) brightness = 100;
+  /* 亮度 0-100 直接透传（0=最暗）。brightness 参数缺失时 SDK 会在参数校验
+   * 阶段报错、不会进入本回调，因此不需要"未指定→100"的兜底，0 必须原样下发。 */
+  if (brightness < 0) brightness = 0;
+  if (brightness > 100) brightness = 100;
   ESP_LOGI(TAG, "[MCP] focuslamp.led.set_brightness: %d", brightness);
   return esp_mcp_value_create_bool(focuslamp_bridge_led_set_brightness(brightness) == ESP_OK);
 }

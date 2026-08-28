@@ -235,12 +235,12 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "=== Smart Voice Assistant for WT01P4C5-S1 ===");
 
-    /* Reduce protocol library log verbosity: esp_xiaozhi/mcp print every MCP
-     * message at INFO, which stalls the WS receive path and delays TTS audio
-     * frame delivery to the decode queue → audible speaker stutter. */
-    esp_log_level_set("ESP_XIAOZHI_CHAT", ESP_LOG_WARN);
-    esp_log_level_set("esp_mcp_mgr", ESP_LOG_WARN);
-    esp_log_level_set("ESP_XIAOZHI_MCP", ESP_LOG_WARN);
+    /* [FIX DIAG] Temporarily restore MCP logs to INFO to diagnose MCP
+     * session initialization handshake (was WARN due to TTS stutter).
+     * Keep the rest of the log level policy unchanged. */
+    esp_log_level_set("ESP_XIAOZHI_CHAT", ESP_LOG_INFO);
+    esp_log_level_set("esp_mcp_mgr", ESP_LOG_INFO);
+    esp_log_level_set("ESP_XIAOZHI_MCP", ESP_LOG_INFO);
 
     /* Step 1: Initialize WiFi Manager */
     wifi_manager_register_handler(WIFI_MANAGER_EVENT_CONNECTED, wifi_event_callback);

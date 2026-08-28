@@ -87,6 +87,13 @@ typedef struct {
 static QueueHandle_t s_speak_queue = NULL;
 static TaskHandle_t s_speak_task = NULL;
 
+/* [FIX 2026-08-10] Set when the current/next TTS playback was triggered by a
+ * proactive text inject (tts_bridge / speak). On TTS_STOP the audio channel is
+ * then closed back to CONNECTED, so the next conversation re-establishes a
+ * fresh session instead of reusing a possibly-stale server session_id (which
+ * caused "cannot start conversation" after injected broadcasts). */
+static bool s_inject_active = false;
+
 /* Forward declarations */
 static void speak_task_func(void *arg);
 static esp_err_t speak_process_request(const speak_request_t *req);
@@ -123,6 +130,20 @@ static void reconnect_timer_callback(void *arg) {
   }
   ESP_LOGI(TAG, "Auto-reconnecting (attempt %d)...", s_reconnect_count);
   s_state = XIAOZHI_MANAGER_STATE_CONNECTING;
+
+  /* [FIX 2026-08-10] Drop queued speak requests on reconnect: TTS injects
+   * enqueued before/while the connection dropped would otherwise fire the
+   * moment the channel re-opens, sending stale broadcasts and racing the
+   * re-connect handshake (observed "Websocket is not connected" during
+   * auto-reconnect in long-run logs). speak_request_t is a value type, so
+   * xQueueReset is memory-safe. */
+  if (s_speak_queue) {
+    UBaseType_t pending = uxQueueMessagesWaiting(s_speak_queue);
+    if (pending > 0) {
+      ESP_LOGW(TAG, "Reconnect: dropping %u queued speak request(s)", (unsigned)pending);
+      xQueueReset(s_speak_queue);
+    }
+  }
 
   /* Full deinit + reinit cycle to ensure MCP engine state is clean.
    * The previous approach of just calling chat_start() was insufficient
@@ -205,14 +226,23 @@ static void reconnect_timer_callback(void *arg) {
   /* Start new chat session */
   ret = esp_xiaozhi_chat_start(s_chat_handle);
   if (ret != ESP_OK) {
-    ESP_LOGW(TAG, "Reconnect attempt %d failed: %s", s_reconnect_count,
-             esp_err_to_name(ret));
+    ESP_LOGW(TAG,
+             "Reconnect attempt %d failed at chat_start: %s (WS/TLS "
+             "establishment failed or network unreachable, next retry)",
+             s_reconnect_count, esp_err_to_name(ret));
     s_state = XIAOZHI_MANAGER_STATE_ERROR;
     /* Schedule next retry */
     schedule_reconnect_if_needed();
+  } else {
+    /* chat_start returned OK but the WS connect is asynchronous: stay in
+     * CONNECTING until WEBSOCKET_EVENT_CONNECTED drives the state machine.
+     * If the underlying esp_websocket keeps failing, the xiaozhi transport
+     * emits CONNECT_FAILED and we reach schedule_reconnect via the event
+     * handler. Log here for observability of the CONNECTING stall. */
+    ESP_LOGI(TAG, "Reconnect attempt %d: chat_start accepted, waiting for "
+                  "CONNECTED event",
+             s_reconnect_count);
   }
-  /* If successful, CONNECTED event will be received via callback,
-   * which resets the reconnect counter. */
 }
 
 static void schedule_reconnect_if_needed(void) {
@@ -373,8 +403,18 @@ static void mic_resume_after_tts(void) {
    * Without this, the server does not process incoming audio after TTS ends,
    * causing the conversation to stall after the first reply. */
   if (s_chat_handle) {
-    esp_xiaozhi_chat_send_start_listening(s_chat_handle,
-                                          ESP_XIAOZHI_CHAT_LISTENING_MODE_AUTO);
+    esp_err_t ret = esp_xiaozhi_chat_send_start_listening(
+        s_chat_handle, ESP_XIAOZHI_CHAT_LISTENING_MODE_AUTO);
+    if (ret != ESP_OK) {
+      /* [FIX 2026-08-10] Failed to resume listening (e.g. stale session_id):
+       * reset the audio channel so the next conversation re-establishes a
+       * fresh session instead of silently stalling after TTS. */
+      ESP_LOGW(TAG,
+               "send_start_listening after TTS failed: %s - closing channel to reset",
+               esp_err_to_name(ret));
+      esp_xiaozhi_chat_close_audio_channel(s_chat_handle);
+      return;
+    }
   }
 
   ESP_LOGI(TAG, "Microphone resumed after TTS playback");
@@ -428,21 +468,31 @@ static void xiaozhi_event_callback(esp_xiaozhi_chat_event_t event,
                                (void *)"speaking");
         break;
       case ESP_XIAOZHI_CHAT_TTS_STATE_STOP:
-        /* TTS finished — return to LISTENING to continue the conversation.
-         * After a touch-triggered welcome broadcast the audio channel stays
-         * open so the user can keep talking without saying the wake word. */
-        s_state = XIAOZHI_MANAGER_STATE_LISTENING;
-        /* Flush any stale OPUS frames from the decode queue.
-         * Without this, leftover frames continue writing to I2S
-         * after TTS has ended, causing ESP_ERR_TIMEOUT errors. */
+        /* [FIX 2026-08-10] Injection-triggered TTS: close the audio channel
+         * back to CONNECTED so the next conversation opens a fresh session.
+         * Keeping it open after a proactive broadcast reuses a server session
+         * that the server may already consider finished, which made later
+         * wake-up/injects fail ("cannot start conversation"). The user must
+         * say the wake word again to talk — accepted trade-off. */
         audio_bridge_flush_tts();
-        mic_resume_after_tts();
+        wake_word_engine_resume();
+        if (s_inject_active) {
+          s_inject_active = false;
+          ESP_LOGI(TAG, "Injected TTS finished - closing audio channel back to CONNECTED");
+          if (s_chat_handle) {
+            /* Triggers AUDIO_CHANNEL_CLOSED -> CONNECTED (see event handler) */
+            esp_xiaozhi_chat_close_audio_channel(s_chat_handle);
+          }
+        } else {
+          /* Normal (user) conversation: TTS finished — return to LISTENING
+           * to continue the conversation. */
+          s_state = XIAOZHI_MANAGER_STATE_LISTENING;
+          mic_resume_after_tts();
+        }
         /* Resume wake word engine after TTS ends.
          * wake_word_engine_resume() also cleans MultiNet state and
          * resets input buffer, discarding any TTS echo audio that
          * accumulated during the pause period. */
-        wake_word_engine_resume();
-        /* 语音打断（barge-in）为后续测试项：随 set_tts_active 一起停用 */
         if (s_config.event_cb) {
           s_config.event_cb(XIAOZHI_MANAGER_EVENT_TTS_STOP, NULL,
                             s_config.event_cb_ctx);
@@ -1108,6 +1158,21 @@ esp_err_t xiaozhi_manager_send_wake_word(const char *wake_word) {
         ESP_XIAOZHI_CHAT_ABORT_SPEAKING_REASON_WAKE_WORD_DETECTED);
   }
 
+  /* [FIX 2026-08-10] Channel already open and server already listening:
+   * sending another wake-detect would duplicate the listen state and could
+   * confuse the server after an injected broadcast left the channel open.
+   * Just make sure the server keeps listening and stay in the session. */
+  if (s_state == XIAOZHI_MANAGER_STATE_LISTENING) {
+    ESP_LOGI(TAG, "Wake word while already LISTENING - keep listening, no duplicate detect");
+    esp_err_t ret = esp_xiaozhi_chat_send_start_listening(
+        s_chat_handle, ESP_XIAOZHI_CHAT_LISTENING_MODE_AUTO);
+    if (ret != ESP_OK) {
+      ESP_LOGW(TAG, "start_listening while LISTENING failed: %s",
+               esp_err_to_name(ret));
+    }
+    return ret;
+  }
+
   /* If not in a state where we can send a wake word, open audio channel first.
    * This handles the case where audio channel was closed after goodbye. */
   if (s_state == XIAOZHI_MANAGER_STATE_CONNECTED) {
@@ -1276,6 +1341,9 @@ static esp_err_t speak_process_request(const speak_request_t *req) {
   }
 
   ESP_LOGI(TAG, "Direct text inject: \"%s\" (no wake word)", req->text);
+  /* Mark the coming TTS as injection-triggered so TTS_STOP closes the
+   * audio channel back to CONNECTED (see TTS_STATE_STOP handler). */
+  s_inject_active = true;
   return ESP_OK;
 }
 

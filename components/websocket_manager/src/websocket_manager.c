@@ -422,6 +422,13 @@ esp_err_t ws_manager_server_start(void)
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = WS_MANAGER_SERVER_PORT;
+    /* [FIX 2026-08-10] recv_wait_timeout raised 5s->300s (aligned with the
+     * head board): HTTP/WS clients that only send requests (TTS inject,
+     * chat/end) and never send further data were disconnected by the default
+     * 5s recv timeout, producing repeated "408 Request Timeout" + disconnect
+     * cycles (observed in long-run logs). Dead connections are reclaimed by
+     * TCP keepalive + close_fn instead. */
+    config.recv_wait_timeout = 300;
     /* Reserve extra sockets for HTTP requests (TTS inject from head/base
      * boards, status/report, root page). NOTE: max_open_sockets is capped at
      * CONFIG_LWIP_MAX_SOCKETS - 3 (httpd reserves 3 sockets internally).

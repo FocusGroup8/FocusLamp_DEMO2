@@ -1,0 +1,4 @@
+websockets==15.0.1
+aiohttp==3.13.5
+opencv-python-headless==4.13.0.92
+numpy==2.0.2

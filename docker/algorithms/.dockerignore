@@ -1,0 +1,8 @@
+# 限制 build context：只打包公共模块与被构建的服务目录
+*
+!_common/
+!_common/*
+!vlm-game-detector/
+!vlm-game-detector/*
+!vlm-visual-qa/
+!vlm-visual-qa/*

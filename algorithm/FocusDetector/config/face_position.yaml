@@ -1,0 +1,46 @@
+# 面部空间坐标估计配置
+# 详见 docs/face_position_design.md
+
+face_position:
+  enabled: true
+
+  # ===== 尺度先验 =====
+  # 瞳距物理先验（成年人均值 6.3cm，个体差异 ±0.5cm）
+  # 用于 X/Y 坐标的尺度反推 + distance_cm 绝对距离估算
+  pupil_distance_cm: 6.3
+
+  # 头长物理先验（鼻尖到头顶距离约 23cm）
+  # 用于 Z 坐标（鼻尖-双肩深度差）的尺度换算
+  head_length_cm: 23.0
+
+  # ===== 摄像头 FOV（用于 distance_cm 绝对距离估算）=====
+  # 笔记本摄像头水平 FOV 默认 60°，常见范围 55-70°
+  # 精度影响：FOV 偏差 ±5° → distance 偏差约 ±10%
+  # Phase 2 标定后可用真实焦距替换
+  camera_fov_degrees: 60.0
+
+  # ===== 原点配置 =====
+  # "geometric"  = 用画面几何中心 (W/2, H/2) 作为光心近似
+  # "calibrated" = 用下方 calibrated_cx/cy 作为光心（Phase 2 标定后启用）
+  image_center_mode: "geometric"
+  calibrated_cx: null    # Phase 2 标定后填入（归一化坐标 0~1）
+  calibrated_cy: null
+
+  # ===== 关键点可见度 =====
+  # Pose 关键点可见度低于此值视为无效
+  min_visibility: 0.5
+
+  # ===== 滤波与异常值剔除 =====
+  # 一阶低通滤波系数：0=冻结（不更新），1=不滤波（直接采用最新值）
+  # 推荐 0.3（30% 新值 + 70% 历史值），平滑性与响应性平衡
+  smoothing_alpha: 0.3
+
+  # 单帧跳变阈值：超过此值视为异常值，丢弃本帧不更新滤波器
+  # distance_cm 允许 2 倍阈值（前后移动跳变更大）
+  outlier_jump_threshold_cm: 30.0
+
+  # 连续无效帧数达到此值后重置滤波器
+  invalid_reset_frames: 10
+
+  # ===== 输出 =====
+  output_unit: "cm"

@@ -1,0 +1,1197 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>Algorithm Visualization Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #1a1a2e; 
+            color: #eee;
+            min-height: 100vh;
+        }
+        .header {
+            background: linear-gradient(135deg, #16213e 0%, #0f3460 100%);
+            padding: 20px;
+            text-align: center;
+            border-bottom: 2px solid #e94560;
+        }
+        .header h1 { font-size: 24px; color: #e94560; }
+        .status-bar {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin-top: 10px;
+            flex-wrap: wrap;
+        }
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 5px 15px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 20px;
+            font-size: 14px;
+        }
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #666;
+        }
+        .status-dot.connected { background: #00ff88; }
+        .status-dot.disconnected { background: #ff4444; }
+        .main-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+            padding: 20px;
+            max-width: 1800px;
+            margin: 0 auto;
+        }
+        .algorithm-card {
+            background: linear-gradient(145deg, #16213e, #1a1a2e);
+            border-radius: 15px;
+            overflow: hidden;
+            border: 1px solid #333;
+        }
+        .card-header {
+            background: rgba(233, 69, 96, 0.2);
+            padding: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .card-header h2 { font-size: 16px; color: #e94560; }
+        .card-header .method { font-size: 12px; color: #888; }
+        .image-container {
+            width: 100%;
+            aspect-ratio: 4/3;
+            background: #0a0a0a;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+        }
+        .image-container img {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+            will-change: transform;
+            transform: translateZ(0);
+            backface-visibility: hidden;
+        }
+        .image-container .placeholder {
+            color: #444;
+            font-size: 14px;
+        }
+        .result-info {
+            padding: 15px;
+            background: rgba(0,0,0,0.3);
+            font-size: 13px;
+            font-family: 'Consolas', monospace;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+        .result-info pre {
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .controls {
+            padding: 20px;
+            text-align: center;
+            background: rgba(0,0,0,0.2);
+        }
+        .btn {
+            padding: 10px 30px;
+            font-size: 14px;
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+            margin: 5px;
+            transition: all 0.3s;
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, #e94560, #ff6b6b);
+            color: white;
+        }
+        .btn-primary:hover { transform: scale(1.05); }
+        .btn-secondary {
+            background: rgba(255,255,255,0.1);
+            color: #aaa;
+            border: 1px solid #444;
+        }
+        .btn-secondary:hover { background: rgba(255,255,255,0.2); }
+        .fps-counter {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            background: rgba(0,0,0,0.7);
+            padding: 10px 15px;
+            border-radius: 10px;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>ESP32P4 Algorithm Visualization Dashboard</h1>
+        <div class="status-bar">
+            <div class="status-item">
+                <span class="status-dot" id="ws-status"></span>
+                <span>WebSocket: <span id="ws-status-text">Disconnected</span></span>
+            </div>
+            <div class="status-item">
+                <span>Input: <span id="input-source-text">ESP32P4</span></span>
+            </div>
+            <div class="status-item">
+                <span>FPS: <span id="fps-value">0</span></span>
+            </div>
+            <div class="status-item">
+                <span>Resolution: <span id="resolution">--</span></span>
+            </div>
+            <div class="status-item">
+                <span>Frame: <span id="frame-seq">0</span></span>
+            </div>
+        </div>
+    </div>
+
+    <div class="controls">
+        <button class="btn btn-primary" id="startBtn">Start Visualization</button>
+        <button class="btn btn-secondary" id="stopBtn">Stop</button>
+        <button class="btn btn-secondary" id="refreshBtn">Refresh Algorithms</button>
+        <button class="btn btn-secondary" id="switchInputBtn">Switch to Camera</button>
+    </div>
+
+    <div class="main-container">
+        <div class="algorithm-card">
+            <div class="card-header">
+                <h2>Raw Frame (WebSocket + Canvas)</h2>
+                <span class="method">Zero Latency</span>
+            </div>
+            <div class="image-container">
+                <canvas id="raw-canvas" style="max-width: 100%; max-height: 100%; object-fit: contain;"></canvas>
+                <span class="placeholder" id="raw-placeholder">Waiting for data...</span>
+            </div>
+            <div class="result-info">
+                <pre id="raw-result">WebSocket Canvas Active</pre>
+            </div>
+        </div>
+
+        <div class="algorithm-card">
+            <div class="card-header">
+                <h2>Emotion</h2>
+                <span class="method">EmotiEffLib ONNX</span>
+            </div>
+            <div class="image-container">
+                <img id="emotion-img" src="" alt="Emotion">
+                <span class="placeholder" id="emotion-placeholder">Waiting for data...</span>
+            </div>
+            <div class="result-info">
+                <pre id="emotion-result">--</pre>
+            </div>
+        </div>
+
+        <div class="algorithm-card">
+            <div class="card-header">
+                <h2>Fatigue</h2>
+                <span class="method">dlib EAR/MAR</span>
+            </div>
+            <div class="image-container">
+                <img id="fatigue-img" src="" alt="Fatigue">
+                <span class="placeholder" id="fatigue-placeholder">Waiting for data...</span>
+            </div>
+            <div class="result-info">
+                <pre id="fatigue-result">--</pre>
+            </div>
+        </div>
+
+        <div class="algorithm-card">
+            <div class="card-header">
+                <h2>Focus (Mantis)</h2>
+                <span class="method">MediaPipe + ONNX ViT + 7-Level</span>
+            </div>
+            <div class="image-container">
+                <img id="focus-img" src="" alt="Focus">
+                <span class="placeholder" id="focus-placeholder">Waiting for data...</span>
+            </div>
+            <div class="result-info">
+                <pre id="focus-result">--</pre>
+            </div>
+        </div>
+
+        <div class="algorithm-card">
+            <div class="card-header">
+                <h2>Gesture Mantis</h2>
+                <span class="method">MediaPipe GestureRecognizer</span>
+            </div>
+            <div class="image-container">
+                <img id="gesture-mantis-img" src="" alt="Gesture Mantis">
+                <span class="placeholder" id="gesture-mantis-placeholder">Waiting for data...</span>
+            </div>
+            <div class="result-info">
+                <pre id="gesture-mantis-result">--</pre>
+            </div>
+        </div>
+
+        <div class="algorithm-card">
+            <div class="card-header">
+                <h2>Pose (Neck Exercise)</h2>
+                <span class="method">MediaPipe Pose</span>
+            </div>
+            <div class="image-container">
+                <img id="pose-img" src="" alt="Pose">
+                <span class="placeholder" id="pose-placeholder">Waiting for data...</span>
+            </div>
+            <div class="result-info">
+                <pre id="pose-result">--</pre>
+            </div>
+        </div>
+
+        <div class="algorithm-card">
+            <div class="card-header">
+                <h2>Face Landmarker</h2>
+                <span class="method">MediaPipe FaceLandmarker (478 points)</span>
+            </div>
+            <div class="image-container">
+                <img id="face-landmarker-img" src="" alt="Face Landmarker">
+                <span class="placeholder" id="face-landmarker-placeholder">Waiting for data...</span>
+            </div>
+            <div class="result-info">
+                <pre id="face-landmarker-result">--</pre>
+            </div>
+        </div>
+
+        <div class="algorithm-card">
+            <div class="card-header">
+                <h2>Face Position</h2>
+                <span class="method">Face Mesh + Pose Fusion (cm)</span>
+            </div>
+            <div class="image-container">
+                <img id="face-position-img" src="" alt="Face Position">
+                <span class="placeholder" id="face-position-placeholder">Waiting for data...</span>
+            </div>
+            <div class="result-info">
+                <pre id="face-position-result">--</pre>
+            </div>
+        </div>
+
+        <div class="algorithm-card">
+            <div class="card-header">
+                <h2>VLM Visual QA</h2>
+                <span class="method">Doubao API - Pointing Description</span>
+            </div>
+            <div class="image-container">
+                <canvas id="vlm-visual-qa-canvas" style="max-width: 100%; max-height: 100%; object-fit: contain;"></canvas>
+                <span class="placeholder" id="vlm-visual-qa-placeholder">Pointing_Up 1.5s or click trigger</span>
+            </div>
+            <div class="result-info">
+                <pre id="vlm-visual-qa-result">--</pre>
+            </div>
+            <div style="padding: 10px; text-align: center; background: rgba(0,0,0,0.2);">
+                <button class="btn btn-primary" id="vlm-qa-trigger-btn" style="padding: 6px 20px; font-size: 12px;">Trigger QA</button>
+            </div>
+        </div>
+
+        <div class="algorithm-card">
+            <div class="card-header">
+                <h2>VLM Game Detector</h2>
+                <span class="method">Doubao API - Game Detection</span>
+            </div>
+            <div class="image-container">
+                <canvas id="vlm-game-detector-canvas" style="max-width: 100%; max-height: 100%; object-fit: contain;"></canvas>
+                <span class="placeholder" id="vlm-game-detector-placeholder">YOLO+手部接触自动触发 (5s 冷却)</span>
+            </div>
+            <div class="result-info">
+                <pre id="vlm-game-detector-result">--</pre>
+            </div>
+            <div style="padding: 10px; text-align: center; background: rgba(0,0,0,0.2);">
+                <button class="btn btn-primary" id="vlm-game-trigger-btn" style="padding: 6px 20px; font-size: 12px;">Trigger Detect</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const AppConfig = {
+            debug: false,
+            vlmBgUpdateIntervalMs: 100,
+            fpsUpdateIntervalMs: 1000,
+            wsReconnectDelayMs: 3000,
+            statusTextMaxLen: 40,
+            reasonMaxLen: 30,
+        };
+
+        const Log = {
+            debug: (...args) => { if (AppConfig.debug) console.debug('[DEBUG]', ...args); },
+            info:  (...args) => console.info('[INFO]', ...args),
+            warn:  (...args) => console.warn('[WARN]', ...args),
+            error: (...args) => console.error('[ERROR]', ...args),
+        };
+
+        const algorithmUrls = {
+            'focus': '/algorithm/focus',
+            'emotion': '/algorithm/emotion',
+            'fatigue': '/algorithm/fatigue',
+            'gesture_mantis': '/algorithm/gesture_mantis',
+            'pose': '/algorithm/pose',
+            'face_landmarker': '/algorithm/face_landmarker',
+            'face_position': '/algorithm/face_position',
+            'vlm_visual_qa': '/algorithm/vlm_visual_qa',
+            'vlm_game_detector': '/algorithm/vlm_game_detector'
+        };
+
+        const enabledAlgorithms = {
+            'focus': true,
+            'emotion': true,
+            'fatigue': true,
+            'gesture_mantis': true,
+            'pose': true,
+            'face_landmarker': true,
+            'face_position': true,
+            'vlm_visual_qa': false,
+            'vlm_game_detector': false
+        };
+
+        const FRAME_QUEUE_MAX_SIZE = 5;
+        const FRAME_MAX_AGE_MS = 150;
+        const FRAME_EXPIRED_AGE_MS = 300;
+        const FRAME_IMMEDIATE_EXPIRE_MS = 100;
+
+        class FrameQueue {
+            constructor(maxSize = FRAME_QUEUE_MAX_SIZE) {
+                this.queue = [];
+                this.maxSize = maxSize;
+                this.droppedFrames = 0;
+                this.expiredFrames = 0;
+            }
+
+            push(frameData, seq, timestamp) {
+                while (this.queue.length >= this.maxSize) {
+                    const dropped = this.queue.shift();
+                    this.droppedFrames++;
+                    Log.info(`[DROP] Queue full, dropped frame seq=${dropped.seq}, age=${Date.now() - dropped.timestamp}ms`);
+                }
+                
+                this.queue.push({
+                    data: frameData,
+                    seq: seq,
+                    timestamp: timestamp
+                });
+            }
+
+            getLatestValid() {
+                const now = Date.now();
+                
+                while (this.queue.length > 0) {
+                    const frame = this.queue[0];
+                    const age = now - frame.timestamp;
+                    
+                    if (age > FRAME_EXPIRED_AGE_MS) {
+                        this.queue.shift();
+                        this.expiredFrames++;
+                        Log.info(`[EXPIRED] Frame seq=${frame.seq} is too old (${age}ms), discarding`);
+                        continue;
+                    }
+                    
+                    break;
+                }
+                
+                if (this.queue.length === 0) {
+                    return null;
+                }
+                
+                while (this.queue.length > 1) {
+                    const nextFrame = this.queue[1];
+                    const nextAge = now - nextFrame.timestamp;
+                    
+                    if (nextAge <= FRAME_MAX_AGE_MS) {
+                        const dropped = this.queue.shift();
+                        this.droppedFrames++;
+                        Log.info(`[SKIP] Newer frame available, skipping seq=${dropped.seq}`);
+                    } else {
+                        break;
+                    }
+                }
+                
+                return this.queue.shift();
+            }
+
+            clear() {
+                this.queue = [];
+            }
+
+            getStats() {
+                return {
+                    queueLength: this.queue.length,
+                    droppedFrames: this.droppedFrames,
+                    expiredFrames: this.expiredFrames
+                };
+            }
+
+            resetStats() {
+                this.droppedFrames = 0;
+                this.expiredFrames = 0;
+            }
+        }
+
+        let ws = null;
+        let running = false;
+        let frameCount = 0;
+        let lastFpsTime = Date.now();
+        let currentFrame = null;
+        let frameSeq = 0;
+        // Canvas 状态对象
+        const canvasState = {
+            raw: { canvas: null, ctx: null },
+            cachedImage: null,
+            width: 0,
+            height: 0,
+            lastRenderedSeq: 0,
+            isRendering: false,
+            renderScheduled: false,
+            queue: null,
+        };
+        let lastVlmBgUpdateTime = 0;
+        // VLM Canvas 相关
+        let vlmQaCanvas = null;
+        let vlmQaCtx = null;
+        let vlmGameCanvas = null;
+        let vlmGameCtx = null;
+        // VLM 状态对象
+        const vlmQaState = {
+            cachedImage: { img: null },
+            hasResult: false,
+            lastAnswer: '',
+            lastTriggered: false,
+            triggering: false,
+        };
+        // VLM 判断/触发源：英文枚举（跨端协议值）→ 中文展示
+        const JUDGMENT_CN = { yes: '是', no: '否', uncertain: '不确定', pending: '等待检测', error: '检测失败' };
+        const judgmentToCn = (v) => JUDGMENT_CN[v] || '等待检测';
+        const triggerSourceToCn = (v) => v === 'phone' ? '手机' : v === 'computer' ? '电脑' : (v || '');
+        const vlmGameState = {
+            cachedImage: { img: null },
+            hasResult: false,
+            lastJudgment: '',
+            lastReason: '',
+            lastTriggered: false,
+            triggering: false,
+            detection: null,
+            apiProcessing: false,
+            cooldown: 0,
+            apiTriggered: false,
+        };
+        // 当前手势状态（从 gesture_mantis 结果获取）
+        let currentGesture = 'None';
+        let currentHandLandmarks = null;
+
+        function initCanvas() {
+            canvasState.raw.canvas = document.getElementById('raw-canvas');
+            canvasState.raw.ctx = canvasState.raw.canvas.getContext('2d', { alpha: false });
+            canvasState.raw.ctx.imageSmoothingEnabled = false;
+            canvasState.queue = new FrameQueue(FRAME_QUEUE_MAX_SIZE);
+            vlmQaCanvas = document.getElementById('vlm-visual-qa-canvas');
+            vlmQaCtx = vlmQaCanvas ? vlmQaCanvas.getContext('2d', { alpha: false }) : null;
+            vlmGameCanvas = document.getElementById('vlm-game-detector-canvas');
+            vlmGameCtx = vlmGameCanvas ? vlmGameCanvas.getContext('2d', { alpha: false }) : null;
+        }
+
+        // 将 base64 图像绘制到指定 canvas，并叠加 VLM 标注
+        function drawVlmFrame(canvas, ctx, imageBase64, drawOverlay, cachedImageRef) {
+            if (!canvas || !ctx) return;
+            if (!cachedImageRef.img) {
+                cachedImageRef.img = new Image();
+            }
+            const img = cachedImageRef.img;
+            img.onload = () => {
+                const w = img.width;
+                const h = img.height;
+                if (canvas.width !== w || canvas.height !== h) {
+                    canvas.width = w;
+                    canvas.height = h;
+                }
+                ctx.clearRect(0, 0, w, h);
+                // 镜像翻转（与其他卡片保持一致）
+                ctx.save();
+                ctx.scale(-1, 1);
+                ctx.drawImage(img, -w, 0);
+                ctx.restore();
+                // 叠加标注
+                if (drawOverlay) drawOverlay(ctx, w, h);
+            };
+            img.src = `data:image/jpeg;base64,${imageBase64}`;
+        }
+
+        // VLM Overlay 公共绘制方法
+        function drawStatusBar(ctx, w, barHeight, alpha) {
+            ctx.fillStyle = `rgba(0,0,0,${alpha})`;
+            ctx.fillRect(0, 0, w, barHeight);
+        }
+
+        function drawStatusText(ctx, text, x, y, color, font) {
+            ctx.fillStyle = color;
+            ctx.font = font || '13px sans-serif';
+            ctx.fillText(text, x, y);
+        }
+
+        function getDetectionColor(touching, detected) {
+            return touching ? '#00ff00' : (detected ? '#ffff00' : '#888888');
+        }
+
+        // 在 VLM QA canvas 上叠加红圈 + 状态栏
+        function drawVlmQaOverlay(ctx, w, h) {
+            // 1. 红圈：随当前 Pointing_Up 手势的食指尖位置变化
+            if (currentGesture === 'Pointing_Up' && currentHandLandmarks && currentHandLandmarks.length > 8) {
+                const tip = currentHandLandmarks[8];
+                // 注意：画面已镜像翻转，所以 x 坐标需要翻转
+                const cx = (1 - tip.x) * w;
+                const cy = tip.y * h;
+                const r = Math.max(15, Math.round(Math.min(w, h) * 0.04));
+                ctx.strokeStyle = 'red';
+                ctx.lineWidth = 4;
+                ctx.beginPath();
+                ctx.arc(cx, cy, r, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.strokeStyle = 'red';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.arc(cx, cy, r + 6, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+            // 2. 顶部状态栏
+            drawStatusBar(ctx, w, 36, 0.6);
+            let statusText, statusColor;
+            if (vlmQaState.triggering) {
+                statusText = 'VLM 查询中...';
+                statusColor = '#00ffff';
+            } else if (vlmQaState.lastTriggered && vlmQaState.lastAnswer) {
+                statusText = `VLM: ${vlmQaState.lastAnswer.substring(0, AppConfig.statusTextMaxLen)}`;
+                statusColor = '#ffffff';
+            } else {
+                statusText = 'VLM-QA | 等待触发 (Pointing_Up 1.5s 或 点击按钮)';
+                statusColor = '#cccccc';
+            }
+            drawStatusText(ctx, statusText, 8, 24, statusColor, '14px sans-serif');
+        }
+
+        // 在 VLM Game canvas 上叠加状态栏
+        function drawVlmGameOverlay(ctx, w, h) {
+            // 1. 顶部状态栏（手机/电脑/手部接触状态 + API 状态）
+            drawStatusBar(ctx, w, 80, 0.6);
+
+            // 检测状态颜色
+            const det = vlmGameState.detection;
+            const phoneTouching = det && det.phone_hand_touching;
+            const pcTouching = det && det.pc_hand_touching;
+            const phoneDetected = det && det.phone_detected;
+            const pcDetected = det && det.pc_detected;
+            const handDetected = det && det.hand_detected;
+
+            // 手机状态
+            const phoneText = phoneTouching ? '手机:接触' : (phoneDetected ? '手机:检测' : '手机:无');
+            drawStatusText(ctx, phoneText, 8, 18, getDetectionColor(phoneTouching, phoneDetected));
+
+            // 电脑状态
+            const pcText = pcTouching ? '电脑:接触' : (pcDetected ? '电脑:检测' : '电脑:无');
+            drawStatusText(ctx, pcText, 110, 18, getDetectionColor(pcTouching, pcDetected));
+
+            // 手部状态
+            const handTouching = phoneTouching || pcTouching;
+            const handText = handTouching ? '手部:接触' : (handDetected ? '手部:已检测' : '手部:无');
+            drawStatusText(ctx, handText, 210, 18, getDetectionColor(handTouching, handDetected));
+
+            // API 状态行
+            let apiStatus, apiColor;
+            if (vlmGameState.apiProcessing) {
+                apiStatus = 'API: 验证中...';
+                apiColor = '#00ffff';
+            } else if (vlmGameState.cooldown > 0) {
+                apiStatus = `API: 冷却 ${vlmGameState.cooldown.toFixed(1)}s`;
+                apiColor = '#ffaa00';
+            } else {
+                apiStatus = `API: 空闲 | 触发源: ${det && det.trigger_source ? det.trigger_source : '无'}`;
+                apiColor = '#cccccc';
+            }
+            drawStatusText(ctx, apiStatus, 8, 40, apiColor);
+
+            // 触发源指示
+            if (det && det.trigger_source) {
+                drawStatusText(ctx, `触发: ${det.trigger_source}`, 8, 60, '#ff44ff', 'bold 13px sans-serif');
+            }
+
+            // 2. 绘制 YOLO 检测框（键盘/鼠标/手机）
+            // 注意：画面已镜像翻转，bbox 的 x 坐标需要做镜像变换
+            if (det) {
+                // 手机检测框（蓝色）
+                if (det.phone_detections) {
+                    for (const d of det.phone_detections) {
+                        const [bx, by, bw, bh] = d.bbox;
+                        // 镜像变换：x_new = w - bx - bw
+                        const mx = w - bx - bw;
+                        ctx.strokeStyle = phoneTouching ? '#00ff00' : '#00aaff';
+                        ctx.lineWidth = 2;
+                        ctx.strokeRect(mx, by, bw, bh);
+                        ctx.fillStyle = ctx.strokeStyle;
+                        ctx.font = '11px sans-serif';
+                        ctx.fillText(`phone ${(d.score*100).toFixed(0)}%`, mx, by - 3);
+                    }
+                }
+                // 电脑检测框（橙色）- 键盘和鼠标
+                if (det.pc_detections) {
+                    for (const d of det.pc_detections) {
+                        const [bx, by, bw, bh] = d.bbox;
+                        const mx = w - bx - bw;
+                        ctx.strokeStyle = pcTouching ? '#00ff00' : '#ff8800';
+                        ctx.lineWidth = 2;
+                        ctx.strokeRect(mx, by, bw, bh);
+                        ctx.fillStyle = ctx.strokeStyle;
+                        ctx.font = '11px sans-serif';
+                        ctx.fillText(`${d.name || 'pc'} ${(d.score*100).toFixed(0)}%`, mx, by - 3);
+                    }
+                }
+                // 接触点（红色圆圈）
+                if (det.contact_points && det.contact_points.length > 0) {
+                    for (const pt of det.contact_points) {
+                        const mx = w - pt.x * w;  // 归一化坐标也需要镜像
+                        ctx.beginPath();
+                        ctx.arc(mx, pt.y * h, 6, 0, Math.PI * 2);
+                        ctx.fillStyle = '#ff0000';
+                        ctx.fill();
+                    }
+                }
+            }
+
+            // 3. 右上角显示 API 判断结果（仅当触发过 API 时显示）
+            if (vlmGameState.lastTriggered && vlmGameState.lastJudgment && vlmGameState.lastJudgment !== 'pending') {
+                const jColor = vlmGameState.lastJudgment === 'yes' ? '#ff4444' :
+                              vlmGameState.lastJudgment === 'no' ? '#00ff00' :
+                              vlmGameState.lastJudgment === 'uncertain' ? '#ffff00' : '#cccccc';
+                drawStatusText(ctx, `结果: ${judgmentToCn(vlmGameState.lastJudgment)}`, w - 130, 28, jColor, 'bold 20px sans-serif');
+                if (vlmGameState.lastReason) {
+                    const shortReason = vlmGameState.lastReason.substring(0, AppConfig.reasonMaxLen);
+                    drawStatusText(ctx, `理由: ${shortReason}`, w - 260, 50, '#ffffff', '12px sans-serif');
+                }
+            }
+        }
+
+        function displayFrameOnCanvas(imageBase64, seq, esp32Timestamp) {
+            if (!canvasState.raw.canvas || !canvasState.raw.ctx || !canvasState.queue) {
+                initCanvas();
+            }
+            
+            const receiveTimestamp = Date.now();
+            
+            if (seq !== undefined && seq <= canvasState.lastRenderedSeq) {
+                Log.info(`[OUT_OF_ORDER] Received old frame seq=${seq}, last rendered=${canvasState.lastRenderedSeq}`);
+                return;
+            }
+            
+            if (canvasState.queue.queue.length > 0) {
+                const droppedCount = canvasState.queue.queue.length;
+                canvasState.queue.droppedFrames += droppedCount;
+                canvasState.queue.queue = [];
+                Log.info(`[THROTTLE] Cleared ${droppedCount} queued frames, keeping only latest frame seq=${seq}`);
+            }
+            
+            canvasState.queue.push(imageBase64, seq, receiveTimestamp);
+            
+            if (!canvasState.renderScheduled) {
+                canvasState.renderScheduled = true;
+                requestAnimationFrame(processFrameQueue);
+            }
+        }
+        
+        function processFrameQueue() {
+            canvasState.renderScheduled = false;
+            
+            if (!canvasState.queue) {
+                canvasState.isRendering = false;
+                return;
+            }
+            
+            const frame = canvasState.queue.getLatestValid();
+            
+            if (!frame) {
+                canvasState.isRendering = false;
+                return;
+            }
+            
+            const age = Date.now() - frame.timestamp;
+            if (age > FRAME_MAX_AGE_MS) {
+                Log.info(`[STALE] Frame seq=${frame.seq} is stale (${age}ms), but rendering anyway (within limit)`);
+            }
+            
+            canvasState.isRendering = true;
+            renderFrame(frame);
+        }
+        
+        function renderFrame(frame) {
+            if (!canvasState.cachedImage) {
+                canvasState.cachedImage = new Image();
+            }
+            
+            canvasState.cachedImage.onload = () => {
+                if (canvasState.width !== canvasState.cachedImage.width || canvasState.height !== canvasState.cachedImage.height) {
+                    canvasState.width = canvasState.cachedImage.width;
+                    canvasState.height = canvasState.cachedImage.height;
+                    canvasState.raw.canvas.width = canvasState.width;
+                    canvasState.raw.canvas.height = canvasState.height;
+                    document.getElementById('resolution').textContent = `${canvasState.width}x${canvasState.height}`;
+                }
+                
+                canvasState.raw.ctx.clearRect(0, 0, canvasState.width, canvasState.height);
+                canvasState.raw.ctx.save();
+                canvasState.raw.ctx.scale(-1, 1);
+                canvasState.raw.ctx.drawImage(canvasState.cachedImage, -canvasState.width, 0);
+                canvasState.raw.ctx.restore();
+                document.getElementById('raw-placeholder').style.display = 'none';
+                canvasState.lastRenderedSeq = frame.seq;
+                
+                canvasState.isRendering = false;
+                
+                if (canvasState.queue && canvasState.queue.queue.length > 0) {
+                    canvasState.renderScheduled = true;
+                    requestAnimationFrame(processFrameQueue);
+                }
+            };
+            canvasState.cachedImage.onerror = () => {
+                canvasState.isRendering = false;
+                Log.error('[ERROR] Failed to decode frame');
+            };
+            canvasState.cachedImage.src = `data:image/jpeg;base64,${frame.data}`;
+        }
+
+        function updateWsStatus(connected) {
+            const dot = document.getElementById('ws-status');
+            const text = document.getElementById('ws-status-text');
+            if (connected) {
+                dot.classList.add('connected');
+                dot.classList.remove('disconnected');
+                text.textContent = 'Connected';
+            } else {
+                dot.classList.remove('connected');
+                dot.classList.add('disconnected');
+                text.textContent = 'Disconnected';
+            }
+        }
+
+        async function processAlgorithm(name, imageBase64) {
+            try {
+                const response = await fetch(algorithmUrls[name], {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ image: imageBase64 })
+                });
+                const data = await response.json();
+                
+                if (data.success && data.visualized_image) {
+                    const img = document.getElementById(`${name.replace(/_/g, '-')}-img`);
+                    const placeholder = document.getElementById(`${name.replace(/_/g, '-')}-placeholder`);
+                    const result = document.getElementById(`${name.replace(/_/g, '-')}-result`);
+                    
+                    img.src = `data:image/jpeg;base64,${data.visualized_image}`;
+                    img.style.display = 'block';
+                    placeholder.style.display = 'none';
+                    result.textContent = JSON.stringify(data.result, null, 2);
+                }
+            } catch (e) {
+                Log.error(`${name} error:`, e);
+            }
+        }
+
+        let pendingFrameHeader = null;
+        
+        function connect() {
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            let wsHost = window.location.host;
+            if (!wsHost || wsHost === '') {
+                wsHost = 'localhost:9000';
+            }
+            const wsUrl = `${wsProtocol}//${wsHost}/ws`;
+            Log.info(`[WS] Connecting to ${wsUrl}`);
+            ws = new WebSocket(wsUrl);
+            
+            ws.binaryType = 'arraybuffer';
+            
+            let lastFrameTime = 0;
+            let frameIntervalSum = 0;
+            let fpsFrameCount = 0;
+            
+            ws.onopen = () => {
+                updateWsStatus(true);
+                Log.info('WebSocket connected');
+            };
+            
+            ws.onmessage = (event) => {
+                if (event.data instanceof ArrayBuffer && running) {
+                    const receiveTimestamp = Date.now();
+                    const now = performance.now();
+                    const interval = lastFrameTime ? (now - lastFrameTime) : 0;
+                    lastFrameTime = now;
+                    
+                    let frameSeqToUse = frameSeq;
+                    
+                    if (pendingFrameHeader) {
+                        try {
+                            const header = JSON.parse(pendingFrameHeader);
+                            if (header.type === 'frame_header') {
+                                frameSeqToUse = header.seq;
+                            }
+                        } catch (e) {
+                            Log.error('Failed to parse frame header:', e);
+                        }
+                        pendingFrameHeader = null;
+                    }
+                    
+                    frameSeq++;
+                    frameIntervalSum += interval;
+                    fpsFrameCount++;
+                    
+                    const imageBase64 = btoa(
+                        new Uint8Array(event.data).reduce(
+                            (data, byte) => data + String.fromCharCode(byte), ''
+                        )
+                    );
+                    
+                    displayFrameOnCanvas(imageBase64, frameSeqToUse, receiveTimestamp);
+                    currentFrame = imageBase64;
+
+                    // 更新 VLM 卡片画面（用 Canvas 绘制实时帧 + 标注）
+                    const nowMs = Date.now();
+                    if (nowMs - lastVlmBgUpdateTime >= AppConfig.vlmBgUpdateIntervalMs) {
+                        lastVlmBgUpdateTime = nowMs;
+                        if (!vlmQaCanvas || !vlmGameCanvas) initCanvas();
+                        drawVlmFrame(vlmQaCanvas, vlmQaCtx, imageBase64, drawVlmQaOverlay, vlmQaState.cachedImage);
+                        drawVlmFrame(vlmGameCanvas, vlmGameCtx, imageBase64, drawVlmGameOverlay, vlmGameState.cachedImage);
+                        const qaPlaceholder = document.getElementById('vlm-visual-qa-placeholder');
+                        if (qaPlaceholder) qaPlaceholder.style.display = 'none';
+                        const gamePlaceholder = document.getElementById('vlm-game-detector-placeholder');
+                        if (gamePlaceholder) gamePlaceholder.style.display = 'none';
+                    }
+
+                    document.getElementById('frame-seq').textContent = frameSeqToUse;
+                    
+                    const fpsNow = Date.now();
+                    if (fpsNow - lastFpsTime >= AppConfig.fpsUpdateIntervalMs) {
+                        const avgInterval = fpsFrameCount > 0 ? (frameIntervalSum / fpsFrameCount).toFixed(1) : 0;
+                        document.getElementById('fps-value').textContent = fpsFrameCount;
+                        
+                        if (canvasState.queue) {
+                            const stats = canvasState.queue.getStats();
+                            Log.info(`[STATS] FPS: ${fpsFrameCount}, avg interval: ${avgInterval}ms, queue: ${stats.queueLength}, dropped: ${stats.droppedFrames}, expired: ${stats.expiredFrames}, seq: ${frameSeq}`);
+                            canvasState.queue.resetStats();
+                        } else {
+                            Log.info(`[STATS] FPS: ${fpsFrameCount}, avg interval: ${avgInterval}ms, seq: ${frameSeq}`);
+                        }
+                        
+                        fpsFrameCount = 0;
+                        frameIntervalSum = 0;
+                        lastFpsTime = fpsNow;
+                    }
+                } else if (typeof event.data === 'string') {
+                    try {
+                        const message = JSON.parse(event.data);
+                        if (message.type === 'frame_header') {
+                            pendingFrameHeader = event.data;
+                        } else if (message.type === 'algorithm_results') {
+                            const results = message.results;
+                            for (const [algoName, algoResult] of Object.entries(results)) {
+                                if (!algoResult) continue;
+
+                                // 提取手势数据（用于 VLM QA 红圈定位）
+                                if (algoName === 'gesture_mantis' && algoResult.result) {
+                                    currentGesture = algoResult.result.gesture || 'None';
+                                    currentHandLandmarks = algoResult.result.hand_landmarks || null;
+                                }
+
+                                // VLM 算法：更新 VLM 状态 + 底部结果文本，不覆盖画面
+                                if (algoName === 'vlm_visual_qa' || algoName === 'vlm_game_detector') {
+                                    const resultId = algoName.replace(/_/g, '-') + '-result';
+                                    const resultEl = document.getElementById(resultId);
+                                    if (algoResult.result) {
+                                        if (algoName === 'vlm_visual_qa') {
+                                            // Visual QA: 更新状态 + 显示 AI 回答
+                                            vlmQaState.lastAnswer = algoResult.result.answer || '';
+                                            vlmQaState.lastTriggered = true;
+                                            vlmQaState.triggering = false;
+                                            const ts = algoResult.result.timestamp;
+                                            const tipFlag = algoResult.result.fingertip_provided ? '是' : '否';
+                                            if (resultEl) {
+                                                resultEl.textContent = `AI 回答: ${vlmQaState.lastAnswer}\n时间戳: ${ts || '--'}\n使用指尖定位: ${tipFlag}`;
+                                            }
+                                        } else {
+                                            // Game Detector: 提取 detection 状态 + 判断 + 理由
+                                            const r = algoResult.result;
+                                            if (r) {
+                                                // 更新实时检测状态
+                                                if (r.detection) {
+                                                    vlmGameState.detection = r.detection;
+                                                }
+                                                vlmGameState.apiProcessing = !!r.is_processing;
+                                                vlmGameState.cooldown = r.cooldown_remaining || 0;
+                                                // 仅在 API 实际触发过且返回了新结果时更新判断
+                                                if (r.api_triggered) {
+                                                    vlmGameState.apiTriggered = true;
+                                                }
+                                                // judgment/reason 反映上次 API 结果
+                                                if (r.judgment && r.judgment !== 'pending') {
+                                                    vlmGameState.lastJudgment = r.judgment;
+                                                    vlmGameState.lastReason = r.reason || '';
+                                                    vlmGameState.lastTriggered = true;
+                                                }
+                                                vlmGameState.triggering = vlmGameState.apiProcessing;
+                                                if (resultEl) {
+                                                    const lines = [];
+                                                    lines.push(`判断: ${judgmentToCn(vlmGameState.lastJudgment) || '等待检测'}`);
+                                                    if (vlmGameState.lastReason) lines.push(`理由: ${vlmGameState.lastReason}`);
+                                                    if (vlmGameState.detection) {
+                                                        lines.push(`手机: ${vlmGameState.detection.phone_hand_touching ? '接触' : (vlmGameState.detection.phone_detected ? '检测到' : '未检测')}`);
+                                                        lines.push(`电脑: ${vlmGameState.detection.pc_hand_touching ? '接触' : (vlmGameState.detection.pc_detected ? '检测到' : '未检测')}`);
+                                                        lines.push(`手部: ${vlmGameState.detection.hand_detected ? '已检测' : '未检测'}`);
+                                                        if (vlmGameState.detection.trigger_source) {
+                                                            lines.push(`触发源: ${triggerSourceToCn(vlmGameState.detection.trigger_source)}`);
+                                                        }
+                                                    }
+                                                    if (vlmGameState.apiProcessing) lines.push('API: 验证中...');
+                                                    else if (vlmGameState.cooldown > 0) lines.push(`API 冷却: ${vlmGameState.cooldown.toFixed(1)}s`);
+                                                    resultEl.textContent = lines.join('\n');
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if (algoName === 'vlm_visual_qa') vlmQaState.hasResult = true;
+                                    if (algoName === 'vlm_game_detector') vlmGameState.hasResult = true;
+                                    continue;
+                                }
+
+                                // 其他算法：更新图片 + JSON 结果
+                                if (algoResult.visualized_image) {
+                                    const imgId = algoName.replace(/_/g, '-') + '-img';
+                                    const placeholderId = algoName.replace(/_/g, '-') + '-placeholder';
+                                    const resultId = algoName.replace(/_/g, '-') + '-result';
+
+                                    const img = document.getElementById(imgId);
+                                    const placeholder = document.getElementById(placeholderId);
+                                    const resultEl = document.getElementById(resultId);
+
+                                    if (img) {
+                                        img.src = `data:image/jpeg;base64,${algoResult.visualized_image}`;
+                                        img.style.display = 'block';
+                                    }
+                                    if (placeholder) {
+                                        placeholder.style.display = 'none';
+                                    }
+                                    if (resultEl && algoResult.result) {
+                                        resultEl.textContent = JSON.stringify(algoResult.result, null, 2);
+                                    }
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        Log.error('Failed to parse text message:', e);
+                    }
+                }
+            };
+            
+            ws.onclose = () => {
+                updateWsStatus(false);
+                Log.info('WebSocket closed');
+                if (running) {
+                    setTimeout(connect, AppConfig.wsReconnectDelayMs);
+                }
+            };
+            
+            ws.onerror = (e) => {
+                Log.error('WebSocket error:', e);
+            };
+        }
+
+        document.getElementById('startBtn').addEventListener('click', () => {
+            running = true;
+            frameSeq = 0;
+            canvasState.lastRenderedSeq = 0;
+            canvasState.isRendering = false;
+            canvasState.renderScheduled = false;
+            if (canvasState.queue) {
+                canvasState.queue.clear();
+                canvasState.queue.resetStats();
+            }
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                connect();
+            }
+        });
+
+        document.getElementById('stopBtn').addEventListener('click', () => {
+            running = false;
+            canvasState.isRendering = false;
+            canvasState.renderScheduled = false;
+            if (canvasState.queue) {
+                canvasState.queue.clear();
+            }
+            if (ws) {
+                ws.close();
+            }
+        });
+
+        document.getElementById('refreshBtn').addEventListener('click', async () => {
+            if (currentFrame) {
+                const tasks = [];
+                for (const [name, enabled] of Object.entries(enabledAlgorithms)) {
+                    if (enabled) {
+                        tasks.push(processAlgorithm(name, currentFrame));
+                    }
+                }
+                await Promise.all(tasks);
+            }
+        });
+
+        // VLM 通用触发函数
+        async function triggerVlmAlgorithm(config) {
+            if (!currentFrame) { alert('No frame available'); return; }
+            const btn = document.getElementById(config.btnId);
+            const resultEl = document.getElementById(config.resultId);
+            if (btn) { btn.disabled = true; btn.textContent = 'Processing...'; }
+            config.setTriggering(true);
+            if (resultEl) resultEl.textContent = config.processingText;
+            try {
+                const response = await fetch(config.apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ image: currentFrame })
+                });
+                const data = await response.json();
+                if (data.success && data.result) {
+                    config.onSuccess(data.result, resultEl);
+                } else {
+                    if (resultEl) resultEl.textContent = '错误: ' + (data.error || 'unknown');
+                }
+            } catch (e) {
+                Log.error(config.name + ' trigger error:', e);
+                if (resultEl) resultEl.textContent = '错误: ' + e.message;
+            } finally {
+                config.setTriggering(false);
+                if (btn) { btn.disabled = false; btn.textContent = config.btnLabel; }
+            }
+        }
+
+        // VLM 视觉问答手动触发
+        document.getElementById('vlm-qa-trigger-btn').addEventListener('click', () => {
+            triggerVlmAlgorithm({
+                name: 'VLM-QA',
+                btnId: 'vlm-qa-trigger-btn',
+                resultId: 'vlm-visual-qa-result',
+                apiUrl: '/algorithm/vlm_visual_qa',
+                processingText: 'VLM 查询中...',
+                btnLabel: 'Trigger QA',
+                setTriggering: (v) => { vlmQaState.triggering = v; },
+                onSuccess: (result, resultEl) => {
+                    vlmQaState.lastAnswer = result.answer || '';
+                    vlmQaState.lastTriggered = true;
+                    const ts = result.timestamp;
+                    const tipFlag = result.fingertip_provided ? '是' : '否';
+                    if (resultEl) {
+                        resultEl.textContent = `AI 回答: ${vlmQaState.lastAnswer}\n时间戳: ${ts || '--'}\n使用指尖定位: ${tipFlag}`;
+                    }
+                }
+            });
+        });
+
+        // VLM 游戏检测手动触发
+        document.getElementById('vlm-game-trigger-btn').addEventListener('click', () => {
+            triggerVlmAlgorithm({
+                name: 'VLM-Game',
+                btnId: 'vlm-game-trigger-btn',
+                resultId: 'vlm-game-detector-result',
+                apiUrl: '/algorithm/vlm_game_detector',
+                processingText: '游戏检测中... (YOLO+手部检测)',
+                btnLabel: 'Trigger Detect',
+                setTriggering: (v) => { vlmGameState.triggering = v; },
+                onSuccess: (result, resultEl) => {
+                    const r = result;
+                    // 更新实时检测状态
+                    if (r.detection) vlmGameState.detection = r.detection;
+                    vlmGameState.apiProcessing = !!r.is_processing;
+                    vlmGameState.cooldown = r.cooldown_remaining || 0;
+                    if (r.api_triggered) vlmGameState.apiTriggered = true;
+                    if (r.judgment && r.judgment !== 'pending') {
+                        vlmGameState.lastJudgment = r.judgment;
+                        vlmGameState.lastReason = r.reason || '';
+                        vlmGameState.lastTriggered = true;
+                    }
+                    if (resultEl) {
+                        const lines = [];
+                        lines.push(`判断: ${judgmentToCn(vlmGameState.lastJudgment) || '等待检测'}`);
+                        if (vlmGameState.lastReason) lines.push(`理由: ${vlmGameState.lastReason}`);
+                        if (vlmGameState.detection) {
+                            lines.push(`手机: ${vlmGameState.detection.phone_hand_touching ? '接触' : (vlmGameState.detection.phone_detected ? '检测到' : '未检测')}`);
+                            lines.push(`电脑: ${vlmGameState.detection.pc_hand_touching ? '接触' : (vlmGameState.detection.pc_detected ? '检测到' : '未检测')}`);
+                            if (vlmGameState.detection.trigger_source) lines.push(`触发源: ${triggerSourceToCn(vlmGameState.detection.trigger_source)}`);
+                        }
+                        if (r.api_triggered) lines.push('已触发 API（结果稍后更新）');
+                        else if (vlmGameState.cooldown > 0) lines.push(`API 冷却: ${vlmGameState.cooldown.toFixed(1)}s`);
+                        resultEl.textContent = lines.join('\n');
+                    }
+                }
+            });
+        });
+
+        let currentInputSource = 'esp32p4';
+        
+        async function switchInputSource(targetSource) {
+            try {
+                const response = await fetch('/input_source', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ source: targetSource })
+                });
+                const data = await response.json();
+                if (data.success) {
+                    Log.info(`[INFO] Switching to ${targetSource}`);
+                } else {
+                    Log.error('[ERROR] Failed to switch input source:', data.error);
+                }
+            } catch (e) {
+                Log.error('[ERROR] Switch input source error:', e);
+            }
+        }
+        
+        document.getElementById('switchInputBtn').addEventListener('click', () => {
+            const newSource = currentInputSource === 'esp32p4' ? 'camera' : 'esp32p4';
+            const btn = document.getElementById('switchInputBtn');
+            btn.disabled = true;
+            btn.textContent = 'Switching...';
+            
+            switchInputSource(newSource).then(() => {
+                currentInputSource = newSource;
+                document.getElementById('input-source-text').textContent = newSource === 'esp32p4' ? 'ESP32P4' : 'Camera';
+                btn.textContent = newSource === 'esp32p4' ? 'Switch to Camera' : 'Switch to ESP32P4';
+                btn.disabled = false;
+            });
+        });
+        
+        async function checkCurrentInputSource() {
+            try {
+                const response = await fetch('/input_source');
+                const data = await response.json();
+                if (data.success) {
+                    currentInputSource = data.current_source;
+                    document.getElementById('input-source-text').textContent = currentInputSource === 'esp32p4' ? 'ESP32P4' : 'Camera';
+                    document.getElementById('switchInputBtn').textContent = currentInputSource === 'esp32p4' ? 'Switch to Camera' : 'Switch to ESP32P4';
+                }
+            } catch (e) {
+                Log.error('[ERROR] Check input source error:', e);
+            }
+        }
+        
+        checkCurrentInputSource();
+
+        connect();
+        initCanvas();
+    </script>
+</body>
+</html>

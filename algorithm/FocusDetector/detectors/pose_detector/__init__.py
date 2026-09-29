@@ -1,0 +1,1 @@
+from detectors.pose_detector.base import PoseDetectorProviderBase

@@ -1,0 +1,54 @@
+# ============================================================
+# DEMO2（FocusLamp_DEMO2）算法端 .gitignore
+# 约定：仅提交代码/配置/文档；排除密钥、模型权重、构建产物
+# ============================================================
+
+# --- 密钥与本地配置（禁止提交）---
+.env
+**/.env
+*.key
+secrets.*
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+
+# --- 模型权重（体积大，需另行获取，见 docs/交接文档.md 第 6.4 节）---
+*.onnx
+*.pt
+*.pth
+*.task
+*.h5
+*.dat
+*.tflite
+*.tflite.*
+*.weights
+
+# --- ESP32 固件工程（不属于算法端交接范围）---
+ESP32P4C5/
+
+# --- 构建产物与生成物 ---
+build/
+dist/
+managed_components/
+*.pyc
+tmp_log.txt
+
+# --- 日志与临时文件 ---
+*.log
+logs/
+*.tmp
+
+# --- 编辑器 / 系统 ---
+.trae/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

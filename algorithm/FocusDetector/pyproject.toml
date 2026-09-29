@@ -1,0 +1,18 @@
+[project]
+name = "FocusDetector"
+version = "0.2.0"
+description = "Real-time focus detection system: emotion, gesture, pose, neck exercise, and face spatial position estimation via webcam"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "emotiefflib>=1.0",
+    "facenet-pytorch>=2.6.0",
+    "loguru>=0.7.3",
+    "mediapipe>=0.10.21",
+    "numpy>=1.24",
+    "opencv-python>=4.0.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+focus-detector = "main:main"

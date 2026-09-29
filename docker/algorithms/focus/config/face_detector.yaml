@@ -1,0 +1,4 @@
+model: "blaze_face_short_range.tflite"
+min_detection_confidence: 0.5
+min_suppression_threshold: 0.3
+offset_dead_zone: 0.2

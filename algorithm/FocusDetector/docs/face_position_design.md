@@ -273,7 +273,7 @@ class FacePositionEstimator:
 
 ### 3.4 main.py 集成
 
-在 [main.py](file:///d:/Internship/new/algorithm/FocusDetector/main.py) 主循环追加：
+在 [main.py](../main.py) 主循环追加：
 
 ```python
 from detectors.face_position_estimator.face_mesh_estimator import FacePositionEstimator

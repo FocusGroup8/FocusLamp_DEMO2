@@ -1,0 +1,19 @@
+menu "Task Manager"
+
+    config TASK_MANAGER_ENABLE
+        bool "Enable Task Manager"
+        default y
+        help
+            Enable the Task Manager component for task scheduling and tracking.
+            When disabled, all API functions return ESP_ERR_NOT_SUPPORTED.
+
+    config TASK_MANAGER_MAX_TASKS
+        int "Maximum concurrent tasks"
+        default 4
+        range 1 8
+        depends on TASK_MANAGER_ENABLE
+        help
+            Maximum number of tasks that can be managed simultaneously.
+            Each task uses a FreeRTOS timer and a small amount of RAM.
+
+endmenu

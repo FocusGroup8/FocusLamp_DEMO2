@@ -1,0 +1,7 @@
+## IDF Component Manager Manifest File
+dependencies:
+  ## Required IDF version
+  idf:
+    version: '>=4.1.0'
+  ## esp-sr is now a transitive dependency via wake_word_engine component
+  ## No need to declare it here directly

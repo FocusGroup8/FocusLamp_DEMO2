@@ -1,0 +1,26 @@
+menu "Heartbeat Service"
+
+    config HEARTBEAT_SERVICE_ENABLE
+        bool "Enable Heartbeat Service"
+        default y
+        help
+            Enable the Heartbeat Service for WebSocket server client
+            liveness detection via Ping/Pong frames.
+
+    if HEARTBEAT_SERVICE_ENABLE
+
+        config HEARTBEAT_SERVICE_PING_INTERVAL_SEC
+            int "Ping interval (seconds)"
+            default 30
+            help
+                Interval between Ping frames sent to connected clients.
+
+        config HEARTBEAT_SERVICE_TIMEOUT_SEC
+            int "Client timeout (seconds)"
+            default 90
+            help
+                Time without Pong response before a client is considered dead.
+
+    endif
+
+endmenu

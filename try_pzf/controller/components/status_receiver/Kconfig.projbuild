@@ -1,0 +1,11 @@
+menu "Status Receiver"
+
+    config STATUS_RECEIVER_ENABLE
+        bool "Enable Status Receiver"
+        default y
+        help
+            Enable the Status Receiver component for accepting status/sensor
+            data reports from FocusLamp_DEMO2 via HTTP POST. When disabled,
+            all API functions return ERR_NOT_SUPPORTED.
+
+endmenu

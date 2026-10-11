@@ -1,0 +1,820 @@
+/*
+ * WiFi Manager - Modular WiFi management for ESP32-P4 + C5 (WiFi-Remote)
+ *
+ * Encapsulates: NVS init, ESP-Hosted SDIO transport, WiFi Remote STA,
+ * connection management, scanning, and event dispatching.
+ */
+
+#include "wifi_manager.h"
+
+#if (WIFI_MANAGER_ENABLE == 1)
+
+#include <inttypes.h>
+#include <string.h>
+#include <stdlib.h>
+#include "esp_log.h"
+#include "esp_wifi.h"
+#include "esp_hosted.h"
+#include "esp_wifi_remote.h"
+#include "nvs_flash.h"
+#include "esp_netif.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/event_groups.h"
+#include "freertos/task.h"
+
+static const char *TAG = "wifi_mgr";
+
+/* Read-only snapshots: association, netif readiness and DHCP are distinct. */
+static void log_sta_netif(const char *stage, bool read_remote_mac)
+{
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_RMT");
+    if (!netif) {
+        ESP_LOGE(TAG, "NET diagnostic [%s]: STA netif missing", stage);
+        return;
+    }
+    uint8_t mac[6] = {0};
+    esp_netif_ip_info_t ip = {0};
+    esp_netif_dhcp_status_t dhcp = ESP_NETIF_DHCP_INIT;
+    esp_err_t mac_err = esp_netif_get_mac(netif, mac);
+    esp_err_t ip_err = esp_netif_get_ip_info(netif, &ip);
+    esp_err_t dhcp_err = esp_netif_dhcpc_get_status(netif, &dhcp);
+    ESP_LOGI(TAG, "NET diagnostic [%s]: up=%d mac=%02x:%02x:%02x:%02x:%02x:%02x mac_status=%s ip=" IPSTR " ip_status=%s dhcp=%d dhcp_status=%s (0=INIT 1=STARTED 2=STOPPED)",
+             stage, esp_netif_is_netif_up(netif),
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], esp_err_to_name(mac_err),
+             IP2STR(&ip.ip), esp_err_to_name(ip_err), (int)dhcp, esp_err_to_name(dhcp_err));
+    /* Remote RPC only on the init task's timeout, not on every event/retry. */
+    if (read_remote_mac) {
+        uint8_t remote_mac[6] = {0};
+        esp_err_t err = esp_wifi_remote_get_mac(WIFI_IF_STA, remote_mac);
+        ESP_LOGW(TAG, "NET diagnostic [%s]: remote_mac=%02x:%02x:%02x:%02x:%02x:%02x rpc_status=%s",
+                 stage, remote_mac[0], remote_mac[1], remote_mac[2],
+                 remote_mac[3], remote_mac[4], remote_mac[5], esp_err_to_name(err));
+    }
+}
+
+/* Event group bits */
+#define WIFI_CONNECTED_BIT  BIT0
+#define WIFI_FAIL_BIT       BIT1
+#define WIFI_BITS           (WIFI_CONNECTED_BIT | WIFI_FAIL_BIT)
+
+/* Module state */
+static bool s_initialized = false;
+static volatile bool s_connected = false;
+static SemaphoreHandle_t s_sem_hosted_up = NULL;
+static EventGroupHandle_t s_event_group = NULL;
+static TaskHandle_t s_reconnect_task = NULL;
+static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
+static int s_retry_num = 0;
+
+/* Exponential backoff reconnect state */
+static int s_retry_delay_ms = 0;
+static bool s_slow_retry_mode = false;
+static uint32_t s_slow_retry_num = 0;
+#define WIFI_MANAGER_INITIAL_RETRY_DELAY_MS 1000
+#define WIFI_MANAGER_MAX_RETRY_DELAY_MS     60000
+#define WIFI_MANAGER_SLOW_RETRY_INTERVAL_MS 300000
+#define WIFI_MANAGER_CONNECT_RESULT_TIMEOUT_MS 60000
+#define WIFI_MANAGER_RECONNECT_TASK_STACK_SIZE 3072
+#define WIFI_MANAGER_RECONNECT_TASK_PRIORITY   5
+
+#define RECONNECT_NOTIFY_DISCONNECTED BIT0
+#define RECONNECT_NOTIFY_CONNECTED    BIT1
+#define RECONNECT_NOTIFY_STOP         BIT2
+
+/* ESP-Hosted heartbeat timeout detection */
+static int s_heartbeat_miss_count = 0;
+#define WIFI_MANAGER_HEARTBEAT_TIMEOUT_COUNT 3 /* 3 missed heartbeats = 30s */
+
+/* Callback storage (one per event type) */
+static wifi_manager_cb_t s_callbacks[WIFI_MANAGER_EVENT_HOSTED_TIMEOUT + 1] = { NULL };
+
+typedef enum {
+    RECONNECT_WAIT_TIMEOUT,
+    RECONNECT_WAIT_CONNECTED,
+    RECONNECT_WAIT_STOP,
+} reconnect_wait_result_t;
+
+static bool get_connected_state(void)
+{
+    bool connected;
+    taskENTER_CRITICAL(&s_state_lock);
+    connected = s_connected;
+    taskEXIT_CRITICAL(&s_state_lock);
+    return connected;
+}
+
+/* Waits are interruptible so a successful connection or deinit does not
+ * leave the reconnect task asleep for the remainder of a long backoff. */
+static reconnect_wait_result_t reconnect_wait_or_timeout(uint32_t delay_ms)
+{
+    const TickType_t total_ticks = pdMS_TO_TICKS(delay_ms);
+    const TickType_t start = xTaskGetTickCount();
+    TickType_t remaining = total_ticks;
+
+    while (true) {
+        uint32_t notification = 0;
+        if (xTaskNotifyWait(0, UINT32_MAX, &notification, remaining) != pdTRUE) {
+            return RECONNECT_WAIT_TIMEOUT;
+        }
+        if (notification & RECONNECT_NOTIFY_STOP) {
+            return RECONNECT_WAIT_STOP;
+        }
+        if ((notification & RECONNECT_NOTIFY_CONNECTED) && get_connected_state()) {
+            return RECONNECT_WAIT_CONNECTED;
+        }
+
+        const TickType_t elapsed = xTaskGetTickCount() - start;
+        if (elapsed >= total_ticks) {
+            return RECONNECT_WAIT_TIMEOUT;
+        }
+        remaining = total_ticks - elapsed;
+    }
+}
+
+/* Internal: dispatch event to registered callback */
+static void dispatch_event(wifi_manager_event_t event, void *data)
+{
+    if (event <= WIFI_MANAGER_EVENT_HOSTED_TIMEOUT && s_callbacks[event]) {
+        s_callbacks[event](event, data);
+    }
+}
+
+/* The event callback only sends notifications. This task owns retry timing
+ * and retry counters, so the system event loop is never blocked by backoff. */
+static void wifi_reconnect_task(void *arg)
+{
+    (void)arg;
+
+    while (true) {
+        uint32_t notification = 0;
+        xTaskNotifyWait(0, UINT32_MAX, &notification, portMAX_DELAY);
+
+        if (notification & RECONNECT_NOTIFY_STOP) {
+            break;
+        }
+        if (!(notification & RECONNECT_NOTIFY_DISCONNECTED) || get_connected_state()) {
+            continue;
+        }
+
+        while (!get_connected_state()) {
+            bool slow_mode;
+            bool entered_slow_mode = false;
+            uint32_t attempt;
+            uint32_t delay_ms;
+
+            taskENTER_CRITICAL(&s_state_lock);
+            if (s_slow_retry_mode || s_retry_num >= WIFI_MANAGER_MAX_RETRY) {
+                if (!s_slow_retry_mode) {
+                    s_slow_retry_mode = true;
+                    s_slow_retry_num = 0;
+                    entered_slow_mode = true;
+                }
+                slow_mode = true;
+                attempt = ++s_slow_retry_num;
+                delay_ms = WIFI_MANAGER_SLOW_RETRY_INTERVAL_MS;
+            } else {
+                slow_mode = false;
+                if (s_retry_delay_ms == 0) {
+                    s_retry_delay_ms = WIFI_MANAGER_INITIAL_RETRY_DELAY_MS;
+                } else if (s_retry_delay_ms < WIFI_MANAGER_MAX_RETRY_DELAY_MS) {
+                    s_retry_delay_ms *= 2;
+                    if (s_retry_delay_ms > WIFI_MANAGER_MAX_RETRY_DELAY_MS) {
+                        s_retry_delay_ms = WIFI_MANAGER_MAX_RETRY_DELAY_MS;
+                    }
+                }
+                attempt = (uint32_t)++s_retry_num;
+                delay_ms = (uint32_t)s_retry_delay_ms;
+            }
+            taskEXIT_CRITICAL(&s_state_lock);
+
+            if (entered_slow_mode) {
+                ESP_LOGW(TAG,
+                         "Fast retries exhausted; entering slow retry mode (interval=%" PRIu32 "ms)",
+                         delay_ms);
+                if (s_event_group) {
+                    xEventGroupSetBits(s_event_group, WIFI_FAIL_BIT);
+                }
+                dispatch_event(WIFI_MANAGER_EVENT_DISCONNECTED, NULL);
+            }
+
+            if (slow_mode) {
+                ESP_LOGW(TAG, "Reconnect mode=slow attempt=%" PRIu32 " backoff_ms=%" PRIu32,
+                         attempt, delay_ms);
+            } else {
+                ESP_LOGI(TAG,
+                         "Reconnect mode=fast attempt=%" PRIu32 "/%d backoff_ms=%" PRIu32,
+                         attempt, WIFI_MANAGER_MAX_RETRY, delay_ms);
+            }
+
+            reconnect_wait_result_t wait_result = reconnect_wait_or_timeout(delay_ms);
+            if (wait_result == RECONNECT_WAIT_STOP) {
+                goto task_exit;
+            }
+            if (wait_result == RECONNECT_WAIT_CONNECTED || get_connected_state()) {
+                break;
+            }
+
+            dispatch_event(WIFI_MANAGER_EVENT_RECONNECTING, NULL);
+            esp_err_t err;
+            if (slow_mode) {
+                /* The public entry resets the fast retry counters; slow mode
+                 * remains active until IP_EVENT_STA_GOT_IP clears it. */
+                err = wifi_manager_connect();
+            } else {
+                err = esp_wifi_remote_connect();
+            }
+
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "Reconnect mode=%s attempt=%" PRIu32 " start failed: %s",
+                         slow_mode ? "slow" : "fast", attempt, esp_err_to_name(err));
+                continue;
+            }
+
+            /* Connection is asynchronous. Wait for GOT_IP or DISCONNECTED
+             * before advancing the retry state, but never wait forever if the
+             * driver or ESP-Hosted stops producing connection events. */
+            notification = 0;
+            if (xTaskNotifyWait(0, UINT32_MAX, &notification,
+                                pdMS_TO_TICKS(WIFI_MANAGER_CONNECT_RESULT_TIMEOUT_MS)) != pdTRUE) {
+                ESP_LOGW(TAG,
+                         "Reconnect mode=%s attempt=%" PRIu32
+                         " result timeout after %dms; continuing retries",
+                         slow_mode ? "slow" : "fast", attempt,
+                         WIFI_MANAGER_CONNECT_RESULT_TIMEOUT_MS);
+                continue;
+            }
+            if (notification & RECONNECT_NOTIFY_STOP) {
+                goto task_exit;
+            }
+            if ((notification & RECONNECT_NOTIFY_CONNECTED) && get_connected_state()) {
+                break;
+            }
+        }
+    }
+
+task_exit:
+    s_reconnect_task = NULL;
+    vTaskDelete(NULL);
+}
+
+/* ESP-Hosted event handler */
+static void esp_hosted_event_handler(void *arg, esp_event_base_t event_base,
+                                     int32_t event_id, void *event_data)
+{
+    if (event_base != ESP_HOSTED_EVENT) {
+        return;
+    }
+
+    switch (event_id) {
+    case ESP_HOSTED_EVENT_CP_INIT: {
+        esp_hosted_event_init_t *event = (esp_hosted_event_init_t *)event_data;
+        ESP_LOGI(TAG, "Co-processor INIT, reset reason: %" PRIu16, event->reason);
+        break;
+    }
+    case ESP_HOSTED_EVENT_TRANSPORT_UP:
+        ESP_LOGI(TAG, "ESP-Hosted Transport is UP");
+        if (s_sem_hosted_up) {
+            xSemaphoreGive(s_sem_hosted_up);
+        }
+        break;
+    case ESP_HOSTED_EVENT_TRANSPORT_DOWN:
+        ESP_LOGW(TAG, "ESP-Hosted Transport is DOWN");
+        break;
+    case ESP_HOSTED_EVENT_TRANSPORT_FAILURE:
+        ESP_LOGE(TAG, "ESP-Hosted Transport FAILURE");
+        break;
+    case ESP_HOSTED_EVENT_CP_HEARTBEAT: {
+        esp_hosted_event_heartbeat_t *event = (esp_hosted_event_heartbeat_t *)event_data;
+        ESP_LOGD(TAG, "Co-processor heartbeat: %" PRIu32, event->heartbeat);
+        s_heartbeat_miss_count = 0; /* Reset on successful heartbeat */
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+/* WiFi Remote event handler */
+static void wifi_remote_event_handler(void *arg, esp_event_base_t event_base,
+                                      int32_t event_id, void *event_data)
+{
+    if (event_base == WIFI_REMOTE_EVENT) {
+        switch (event_id) {
+        case WIFI_EVENT_STA_START:
+            ESP_LOGI(TAG, "WiFi STA started, connecting...");
+            /* Disable WiFi power save. Note: the ESP-Hosted C5 slave firmware
+             * already calls esp_wifi_set_ps(WIFI_PS_NONE) in its own wifi init
+             * (esp_hosted_coprocessor.c), so this host-side call is a redundant
+             * safety net. It may return ESP_ERR_WIFI_NOT_INIT due to host-side
+             * remote-WiFi RPC timing; that is benign since PS is already off
+             * on the slave. */
+            {
+                esp_err_t ps_err = esp_wifi_set_ps(WIFI_PS_NONE);
+                if (ps_err != ESP_OK) {
+                    ESP_LOGW(TAG, "Failed to disable WiFi power save: %s", esp_err_to_name(ps_err));
+                } else {
+                    ESP_LOGI(TAG, "WiFi power save disabled (WIFI_PS_NONE)");
+                }
+            }
+            esp_wifi_remote_connect();
+            break;
+        case WIFI_EVENT_STA_DISCONNECTED:
+            if (event_data) {
+                const wifi_event_sta_disconnected_t *event = event_data;
+                ESP_LOGW(TAG, "STA disconnected: reason=%u", (unsigned)event->reason);
+            }
+            taskENTER_CRITICAL(&s_state_lock);
+            s_connected = false;
+            taskEXIT_CRITICAL(&s_state_lock);
+            if (s_event_group) {
+                xEventGroupClearBits(s_event_group, WIFI_CONNECTED_BIT);
+            }
+            if (WIFI_MANAGER_AUTO_RECONNECT && s_reconnect_task) {
+                xTaskNotify(s_reconnect_task, RECONNECT_NOTIFY_DISCONNECTED, eSetBits);
+            } else {
+                ESP_LOGW(TAG, "Disconnected from AP (automatic retry unavailable)");
+                if (s_event_group) {
+                    xEventGroupSetBits(s_event_group, WIFI_FAIL_BIT);
+                }
+                dispatch_event(WIFI_MANAGER_EVENT_DISCONNECTED, NULL);
+            }
+            break;
+        case WIFI_EVENT_STA_CONNECTED:
+            ESP_LOGI(TAG, "STA associated with AP; still waiting for IP (not network-ready)");
+            log_sta_netif("associated", false);
+            break;
+        case WIFI_EVENT_SCAN_DONE:
+            ESP_LOGI(TAG, "WiFi scan completed");
+            dispatch_event(WIFI_MANAGER_EVENT_SCAN_DONE, NULL);
+            break;
+        default:
+            ESP_LOGD(TAG, "WiFi Remote event: %" PRId32, event_id);
+            break;
+        }
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        log_sta_netif("got_ip", false);
+
+        bool was_reconnecting;
+        bool was_slow_retry;
+        uint32_t retry_attempt;
+        uint32_t slow_attempt;
+        taskENTER_CRITICAL(&s_state_lock);
+        was_reconnecting = s_retry_num > 0 || s_slow_retry_mode;
+        was_slow_retry = s_slow_retry_mode;
+        retry_attempt = (uint32_t)s_retry_num;
+        slow_attempt = s_slow_retry_num;
+        s_retry_num = 0;
+        s_retry_delay_ms = 0;
+        s_slow_retry_mode = false;
+        s_slow_retry_num = 0;
+        s_connected = true;
+        taskEXIT_CRITICAL(&s_state_lock);
+
+        if (s_event_group) {
+            xEventGroupClearBits(s_event_group, WIFI_FAIL_BIT);
+            xEventGroupSetBits(s_event_group, WIFI_CONNECTED_BIT);
+        }
+        if (s_reconnect_task) {
+            xTaskNotify(s_reconnect_task, RECONNECT_NOTIFY_CONNECTED, eSetBits);
+        }
+        if (was_reconnecting) {
+            ESP_LOGI(TAG, "Reconnect successful mode=%s attempt=%" PRIu32,
+                     was_slow_retry ? "slow" : "fast",
+                     was_slow_retry ? slow_attempt : retry_attempt);
+        } else {
+            ESP_LOGI(TAG, "Initial WiFi connection established");
+        }
+        dispatch_event(WIFI_MANAGER_EVENT_GOT_IP, NULL);
+        dispatch_event(WIFI_MANAGER_EVENT_CONNECTED, NULL);
+
+        /* [DIAG 2026-10-05] Read back the effective Wi-Fi power-save mode.
+         * Read-only: the mode is NOT modified here. The STA_START call above
+         * may fail with ESP_ERR_WIFI_NOT_INIT, so this tells us what the slave
+         * actually ended up with.
+         *
+         * Placed LAST in this branch on purpose: esp_wifi_get_ps() is an
+         * ESP-Hosted remote RPC, and a slow or failing RPC must not delay
+         * s_connected / the event dispatch / the reconnect-task notification
+         * that already ran above. */
+        {
+            wifi_ps_type_t ps_mode = (wifi_ps_type_t)-1;
+            esp_err_t ps_err = esp_wifi_get_ps(&ps_mode);
+            if (ps_err == ESP_OK) {
+                ESP_LOGI(TAG, "PS readback: type=%d (0=NONE 1=MIN_MODEM 2=MAX_MODEM)", (int)ps_mode);
+            } else {
+                ESP_LOGW(TAG, "PS readback failed: %s", esp_err_to_name(ps_err));
+            }
+        }
+    }
+}
+
+/* Internal: init NVS */
+static esp_err_t init_nvs(void)
+{
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "NVS partition needs erase, reformatting...");
+        ret = nvs_flash_erase();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "NVS erase failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+        ret = nvs_flash_init();
+    }
+    return ret;
+}
+
+/* Internal: init ESP-Hosted SDIO transport */
+static esp_err_t init_esp_hosted(void)
+{
+    s_sem_hosted_up = xSemaphoreCreateBinary();
+    if (s_sem_hosted_up == NULL) {
+        ESP_LOGE(TAG, "Failed to create hosted semaphore");
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(ESP_HOSTED_EVENT,
+                                                         ESP_EVENT_ANY_ID,
+                                                         &esp_hosted_event_handler,
+                                                         NULL, NULL));
+
+    ESP_LOGI(TAG, "Initializing ESP-Hosted (SDIO transport)...");
+    esp_hosted_init();
+    esp_hosted_connect_to_slave();
+
+    ESP_LOGI(TAG, "Waiting for SDIO transport ready...");
+    if (xSemaphoreTake(s_sem_hosted_up, pdMS_TO_TICKS(30000)) != pdTRUE) {
+        ESP_LOGE(TAG, "Timeout waiting for SDIO transport (30s)");
+        ESP_LOGE(TAG, "Check: 1) C5 slave firmware  2) SDIO wiring  3) Power/GND");
+        return ESP_ERR_TIMEOUT;
+    }
+
+    ESP_LOGI(TAG, "SDIO transport is ready");
+
+    /* Log co-processor firmware version */
+    esp_hosted_coprocessor_fwver_t fwver;
+    if (ESP_OK == esp_hosted_get_coprocessor_fwversion(&fwver)) {
+        ESP_LOGI(TAG, "Co-processor FW: %" PRIu32 ".%" PRIu32 ".%" PRIu32,
+                 fwver.major1, fwver.minor1, fwver.patch1);
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t wifi_manager_init(void)
+{
+    if (s_initialized) {
+        ESP_LOGW(TAG, "Already initialized");
+        return ESP_OK;
+    }
+
+    esp_err_t err;
+
+    /* Step 1: Init NVS */
+    err = init_nvs();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS init failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    ESP_LOGI(TAG, "[1/5] NVS initialized");
+
+    /* Step 2: Init network interface */
+    err = esp_netif_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Netif init failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = esp_event_loop_create_default();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "Event loop create failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    ESP_LOGI(TAG, "[2/5] Network interface initialized");
+
+    /* Step 3: Init ESP-Hosted SDIO transport */
+    err = init_esp_hosted();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "[3/5] ESP-Hosted init failed");
+        return err;
+    }
+    ESP_LOGI(TAG, "[3/5] ESP-Hosted SDIO transport ready");
+
+    /* Step 4: Configure heartbeat */
+    if (ESP_OK == esp_hosted_configure_heartbeat(true, 10)) {
+        ESP_LOGI(TAG, "[4/5] Heartbeat configured: interval=10s");
+    }
+
+    /* Step 5: Init WiFi Remote STA */
+    s_event_group = xEventGroupCreate();
+    if (s_event_group == NULL) {
+        ESP_LOGE(TAG, "Failed to create event group");
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_netif_t *netif = esp_wifi_remote_create_default_sta();
+    if (netif == NULL) {
+        ESP_LOGE(TAG, "Failed to create WiFi Remote STA netif");
+        return ESP_ERR_NO_MEM;
+    }
+    /* The default-wifi-sta creation functions do NOT set a default netif,
+     * so mark it explicitly for esp_netif_get_default_netif() users. */
+    esp_netif_set_default_netif(netif);
+
+#if WIFI_MANAGER_USE_STATIC_IP
+    /* Use a static IP to prevent DHCP re-assignment from changing this
+     * device's address and breaking cross-board HTTP/WS links. */
+    esp_netif_ip_info_t ip_info = {0};
+    ip_info.ip.addr      = esp_ip4addr_aton(WIFI_MANAGER_STATIC_IP);
+    ip_info.gw.addr      = esp_ip4addr_aton(WIFI_MANAGER_STATIC_GATEWAY);
+    ip_info.netmask.addr = esp_ip4addr_aton(WIFI_MANAGER_STATIC_NETMASK);
+    esp_err_t e = esp_netif_dhcpc_stop(netif);
+    if (e != ESP_OK) {
+        ESP_LOGW(TAG, "dhcpc_stop: %s", esp_err_to_name(e));
+    }
+    e = esp_netif_set_ip_info(netif, &ip_info);
+    if (e != ESP_OK) {
+        ESP_LOGE(TAG, "Static IP set failed: %s", esp_err_to_name(e));
+        return e;
+    }
+    /* Static IP stops the DHCP client, so the DNS server provided by DHCP
+     * is lost. Configure the DNS server explicitly. */
+    esp_netif_dns_info_t dns_info = {0};
+    dns_info.ip.type = ESP_IPADDR_TYPE_V4;
+    dns_info.ip.u_addr.ip4.addr = esp_ip4addr_aton(WIFI_MANAGER_STATIC_DNS);
+    e = esp_netif_set_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns_info);
+    if (e != ESP_OK) {
+        ESP_LOGW(TAG, "Set DNS failed: %s", esp_err_to_name(e));
+    }
+    ESP_LOGI(TAG, "Static IP configured: " IPSTR, IP2STR(&ip_info.ip));
+#endif
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    err = esp_wifi_remote_init(&cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "WiFi Remote init failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    /* Register event handlers */
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_REMOTE_EVENT, ESP_EVENT_ANY_ID,
+                                                &wifi_remote_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                                &wifi_remote_event_handler, NULL));
+
+    if (xTaskCreate(wifi_reconnect_task, "wifi_reconnect",
+                    WIFI_MANAGER_RECONNECT_TASK_STACK_SIZE, NULL,
+                    WIFI_MANAGER_RECONNECT_TASK_PRIORITY,
+                    &s_reconnect_task) != pdPASS) {
+        s_reconnect_task = NULL;
+        ESP_LOGE(TAG, "Failed to create WiFi reconnect task");
+        return ESP_ERR_NO_MEM;
+    }
+
+    /* Configure WiFi STA */
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = WIFI_MANAGER_SSID,
+            .password = WIFI_MANAGER_PASSWORD,
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+        },
+    };
+
+    ESP_ERROR_CHECK(esp_wifi_remote_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_remote_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_remote_start());
+
+    ESP_LOGI(TAG, "[5/5] WiFi Remote STA initialized, connecting to SSID:%s", WIFI_MANAGER_SSID);
+
+    /* Wait for connection result with timeout (instead of portMAX_DELAY) */
+    EventBits_t bits = xEventGroupWaitBits(s_event_group, WIFI_BITS,
+                                            pdFALSE, pdFALSE, pdMS_TO_TICKS(30000));
+
+    if (bits & WIFI_CONNECTED_BIT) {
+        ESP_LOGI(TAG, "Connected to AP SSID:%s", WIFI_MANAGER_SSID);
+    } else if (bits & WIFI_FAIL_BIT) {
+        ESP_LOGE(TAG, "Failed to connect to AP SSID:%s after %d retries",
+                 WIFI_MANAGER_SSID, WIFI_MANAGER_MAX_RETRY);
+        /* Don't return error - module is initialized but not connected */
+    } else {
+        ESP_LOGE(TAG, "Timeout waiting for WiFi connection to SSID:%s (30s)",
+                 WIFI_MANAGER_SSID);
+        log_sta_netif("initial IP timeout", true);
+        /* Don't return error - module is initialized but not connected */
+    }
+
+    s_initialized = true;
+    return ESP_OK;
+}
+
+esp_err_t wifi_manager_connect(void)
+{
+    if (!s_initialized) {
+        ESP_LOGE(TAG, "Not initialized, call wifi_manager_init() first");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (get_connected_state()) {
+        ESP_LOGD(TAG, "Already connected");
+        return ESP_OK;
+    }
+
+    taskENTER_CRITICAL(&s_state_lock);
+    s_retry_num = 0;
+    s_retry_delay_ms = 0;
+    taskEXIT_CRITICAL(&s_state_lock);
+    esp_err_t err = esp_wifi_remote_connect();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Connect failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+esp_err_t wifi_manager_disconnect(void)
+{
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t err = esp_wifi_remote_disconnect();
+    if (err == ESP_OK) {
+        taskENTER_CRITICAL(&s_state_lock);
+        s_connected = false;
+        taskEXIT_CRITICAL(&s_state_lock);
+        ESP_LOGI(TAG, "Disconnected from AP");
+    }
+    return err;
+}
+
+esp_err_t wifi_manager_deinit(void)
+{
+    if (!s_initialized) {
+        ESP_LOGD(TAG, "Not initialized");
+        return ESP_OK;
+    }
+
+    if (s_reconnect_task) {
+        TaskHandle_t reconnect_task = s_reconnect_task;
+        xTaskNotify(reconnect_task, RECONNECT_NOTIFY_STOP, eSetBits);
+        vTaskDelete(reconnect_task);
+        s_reconnect_task = NULL;
+    }
+
+    /* Stop WiFi */
+    esp_wifi_remote_stop();
+    esp_wifi_remote_deinit();
+
+    /* Clean up event group */
+    if (s_event_group) {
+        vEventGroupDelete(s_event_group);
+        s_event_group = NULL;
+    }
+
+    /* Clean up hosted semaphore */
+    if (s_sem_hosted_up) {
+        vSemaphoreDelete(s_sem_hosted_up);
+        s_sem_hosted_up = NULL;
+    }
+
+    /* Reset state */
+    taskENTER_CRITICAL(&s_state_lock);
+    s_connected = false;
+    s_retry_num = 0;
+    s_retry_delay_ms = 0;
+    s_slow_retry_mode = false;
+    s_slow_retry_num = 0;
+    taskEXIT_CRITICAL(&s_state_lock);
+    s_initialized = false;
+    s_heartbeat_miss_count = 0;
+    memset(s_callbacks, 0, sizeof(s_callbacks));
+
+    ESP_LOGI(TAG, "WiFi Manager deinitialized");
+    return ESP_OK;
+}
+
+bool wifi_manager_is_connected(void)
+{
+    return s_initialized && get_connected_state();
+}
+
+esp_err_t wifi_manager_scan(wifi_manager_ap_info_t *aps, uint16_t *count)
+{
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (aps == NULL || count == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    wifi_scan_config_t scan_config = {
+        .ssid = NULL,
+        .bssid = NULL,
+        .channel = 0,
+        .show_hidden = false,
+    };
+
+    esp_err_t err = esp_wifi_remote_scan_start(&scan_config, true);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Scan start failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    uint16_t ap_count = 0;
+    esp_wifi_remote_scan_get_ap_num(&ap_count);
+    if (ap_count == 0) {
+        *count = 0;
+        return ESP_OK;
+    }
+
+    /* Limit to requested count */
+    uint16_t scan_count = ap_count;
+    if (scan_count > *count) {
+        scan_count = *count;
+    }
+
+    /* Use internal buffer for wifi_ap_record_t, then convert to public type */
+    wifi_ap_record_t *ap_records = malloc(scan_count * sizeof(wifi_ap_record_t));
+    if (ap_records == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate scan buffer");
+        return ESP_ERR_NO_MEM;
+    }
+
+    err = esp_wifi_remote_scan_get_ap_records(&scan_count, ap_records);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Get AP records failed: %s", esp_err_to_name(err));
+        free(ap_records);
+        return err;
+    }
+
+    /* Convert internal type to public type */
+    for (int i = 0; i < scan_count; i++) {
+        memcpy(aps[i].ssid, ap_records[i].ssid, sizeof(ap_records[i].ssid));
+        aps[i].ssid[32] = '\0';
+        aps[i].rssi = ap_records[i].rssi;
+        aps[i].channel = ap_records[i].primary;
+        aps[i].authmode = ap_records[i].authmode;
+        memcpy(aps[i].bssid, ap_records[i].bssid, 6);
+    }
+
+    free(ap_records);
+    *count = scan_count;
+    ESP_LOGI(TAG, "Scan found %d AP(s)", scan_count);
+    return ESP_OK;
+}
+
+esp_err_t wifi_manager_get_info(wifi_manager_info_t *info)
+{
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (info == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    memset(info, 0, sizeof(*info));
+    const bool connected = get_connected_state();
+    info->is_connected = connected;
+
+    if (!connected) {
+        return ESP_OK;
+    }
+
+    wifi_ap_record_t ap_info;
+    esp_err_t err = esp_wifi_remote_sta_get_ap_info(&ap_info);
+    if (err == ESP_OK) {
+        memcpy(info->ssid, ap_info.ssid, sizeof(ap_info.ssid));
+        info->ssid[32] = '\0';
+        info->rssi = ap_info.rssi;
+        info->channel = ap_info.primary;
+    } else {
+        ESP_LOGW(TAG, "Get AP info failed: %s", esp_err_to_name(err));
+    }
+
+    /* Get IP info */
+    esp_netif_t *netif = esp_netif_get_default_netif();
+    if (netif) {
+        esp_netif_ip_info_t ip_info;
+        if (esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
+            snprintf(info->ip, sizeof(info->ip), IPSTR, IP2STR(&ip_info.ip));
+        }
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t wifi_manager_register_handler(wifi_manager_event_t event, wifi_manager_cb_t cb)
+{
+    if (event > WIFI_MANAGER_EVENT_HOSTED_TIMEOUT) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (cb == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    s_callbacks[event] = cb;
+    return ESP_OK;
+}
+
+#endif /* WIFI_MANAGER_ENABLE */

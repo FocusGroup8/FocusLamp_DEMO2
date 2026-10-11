@@ -1,0 +1,43 @@
+menu "Xiaozhi Manager"
+
+    config XIAOZHI_MANAGER_ENABLE
+        bool "Enable Xiaozhi Manager"
+        default y
+        help
+            Enable the Xiaozhi Manager component for voice assistant integration.
+            When disabled, all API functions return ERR_NOT_SUPPORTED.
+
+    config XIAOZHI_MANAGER_OTA_URL
+        string "Xiaozhi OTA URL"
+        default "https://api.tenclass.net/xiaozhi/ota/"
+        depends on XIAOZHI_MANAGER_ENABLE
+        help
+            The OTA/info endpoint URL for device activation and server configuration.
+
+    config XIAOZHI_MANAGER_DEFAULT_WAKE_WORD
+        string "Default wake word"
+        default "你好小智"
+        depends on XIAOZHI_MANAGER_ENABLE
+        help
+            Default wake word for the voice assistant.
+            Can be changed at runtime via xiaozhi_manager_send_wake_word().
+
+    config XIAOZHI_MANAGER_AUDIO_SAMPLE_RATE
+        int "Audio sample rate (Hz)"
+        default 16000
+        range 8000 48000
+        depends on XIAOZHI_MANAGER_ENABLE
+        help
+            Audio sample rate for the chat session.
+            Default is 16000 Hz (standard for voice recognition).
+
+    config XIAOZHI_MANAGER_AUDIO_FRAME_DURATION
+        int "Audio frame duration (ms)"
+        default 60
+        range 10 120
+        depends on XIAOZHI_MANAGER_ENABLE
+        help
+            Audio frame duration in milliseconds.
+            Default is 60ms (recommended for OPUS codec).
+
+endmenu

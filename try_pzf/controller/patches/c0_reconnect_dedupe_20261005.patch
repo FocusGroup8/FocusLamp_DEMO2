@@ -1,0 +1,106 @@
+--- a/components/xiaozhi_manager/src/xiaozhi_manager.c
++++ b/components/xiaozhi_manager/src/xiaozhi_manager.c
+@@ -49,6 +49,10 @@
+ static int s_reconnect_count = 0;
+ static int s_current_reconnect_delay_ms = 0;
+ static bool s_reconnect_canceled = false;
++/* True only while the one-shot reconnect timer is armed. A single transport
++ * loss may surface as more than one DISCONNECTED event; keep those duplicate
++ * events from consuming retry budget or notifying upper layers twice. */
++static bool s_reconnect_pending = false;
+ 
+ /* MCP reconnect verification state */
+ static int s_mcp_reconnect_count = 0;
+@@ -121,6 +125,9 @@
+ 
+ static void reconnect_timer_callback(void *arg) {
+   (void)arg;
++  /* The one-shot timer has fired, so a subsequent real failure may schedule
++   * the next backoff step. */
++  s_reconnect_pending = false;
+   if (s_reconnect_canceled) {
+     return;
+   }
+@@ -255,39 +262,61 @@
+     return;
+   }
+ 
++  if (s_reconnect_pending) {
++    ESP_LOGW(TAG, "Reconnect already pending; duplicate schedule ignored");
++    return;
++  }
++
+   if (s_reconnect_timer == NULL) {
+     const esp_timer_create_args_t timer_args = {
+         .callback = reconnect_timer_callback, .name = "xiaozhi_reconnect"};
+-    esp_timer_create(&timer_args, &s_reconnect_timer);
++    esp_err_t create_err = esp_timer_create(&timer_args, &s_reconnect_timer);
++    if (create_err != ESP_OK) {
++      ESP_LOGE(TAG, "Failed to create reconnect timer: %s",
++               esp_err_to_name(create_err));
++      return;
++    }
+   }
+ 
+-  s_reconnect_count++;
++  /* Calculate the next retry state without committing it. If timer start
++   * fails, the retry budget and backoff must remain unchanged. */
++  int next_reconnect_count = s_reconnect_count + 1;
+   if (s_config.reconnect_max_retries > 0 &&
+-      s_reconnect_count > s_config.reconnect_max_retries) {
++      next_reconnect_count > s_config.reconnect_max_retries) {
+     ESP_LOGE(TAG, "Max reconnect attempts (%d) reached, giving up",
+              s_config.reconnect_max_retries);
+     return;
+   }
+ 
+-  /* Exponential backoff with cap */
++  int next_reconnect_delay_ms;
+   if (s_current_reconnect_delay_ms == 0) {
+-    s_current_reconnect_delay_ms = s_config.reconnect_delay_ms;
++    next_reconnect_delay_ms = s_config.reconnect_delay_ms;
+   } else {
+-    s_current_reconnect_delay_ms *= 2;
+-    if (s_current_reconnect_delay_ms > s_config.reconnect_max_delay_ms) {
+-      s_current_reconnect_delay_ms = s_config.reconnect_max_delay_ms;
++    next_reconnect_delay_ms = s_current_reconnect_delay_ms * 2;
++    if (next_reconnect_delay_ms > s_config.reconnect_max_delay_ms) {
++      next_reconnect_delay_ms = s_config.reconnect_max_delay_ms;
+     }
+   }
+ 
++  esp_err_t start_err = esp_timer_start_once(
++      s_reconnect_timer, (uint64_t)next_reconnect_delay_ms * 1000ULL);
++  if (start_err != ESP_OK) {
++    ESP_LOGE(TAG, "Failed to start reconnect timer: %s",
++             esp_err_to_name(start_err));
++    return;
++  }
++
++  s_reconnect_count = next_reconnect_count;
++  s_current_reconnect_delay_ms = next_reconnect_delay_ms;
+   s_reconnect_canceled = false;
++  s_reconnect_pending = true;
+   ESP_LOGI(TAG, "Scheduling reconnect in %d ms (attempt %d)",
+            s_current_reconnect_delay_ms, s_reconnect_count);
+-  esp_timer_start_once(s_reconnect_timer,
+-                       s_current_reconnect_delay_ms * 1000ULL);
+ }
+ 
+ static void cancel_reconnect(void) {
+   s_reconnect_canceled = true;
++  s_reconnect_pending = false;
+   if (s_reconnect_timer != NULL) {
+     esp_timer_stop(s_reconnect_timer);
+   }
+@@ -588,6 +617,10 @@
+                            (void *)"connected");
+     break;
+   case ESP_XIAOZHI_CHAT_EVENT_DISCONNECTED:
++    if (s_reconnect_pending) {
++      ESP_LOGW(TAG, "Duplicate disconnect ignored (reconnect already pending)");
++      break;
++    }
+     s_state = XIAOZHI_MANAGER_STATE_INITIALIZED;
+     mic_force_stop();
+     s_mcp_reconnect_count++;

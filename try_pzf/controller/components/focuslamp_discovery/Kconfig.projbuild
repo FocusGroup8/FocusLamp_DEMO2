@@ -1,0 +1,36 @@
+menu "FocusLamp Discovery"
+
+config FOCUSLAMP_DISCOVERY_ENABLE
+    bool "Enable UDP peer discovery"
+    default y
+
+config FOCUSLAMP_KIT_ID
+    string "Kit identifier (identical on controller and head)"
+    default "focuslamp-dev-01"
+
+config FOCUSLAMP_DISCOVERY_UDP_PORT
+    int "Beacon UDP port"
+    range 1 65535
+    default 44444
+
+config FOCUSLAMP_DISCOVERY_FAST_MS
+    int "Initial beacon interval (ms)"
+    range 1 60000
+    default 3000
+
+config FOCUSLAMP_DISCOVERY_FAST_WINDOW_MS
+    int "Initial beacon window (ms)"
+    range 1 600000
+    default 30000
+
+config FOCUSLAMP_DISCOVERY_SLOW_MS
+    int "Steady beacon interval (ms)"
+    range 1 600000
+    default 10000
+
+config FOCUSLAMP_DISCOVERY_PEER_TTL_MS
+    int "Peer lifetime without a beacon (ms)"
+    range 1 600000
+    default 30000
+
+endmenu

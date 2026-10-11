@@ -1,0 +1,23 @@
+menu "Local base radar (HLK-LD6002)"
+    config PROJECT_RADAR_DRIVER_ENABLE
+        bool "Enable local LD6002 UART reader"
+        default y
+    if PROJECT_RADAR_DRIVER_ENABLE
+        config PROJECT_RADAR_UART_PORT
+            int "Radar UART (dedicated UART3)"
+            range 3 3
+            default 3
+        config PROJECT_RADAR_UART_BAUD_RATE
+            int "Radar baud rate"
+            range 9600 921600
+            default 115200
+        config PROJECT_RADAR_UART_TX_GPIO
+            int "ESP TX -> radar RX"
+            range 0 54
+            default 7
+        config PROJECT_RADAR_UART_RX_GPIO
+            int "Radar TX -> ESP RX"
+            range 0 54
+            default 1
+    endif
+endmenu

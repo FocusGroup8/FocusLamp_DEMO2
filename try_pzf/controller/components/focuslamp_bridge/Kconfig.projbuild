@@ -1,0 +1,20 @@
+menu "FocusLamp Bridge"
+
+    config FOCUSLAMP_BRIDGE_ENABLE
+        bool "Enable FocusLamp Bridge"
+        default y
+        help
+            Enable the FocusLamp Bridge component for controlling FocusLamp_DEMO2
+            device from wifi_test via HTTP REST API. When disabled, all API
+            functions return ERR_NOT_SUPPORTED.
+
+    config FOCUSLAMP_BRIDGE_TARGET_IP
+        string "FocusLamp Device IP Address"
+        default "0.0.0.0"
+        depends on FOCUSLAMP_BRIDGE_ENABLE
+        help
+            IP address (with optional port) of the FocusLamp device.
+            Example: "192.168.1.100" or "192.168.1.100:80".
+            Set to "0.0.0.0" to disable HTTP requests (bridge init will warn).
+
+endmenu

@@ -1,0 +1,11 @@
+**/build/
+**/managed_components/
+**/dependency_backups/
+**/sdkconfig
+**/sdkconfig.old
+**/__pycache__/
+**/*.pyc
+**/*.log
+**/.vscode/
+**/.git/
+**/.env

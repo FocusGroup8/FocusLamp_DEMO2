@@ -1,0 +1,8 @@
+menu "Local base touch"
+    config LOCAL_TOUCH_ENABLE
+        bool "Enable four TTP touch inputs (GPIO9/22/10/23)"
+        default y
+        help
+            Recognize single/double/long/release events. Does not invoke
+            power shutdown, LCD, or application-mode switching.
+endmenu

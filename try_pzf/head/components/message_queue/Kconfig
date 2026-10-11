@@ -1,0 +1,26 @@
+menu "Message Queue"
+
+    config MESSAGE_QUEUE_ENABLE
+        bool "Enable Message Queue"
+        default y
+        help
+            Enable the Message Queue for reliable WebSocket message
+            delivery with automatic retry on send failure.
+
+    if MESSAGE_QUEUE_ENABLE
+
+        config MESSAGE_QUEUE_MAX_PENDING
+            int "Maximum pending messages"
+            default 16
+            help
+                Maximum number of messages that can be queued for retry.
+
+        config MESSAGE_QUEUE_MAX_RETRIES
+            int "Maximum send retries"
+            default 3
+            help
+                Maximum number of send attempts per queued message.
+
+    endif
+
+endmenu

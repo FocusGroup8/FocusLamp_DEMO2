@@ -1,0 +1,28 @@
+From: FocusLamp local maintenance patch
+Subject: [LOCAL C2] Reduce Xiaozhi WebSocket reconnect delay to 2000 ms
+
+This patch restores only the C2 reconnect-delay change if managed_components
+is refreshed or downloaded again.
+
+Important: managed_components currently has two independent local change sets:
+1. This C2 change in
+   managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_websocket.c
+2. The 2026-10-05 WebSocket diagnostic logging in
+   managed_components/espressif__esp_websocket_client/esp_websocket_client.c
+   Restore that separately from:
+   C:/Users/Administrator/WorkBuddy/2026-09-28-16-51-39/baseline/ws_diag_20261005/ws_diag_20261005.patch
+
+Do not modify dependencies.lock for this local patch.
+---
+diff --git a/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_websocket.c b/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_websocket.c
+--- a/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_websocket.c
++++ b/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_websocket.c
+@@ -244,7 +244,7 @@ esp_err_t esp_xiaozhi_websocket_start(esp_xiaozhi_websocket_handle_t handle)
+         .crt_bundle_attach = esp_crt_bundle_attach,
+         .disable_auto_reconnect = false,
+         .enable_close_reconnect = true,
+-        .reconnect_timeout_ms = 5000,
++        .reconnect_timeout_ms = 2000,
+     };
+ 
+     if (websocket->websocket_client) {

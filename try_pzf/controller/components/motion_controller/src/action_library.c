@@ -85,7 +85,7 @@ static void execute_wave(const motion_action_params_t* params)
     move_to_home();
 }
 
-// Nod action - LX5 (top joint) ±200, 3 times
+// Nod action - LX5 (top joint) ±150, 3 times
 static void execute_nod(const motion_action_params_t* params)
 {
     (void)params;
@@ -97,19 +97,19 @@ static void execute_nod(const motion_action_params_t* params)
     {
         action_keyframe_t nod_down = {
             .em3_pos = MOTION_HOME_EM3_POS,
-            .lx_pos = {MOTION_HOME_LX1_POS, MOTION_HOME_LX2_POS, MOTION_HOME_LX3_POS, MOTION_HOME_LX5_POS + 200},
-            .duration_ms = 300
+            .lx_pos = {MOTION_HOME_LX1_POS, MOTION_HOME_LX2_POS, MOTION_HOME_LX3_POS, MOTION_HOME_LX5_POS + 150},
+            .duration_ms = 500
         };
         move_to_keyframe(&nod_down, MOTION_EM3_MAX_SPEED / 2);
-        if (!delay_with_stop_check(400)) return;
+        if (!delay_with_stop_check(600)) return;
 
         action_keyframe_t nod_up = {
             .em3_pos = MOTION_HOME_EM3_POS,
-            .lx_pos = {MOTION_HOME_LX1_POS, MOTION_HOME_LX2_POS, MOTION_HOME_LX3_POS, MOTION_HOME_LX5_POS - 200},
-            .duration_ms = 300
+            .lx_pos = {MOTION_HOME_LX1_POS, MOTION_HOME_LX2_POS, MOTION_HOME_LX3_POS, MOTION_HOME_LX5_POS - 150},
+            .duration_ms = 500
         };
         move_to_keyframe(&nod_up, MOTION_EM3_MAX_SPEED / 2);
-        if (!delay_with_stop_check(400)) return;
+        if (!delay_with_stop_check(600)) return;
     }
 
     move_to_home();

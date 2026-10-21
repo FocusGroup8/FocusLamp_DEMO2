@@ -4,6 +4,7 @@
 #include "esp_err.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -70,11 +71,14 @@ typedef struct {
 typedef void (*ws_manager_cb_t)(ws_manager_event_t event, void *data);
 
 /**
- * @brief WebSocket server send statistics for congestion detection
- *
- * Provides signals for adaptive streaming algorithms to detect network
- * congestion and adjust frame rate / quality accordingly.
+ * @brief Camera-only consumer identity, separate from all WS clients
  */
+typedef struct {
+    bool connected;              /*!< Only the accepted /camera consumer, not /algo or /mcp */
+    uint32_t session_id;          /*!< Increments on each /camera acceptance, even when fd is reused */
+} ws_camera_client_state_t;
+
+/** WebSocket send statistics: window counters plus a durable timeout total. */
 typedef struct {
     uint32_t total_sent;           /*!< Total frames successfully sent */
     uint32_t total_failed;         /*!< Total frames failed to send */
@@ -82,7 +86,8 @@ typedef struct {
     uint32_t pool_exhausted;       /*!< Frame buffer pool exhausted count (backpressure) */
     int last_error;                /*!< Last error code (errno value: 11=EAGAIN, 104=ECONNRESET) */
     int64_t last_send_duration_us; /*!< Last send duration in microseconds (queue to completion) */
-    int64_t avg_send_duration_us;  /*!< EWMA of send duration (α=0.2) */
+    int64_t avg_send_duration_us;  /*!< EWMA of successful send duration (α=0.2) */
+    uint32_t camera_budget_timeouts; /*!< Boot cumulative camera-group budget failures; NOT reset per window */
 } ws_send_stats_t;
 
 #ifdef __cplusplus

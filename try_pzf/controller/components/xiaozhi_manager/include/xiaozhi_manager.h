@@ -7,11 +7,32 @@
 #pragma once
 
 #include "esp_err.h"
+#include <stdint.h>
 #include "esp_xiaozhi_chat.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/** Lifetime counters; gate counters overlap when several conditions block.
+ * send_ok/listen_ok mean local API success, not server acknowledgement. */
+typedef struct {
+    uint32_t callbacks, blocked_state, blocked_tts, blocked_local;
+    uint32_t send_attempts, send_ok, send_failed;
+    uint32_t send_cancelled; /**< Legacy counter; async sender is never force-deleted. */
+    uint32_t listen_attempts, listen_ok, listen_failed;
+    esp_err_t last_send_error, last_listen_error;
+    int64_t send_started_us; /**< Zero when the last entered upload returned. */
+    int64_t send_inflight_ms; /**< Snapshot age, not an internal transport phase. */
+    int64_t cloud_event_age_ms; /**< Selected cloud business callbacks, not all WS RX; -1 if unseen. */
+    int64_t audio_rx_age_ms; /**< Last valid downlink audio callback; -1 if unseen. */
+    int64_t queue_dwell_ms; /**< Last dequeued upload's queue wait, not send time; -1 if unseen. */
+    uint32_t enqueued, dropped_oldest, discarded, rejected_frames;
+    uint32_t queued, queue_high_water, generation, chat_users;
+    uint32_t sender_stack_free; /**< ESP-IDF stack high-water mark, bytes. */
+    bool retiring;
+} xiaozhi_mic_diagnostics_t;
+void xiaozhi_manager_get_mic_diagnostics(xiaozhi_mic_diagnostics_t *out);
 
 /**
  * @brief  Xiaozhi manager event types
@@ -171,11 +192,12 @@ esp_err_t xiaozhi_manager_open_audio_channel(void);
 esp_err_t xiaozhi_manager_close_audio_channel(void);
 
 /**
- * @brief  Send audio data to server
+ * @brief  Copy audio into the bounded asynchronous upload queue
  *
  * @param data      Audio data (OPUS encoded)
  * @param data_len  Data length
- * @return ESP_OK on success
+ * @return ESP_OK if queued (not a server delivery acknowledgement).
+ * Requires active listening; full queue drops the oldest pending frame.
  */
 esp_err_t xiaozhi_manager_send_audio(const char *data, size_t data_len);
 
@@ -195,8 +217,9 @@ esp_mcp_t *xiaozhi_manager_get_mcp_engine(void);
  * The text will be sent as a short command to the xiaozhi server,
  * which processes it through LLM and returns TTS audio.
  *
- * Implementation: direct text as listen detect message without wake word.
- * The server treats the text as ASR input and responds with TTS only.
+ * Implementation: submit text as listen/detect in an exclusive broadcast
+ * session. Normal dialogues are not interrupted; accepted requests wait in
+ * the existing FIFO. Cloud response/audio output is not guaranteed.
  *
  * This is an ASYNCHRONOUS API: the request is enqueued and processed in
  * the background by a dedicated task, and the function returns immediately.
@@ -204,10 +227,16 @@ esp_mcp_t *xiaozhi_manager_get_mcp_engine(void);
  * only that the request was accepted. Failures to broadcast are logged.
  *
  * @param text      Short command text to speak (e.g., "提醒我休息")
- * @param priority  Priority level (0-3, higher = can interrupt lower)
+ * @param priority  Metadata (0-3); this FIFO does not preempt a normal dialogue.
  * @return ESP_OK if the request was enqueued, error code otherwise
  */
 esp_err_t xiaozhi_manager_speak(const char *text, int priority);
+
+/* Paired by the single local PCM worker. No network operation or cloud-ready
+ * requirement. Suppresses mic upload/cloud speaker admission until end(),
+ * which restores upload only when the existing listening state permits it. */
+esp_err_t xiaozhi_manager_local_audio_begin(void);
+void xiaozhi_manager_local_audio_end(void);
 
 /**
  * @brief  Send preset text for TTS playback (high-level API)

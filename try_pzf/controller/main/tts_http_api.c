@@ -5,7 +5,7 @@
  *   POST /api/tts/speak  - TTS text injection (played through this speaker)
  *   POST /api/chat/end   - end the current xiaozhi voice conversation
  *   POST /api/detect/phone - enqueue a phone/computer reminder locally
- *   GET  /api/ambient   - bounded local ADC sampling (estimated lux)
+ *   GET  /api/ambient   - fresh local ambient cache (estimated, filtered lux)
  *   POST /api/arm/gesture - serial local executor; accepted != completed
  *   POST /api/arm/stop - bounded soft stop, preserves torque
  *
@@ -31,9 +31,8 @@
 #include "websocket_manager.h"
 #include "xiaozhi_manager.h"
 #include "motion_controller.h"
-#include "light_sensor_driver.h"
-#include "device_state.h"
-#include <math.h>
+#include "ambient_service.h"
+#include "local_reminder.h"
 
 static const char *TAG = "TTS_API";
 
@@ -99,19 +98,26 @@ static esp_err_t tts_speak_handler(httpd_req_t *req)
 
     ESP_LOGI(TAG, "TTS speak: \"%s\" (priority=%d)", text, priority);
 
-    /* Call xiaozhi_manager to play TTS */
-    esp_err_t ret = xiaozhi_manager_speak(text, priority);
+    /* Preserve the HTTP contract: ok means accepted, never already played.
+     * Exact legacy welcome aliases bypass cloud text injection entirely. */
+    bool local_welcome = local_welcome_matches(text);
+    esp_err_t ret = local_welcome ? local_welcome_submit() :
+                                  xiaozhi_manager_speak(text, priority);
 
     cJSON_Delete(root);
     free(body);
 
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "xiaozhi_manager_speak failed: %s", esp_err_to_name(ret));
+        ESP_LOGW(TAG, "%s request rejected: %s", local_welcome ? "Local welcome" : "Cloud speak",
+                 esp_err_to_name(ret));
         httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"xiaozhi speak failed\"}");
+        httpd_resp_sendstr(req, local_welcome ?
+            "{\"ok\":false,\"error\":\"local welcome unavailable\"}" :
+            "{\"ok\":false,\"error\":\"xiaozhi speak failed\"}");
         return ESP_OK; /* Don't fail the HTTP request */
     }
 
+    ESP_LOGI(TAG, "%s request accepted", local_welcome ? "Local welcome" : "Cloud speak");
     httpd_resp_set_type(req, "application/json");
     const char *resp = "{\"ok\":true}";
     httpd_resp_send(req, resp, strlen(resp));
@@ -156,6 +162,8 @@ static esp_err_t chat_end_handler(httpd_req_t *req)
 
     ESP_LOGI(TAG, "Chat end requested");
 
+    /* Cancel local output before any potentially waiting cloud close call. */
+    local_welcome_cancel();
     esp_err_t ret = xiaozhi_manager_close_audio_channel();
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
         ESP_LOGW(TAG, "xiaozhi_manager_close_audio_channel failed: %s", esp_err_to_name(ret));
@@ -260,25 +268,16 @@ static const httpd_uri_t detect_phone_uri = {
 static esp_err_t ambient_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req,"application/json");
-    if (!light_sensor_driver_is_initialized()) {
+    ambient_snapshot_t sample;
+    if (ambient_service_get_snapshot(&sample) != ESP_OK || !sample.fresh) {
         httpd_resp_set_status(req,"503 Service Unavailable");
-        return httpd_resp_sendstr(req,"{\"ok\":false,\"error\":\"ambient sensor not ready\"}");
+        /* head ignores ok/stale fields: no numeric level may escape here. */
+        return httpd_resp_sendstr(req,"{\"ok\":false,\"error\":\"ambient sample unavailable or expired\"}");
     }
-    float lux;
-    esp_err_t ret=light_sensor_driver_read_averaged(&lux,8);
-    if (ret!=ESP_OK || !isfinite(lux) || lux<0) {
-        httpd_resp_set_status(req,"500 Internal Server Error");
-        return httpd_resp_sendstr(req,"{\"ok\":false,\"error\":\"ADC sample failed\"}");
-    }
-    uint8_t level=lux>1000 ? 4 : lux>500 ? 3 : lux>100 ? 2 : lux>20 ? 1 : 0;
-    ret=device_state_set_ambient_light(level,lux);
-    if (ret!=ESP_OK) {
-        httpd_resp_set_status(req,"500 Internal Server Error");
-        return httpd_resp_sendstr(req,"{\"ok\":false,\"error\":\"ambient state update failed\"}");
-    }
-    char response[96];
-    snprintf(response,sizeof(response),"{\"ok\":true,\"level\":%u,\"lux\":%.2f}",(unsigned)level,(double)lux);
-    ESP_LOGI(TAG,"Ambient sampled: estimated lux=%.2f level=%u",(double)lux,(unsigned)level);
+    char response[160];
+    snprintf(response,sizeof(response),"{\"ok\":true,\"level\":%u,\"lux\":%.2f,\"sampled_at_ms\":%lld,\"age_ms\":%lld}",
+             (unsigned)sample.level, (double)sample.lux,
+             (long long)sample.last_ok_ms, (long long)sample.age_ms);
     return httpd_resp_sendstr(req,response);
 }
 

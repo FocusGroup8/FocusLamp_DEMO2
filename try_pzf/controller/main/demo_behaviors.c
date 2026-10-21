@@ -4,6 +4,8 @@
 #include "radar_ld6002.h"
 #include "focuslamp_discovery.h"
 #include "xiaozhi_manager.h"
+#include "local_reminder.h"
+#include "audio_bridge.h"
 #include "esp_http_client.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -21,7 +23,67 @@ static const char *TAG = "DEMO";
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static demo_behaviors_status_t s_status;
 static const char *WELCOME = "主人，跟Focus聊聊天吧～";
-static const char *REMINDER = "你已经坐了很久，请站起来活动活动吧～";
+
+/* Local playback results carry the presence cycle. All access uses s_lock. */
+static struct {
+    uint32_t cycle;
+    uint32_t revision;
+    bool attempted;
+    bool armed;
+    bool submitted;
+    bool local_output_done;
+} s_reminder;
+
+static void reset_reminder(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    bool unconfirmed = s_reminder.submitted && !s_reminder.local_output_done;
+    uint32_t old_cycle = s_reminder.cycle;
+    ++s_reminder.cycle;
+    s_reminder.attempted = false;
+    s_reminder.armed = false;
+    s_reminder.submitted = false;
+    s_reminder.local_output_done = false;
+    portEXIT_CRITICAL(&s_lock);
+    if (unconfirmed) {
+        ESP_LOGW(TAG, "Sedentary cycle=%u ended: local output not confirmed",
+                 (unsigned)old_cycle);
+    }
+}
+
+void demo_behaviors_note_tts_text(const char *text)
+{
+    /* Kept for the existing app callback; cloud text cannot acknowledge a clip. */
+    (void)text;
+}
+
+static bool local_allowed(uint32_t cycle)
+{
+    portENTER_CRITICAL(&s_lock);
+    bool current = s_reminder.cycle == cycle && s_reminder.attempted;
+    uint32_t revision = s_reminder.revision;
+    portEXIT_CRITICAL(&s_lock);
+    controller_modes_status_t mode;
+    radar_ld6002_state_t radar = {0};
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    return current && controller_modes_get_status(&mode) == ESP_OK &&
+        mode.revision == revision && !mode.voice_active && mode.mode != APP_STATE_COMPANION &&
+        xiaozhi_manager_get_state() != XIAOZHI_MANAGER_STATE_SPEAKING &&
+        radar_ld6002_get_state(&radar) == ESP_OK && radar.has_presence &&
+        radar.person_present && radar.presence_updated_ms > 0 &&
+        now_ms >= radar.presence_updated_ms &&
+        now_ms - radar.presence_updated_ms <= RADAR_FRESH_MS;
+}
+
+static void local_result(uint32_t cycle, esp_err_t ret)
+{
+    portENTER_CRITICAL(&s_lock);
+    bool current = s_reminder.cycle == cycle;
+    if (current) s_reminder.local_output_done = ret == ESP_OK;
+    portEXIT_CRITICAL(&s_lock);
+    if (current) ESP_LOGI(TAG, "Sedentary cycle=%u local_output_done=%d; result=%s; no retry",
+                         (unsigned)cycle, ret == ESP_OK, esp_err_to_name(ret));
+}
 
 typedef struct { char text[384]; size_t len; bool overflow; } response_t;
 static esp_err_t receive_response(esp_http_client_event_t *event)
@@ -77,6 +139,7 @@ static bool can_announce(const controller_modes_status_t *mode)
 {
     xiaozhi_manager_state_t state = xiaozhi_manager_get_state();
     return !mode->voice_active &&
+        !audio_bridge_local_playing() &&
         (state == XIAOZHI_MANAGER_STATE_CONNECTED || state == XIAOZHI_MANAGER_STATE_LISTENING);
 }
 
@@ -85,7 +148,7 @@ static void behavior_task(void *arg)
     (void)arg;
     uint32_t revision = UINT32_MAX;
     bool local_ready = false, head_ready = false, welcome_done = true;
-    bool owned_breath = false, sedentary_sent = false;
+    bool owned_breath = false;
     unsigned head_step = 0;
     char peer_host[16] = "";
     uint16_t peer_port = 0;
@@ -101,7 +164,11 @@ static void behavior_task(void *arg)
             revision = mode.revision;
             head_step = 0; head_ready = false;
             local_ready = false; local_retry = head_retry = speech_retry = 0;
-            present_since = 0; sedentary_sent = false;
+            present_since = 0;
+            reset_reminder();
+            portENTER_CRITICAL(&s_lock);
+            s_reminder.revision = revision;
+            portEXIT_CRITICAL(&s_lock);
             /* Spoken mode requests get this line in their MCP result. Do not
              * inject over an active conversation. Idle HTTP starts enqueue it. */
             welcome_done = mode.mode != APP_STATE_COMPANION || mode.voice_active;
@@ -137,21 +204,46 @@ static void behavior_task(void *arg)
         bool present = fresh && radar.person_present;
         if (mode.mode == APP_STATE_COMPANION || !present ||
             (last_sample && now - last_sample > 4000000)) {
-            present_since = 0; sedentary_sent = false;
+            if (present_since) reset_reminder();
+            present_since = 0;
         } else if (!present_since) present_since = now;
         last_sample = now;
         uint32_t elapsed = present_since ? (uint32_t)((now - present_since)/1000000) : 0;
-        bool pending = present_since && !sedentary_sent && now - present_since >= SEDENTARY_US;
-        if (now >= speech_retry && can_announce(&mode)) {
-            const char *text = !welcome_done ? WELCOME : pending ? REMINDER : NULL;
-            if (text) {
-                esp_err_t ret = xiaozhi_manager_speak(text, 2);
-                if (ret == ESP_OK) {
-                    if (!welcome_done) welcome_done = true;
-                    else { sedentary_sent = true; pending = false; }
-                    ESP_LOGI(TAG, "Announcement queued (not playback confirmed): %s", text);
-                } else ESP_LOGW(TAG, "Announcement pending: %s", esp_err_to_name(ret));
-                speech_retry = now + RETRY_US;
+        portENTER_CRITICAL(&s_lock);
+        s_reminder.armed = present_since && !s_reminder.attempted &&
+            now - present_since >= SEDENTARY_US;
+        bool pending = s_reminder.armed;
+        portEXIT_CRITICAL(&s_lock);
+        if (!welcome_done && now >= speech_retry && can_announce(&mode)) {
+            /* Companion welcome retains its existing retry policy. */
+            esp_err_t ret = xiaozhi_manager_speak(WELCOME, 2);
+            if (ret == ESP_OK) {
+                welcome_done = true;
+                ESP_LOGI(TAG, "Announcement queued (not playback confirmed): %s", WELCOME);
+            } else ESP_LOGW(TAG, "Announcement pending: %s", esp_err_to_name(ret));
+            speech_retry = now + RETRY_US;
+        } else if (welcome_done && pending && still_current(revision) &&
+                   !mode.voice_active &&
+                   xiaozhi_manager_get_state() != XIAOZHI_MANAGER_STATE_SPEAKING) {
+            /* One local attempt per presence cycle, even if enqueue fails. */
+            portENTER_CRITICAL(&s_lock);
+            s_reminder.attempted = true;
+            s_reminder.armed = false;
+            uint32_t cycle = s_reminder.cycle;
+            portEXIT_CRITICAL(&s_lock);
+            esp_err_t ret = local_reminder_submit(cycle, local_allowed, local_result);
+            portENTER_CRITICAL(&s_lock);
+            if (s_reminder.cycle == cycle) {
+                s_reminder.submitted = ret == ESP_OK;
+            }
+            portEXIT_CRITICAL(&s_lock);
+            pending = false;
+            if (ret == ESP_OK) {
+                ESP_LOGI(TAG, "Sedentary cycle=%u local clip queued (not output confirmed)",
+                         (unsigned)cycle);
+            } else {
+                ESP_LOGW(TAG, "Sedentary cycle=%u submission failed: %s; no retry this cycle",
+                         (unsigned)cycle, esp_err_to_name(ret));
             }
         }
 
@@ -195,14 +287,22 @@ static void behavior_task(void *arg)
                 .started = true, .revision = revision,
                 .companion_local_ready = mode.mode == APP_STATE_COMPANION && local_ready,
                 .head_sync_ready = head_ready, .radar_fresh = fresh, .radar_present = present,
-                .sedentary_sec = elapsed, .sedentary_pending = pending,
+                .sedentary_sec = elapsed, .sedentary_pending = s_reminder.armed,
+                .sedentary_armed = s_reminder.armed,
+                .sedentary_submitted = s_reminder.submitted,
+                .sedentary_text_observed = false,
+                .sedentary_local_output_done = s_reminder.local_output_done,
             };
             portEXIT_CRITICAL(&s_lock);
         }
         if (now - last_summary >= 10000000) {
             last_summary = now;
-            ESP_LOGI(TAG, "Summary: mode=%s local=%d head=%d radar_fresh=%d present=%d sedentary=%us pending=%d",
-                     controller_modes_name(mode.mode), local_ready, head_ready, fresh, present, (unsigned)elapsed, pending);
+            demo_behaviors_status_t snapshot;
+            demo_behaviors_get_status(&snapshot);
+            ESP_LOGI(TAG, "Summary: mode=%s local=%d head=%d radar_fresh=%d present=%d sedentary=%us pending=%d armed=%d submitted=%d local_output_done=%d",
+                     controller_modes_name(mode.mode), local_ready, head_ready, fresh, present, (unsigned)elapsed,
+                     snapshot.sedentary_pending, snapshot.sedentary_armed,
+                     snapshot.sedentary_submitted, snapshot.sedentary_local_output_done);
         }
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
@@ -214,6 +314,8 @@ esp_err_t demo_behaviors_start(void)
     bool started = s_status.started;
     portEXIT_CRITICAL(&s_lock);
     if (started) return ESP_OK;
+    esp_err_t clip_ret = local_reminder_start();
+    if (clip_ret != ESP_OK) return clip_ret;
     const uint32_t caps = MALLOC_CAP_DEFAULT | MALLOC_CAP_INTERNAL;
     ESP_LOGI(TAG, "Worker memory before: free=%u largest=%u", (unsigned)heap_caps_get_free_size(caps),
              (unsigned)heap_caps_get_largest_free_block(caps));
@@ -232,5 +334,11 @@ void demo_behaviors_get_status(demo_behaviors_status_t *out)
     if (!out) return;
     portENTER_CRITICAL(&s_lock);
     *out = s_status;
+    /* Expose playback-task results without waiting for the worker snapshot. */
+    out->sedentary_pending = s_reminder.armed;
+    out->sedentary_armed = s_reminder.armed;
+    out->sedentary_submitted = s_reminder.submitted;
+    out->sedentary_text_observed = false;
+    out->sedentary_local_output_done = s_reminder.local_output_done;
     portEXIT_CRITICAL(&s_lock);
 }

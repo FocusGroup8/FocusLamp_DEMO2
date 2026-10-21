@@ -23,6 +23,7 @@
 #include "freertos/semphr.h"
 
 #include "led_driver.h"
+#include "ambient_service.h"
 #include "event_bus.h"
 #include "event_def.h"
 #include "led_types.h"
@@ -101,6 +102,32 @@ static led_module_mode_t      s_current_mode   = LED_MODULE_MODE_OFF;
 static ws2812_rgb_t           s_current_color  = {0};
 static uint8_t                s_current_brightness = LED_BREATH_MAX_BRIGHTNESS;
 static uint8_t                s_current_brightness_level = LED_BRIGHTNESS_LEVEL_MAX;
+
+/* Envelope changes never alter the independent three-second breath phase. */
+typedef struct {
+    float valley;
+    float peak;
+} breath_envelope_t;
+
+static const breath_envelope_t s_ambient_breath_profiles[] = {
+    {4.0f, 12.0f},
+    {5.0f, 16.0f},
+    {6.0f, 20.0f},
+    {8.0f, 25.0f},
+    {10.0f, 30.0f},
+};
+
+#define BREATH_ENVELOPE_TIME_CONSTANT_US 400000.0f
+/* Resume with at most five normal frames of envelope motion after a long gap. */
+#define BREATH_ENVELOPE_MAX_STEP_US 100000
+#define BREATH_DIAGNOSTIC_INTERVAL_US 5000000
+
+static bool s_breath_manual_override = false;
+static breath_envelope_t s_breath_envelope = {
+    LED_BREATH_MIN_BRIGHTNESS, LED_BREATH_MAX_BRIGHTNESS
+};
+static int64_t s_breath_last_render_us = -1;
+static int64_t s_breath_last_diagnostic_us = -BREATH_DIAGNOSTIC_INTERVAL_US;
 
 /* Brightness level mapping (0-5) to 0-30 (PWM max 30) */
 static const uint8_t s_brightness_level_map[LED_BRIGHTNESS_LEVEL_COUNT] = {
@@ -285,6 +312,58 @@ static void led_service_track_brightness(uint8_t brightness)
     }
 }
 
+/* Called only in BREATH while holding the LED transaction mutex. The ambient
+ * accessor copies its cache without ADC/I/O or acquiring this mutex. */
+static breath_envelope_t led_service_update_breath_envelope(void)
+{
+    ambient_snapshot_t ambient = {0};
+    bool ambient_ok = ambient_service_get_snapshot(&ambient) == ESP_OK &&
+        ambient.valid && ambient.fresh &&
+        ambient.level < sizeof(s_ambient_breath_profiles) / sizeof(s_ambient_breath_profiles[0]);
+    breath_envelope_t target = {
+        LED_BREATH_MIN_BRIGHTNESS, LED_BREATH_MAX_BRIGHTNESS
+    };
+    if (ambient_ok) {
+        target = s_ambient_breath_profiles[ambient.level];
+    }
+    if (s_breath_manual_override) {
+        target.peak = fminf(s_current_brightness, LED_BREATH_MAX_BRIGHTNESS);
+        target.valley = fminf(target.valley, target.peak);
+    }
+
+    int64_t now_us = esp_timer_get_time();
+    int64_t elapsed_us = s_breath_last_render_us < 0 ? 0
+        : now_us - s_breath_last_render_us;
+    s_breath_last_render_us = now_us;
+    if (elapsed_us > BREATH_ENVELOPE_MAX_STEP_US) {
+        elapsed_us = BREATH_ENVELOPE_MAX_STEP_US;
+    }
+    if (elapsed_us > 0) {
+        float alpha = 1.0f - expf(-(float)elapsed_us / BREATH_ENVELOPE_TIME_CONSTANT_US);
+        /* A shared convex interpolation keeps valley <= peak throughout. */
+        s_breath_envelope.valley += alpha * (target.valley - s_breath_envelope.valley);
+        s_breath_envelope.peak += alpha * (target.peak - s_breath_envelope.peak);
+    }
+    if (s_breath_manual_override) {
+        /* A newly reduced user cap takes effect before the next driver show;
+         * manual peaks 0..3 are valid and have no automatic amplitude floor. */
+        s_breath_envelope.peak = fminf(s_breath_envelope.peak, target.peak);
+        s_breath_envelope.valley = fminf(s_breath_envelope.valley, s_breath_envelope.peak);
+    }
+
+    if ((now_us - s_breath_last_diagnostic_us) >= BREATH_DIAGNOSTIC_INTERVAL_US) {
+        s_breath_last_diagnostic_us = now_us;
+        ESP_LOGI(TAG, "Breath state=%s ambient=%s valid=%d fresh=%d lux=%.1f level=%u age=%lldms "
+                 "target=%.1f..%.1f applied=%.1f..%.1f",
+                 s_breath_manual_override ? "manual" : (ambient_ok ? "auto" : "fallback"),
+                 ambient_ok ? "fresh" : "fallback", ambient.valid, ambient.fresh,
+                 (double)ambient.lux, (unsigned)ambient.level, (long long)ambient.age_ms,
+                 (double)target.valley, (double)target.peak,
+                 (double)s_breath_envelope.valley, (double)s_breath_envelope.peak);
+    }
+    return s_breath_envelope;
+}
+
 static void led_service_unsubscribe_events(void)
 {
     while (s_subscription_count > 0) {
@@ -325,6 +404,12 @@ esp_err_t led_service_init(void)
     s_current_color = (ws2812_rgb_t){.red = 255, .green = 255, .blue = 255};
     s_current_brightness_level = 3;
     s_current_brightness = s_brightness_level_map[s_current_brightness_level];
+    s_breath_manual_override = false;
+    s_breath_envelope = (breath_envelope_t){
+        LED_BREATH_MIN_BRIGHTNESS, LED_BREATH_MAX_BRIGHTNESS
+    };
+    s_breath_last_render_us = -1;
+    s_breath_last_diagnostic_us = -BREATH_DIAGNOSTIC_INTERVAL_US;
     s_elapsed = 0;
     s_last_update_error_us = -1000000;
     s_blink_mode = LED_BLINK_MODE_NONE;
@@ -441,6 +526,9 @@ esp_err_t led_service_set_brightness(uint8_t brightness)
     }
 
     led_service_track_brightness(brightness);
+    if (s_current_mode == LED_MODULE_MODE_BREATH) {
+        s_breath_manual_override = true;
+    }
     led_driver_set_brightness(s_current_brightness);
 
     esp_err_t ret = ESP_OK;
@@ -448,6 +536,8 @@ esp_err_t led_service_set_brightness(uint8_t brightness)
         ret = led_driver_show();
     } else if (s_current_mode == LED_MODULE_MODE_RAINBOW) {
         ret = led_service_show_rainbow(s_elapsed);
+    } else if (s_current_mode == LED_MODULE_MODE_BREATH) {
+        ret = led_service_show_breath(s_elapsed);
     }
     esp_err_t state_ret = led_service_sync_device_state();
     return led_service_unlock_result(ret != ESP_OK ? ret : state_ret);
@@ -467,7 +557,12 @@ esp_err_t led_service_set_brightness_level(uint8_t level)
     s_current_brightness = s_brightness_level_map[level];
 
     if (level == 0) {
-        return led_service_unlock_result(led_service_turn_off());
+        esp_err_t ret = ESP_OK;
+        if (s_current_mode == LED_MODULE_MODE_BREATH) {
+            ret = led_service_set_brightness(0);
+        }
+        esp_err_t off_ret = led_service_turn_off();
+        return led_service_unlock_result(ret != ESP_OK ? ret : off_ret);
     }
 
     return led_service_unlock_result(led_service_set_brightness(s_current_brightness));
@@ -499,6 +594,9 @@ esp_err_t led_service_brightness_up(void)
     }
 
     if (s_current_brightness_level >= LED_BRIGHTNESS_LEVEL_MAX) {
+        if (s_current_mode == LED_MODULE_MODE_BREATH) {
+            return led_service_unlock_result(led_service_set_brightness(s_current_brightness));
+        }
         return led_service_unlock_result(ESP_OK); /* already max */
     }
     return led_service_unlock_result(led_service_set_brightness_level(s_current_brightness_level + 1));
@@ -511,6 +609,9 @@ esp_err_t led_service_brightness_down(void)
     }
 
     if (s_current_brightness_level == 0) {
+        if (s_current_mode == LED_MODULE_MODE_BREATH) {
+            return led_service_unlock_result(led_service_set_brightness_level(0));
+        }
         return led_service_unlock_result(ESP_OK); /* already off */
     }
     return led_service_unlock_result(led_service_set_brightness_level(s_current_brightness_level - 1));
@@ -530,6 +631,8 @@ esp_err_t led_service_set_effect(led_effect_t effect)
         break;
     case LED_EFFECT_BREATHING:
         s_current_mode = LED_MODULE_MODE_BREATH;
+        s_breath_manual_override = false;
+        s_breath_last_render_us = esp_timer_get_time();
         ret = led_service_show_breath(s_elapsed);
         break;
     case LED_EFFECT_BLINKING:
@@ -665,12 +768,19 @@ esp_err_t led_service_show_breath(uint32_t elapsed_ms)
     uint32_t period_ms = LED_BREATH_DEFAULT_PERIOD_MS;
     uint32_t phase_ms = elapsed_ms % period_ms;
 
-    /* Sine-wave breathing: brightness oscillates between min and max */
+    breath_envelope_t envelope = {
+        LED_BREATH_MIN_BRIGHTNESS, LED_BREATH_MAX_BRIGHTNESS
+    };
+    if (s_current_mode == LED_MODULE_MODE_BREATH) {
+        envelope = led_service_update_breath_envelope();
+    }
+
+    /* The phase remains unchanged as ambient/manual envelope targets move. */
     float phase = (float)phase_ms / (float)period_ms * 2.0f * 3.14159f;
     float sine_val = (sinf(phase) + 1.0f) / 2.0f;  /* 0.0 ~ 1.0 */
 
-    uint8_t breath_brightness = (uint8_t)(LED_BREATH_MIN_BRIGHTNESS +
-        (uint16_t)((LED_BREATH_MAX_BRIGHTNESS - LED_BREATH_MIN_BRIGHTNESS) * sine_val));
+    uint8_t breath_brightness = (uint8_t)(envelope.valley +
+        (envelope.peak - envelope.valley) * sine_val);
 
     esp_err_t ret = led_driver_set_all(
         LED_COLOR_BREATH_RED, LED_COLOR_BREATH_GREEN, LED_COLOR_BREATH_BLUE);

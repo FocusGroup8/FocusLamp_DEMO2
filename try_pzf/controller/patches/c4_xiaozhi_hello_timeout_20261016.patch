@@ -1,0 +1,19 @@
+From: FocusLamp local maintenance patch
+Subject: [LOCAL C4] Report server hello wait expiry as timeout
+
+Allows the manager to recover an unresponsive audio handshake separately from
+invalid caller arguments. Does not change the existing 10-second hello wait.
+Apply after existing patches; do not modify dependencies.lock.
+---
+diff --git a/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_chat.c b/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_chat.c
+--- a/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_chat.c
++++ b/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_chat.c
+@@ -1510,7 +1510,7 @@
+ 
+     EventBits_t bits = xEventGroupWaitBits(xiaozhi_chat->event_group_handle, ESP_XIAOZHI_CHAT_SERVER_HELLO, pdTRUE, pdFALSE, pdMS_TO_TICKS(10000));
+     if (!(bits & ESP_XIAOZHI_CHAT_SERVER_HELLO)) {
+-        ESP_RETURN_ON_ERROR(ESP_ERR_INVALID_ARG, TAG, "Failed to receive server hello");
++        ESP_RETURN_ON_ERROR(ESP_ERR_TIMEOUT, TAG, "Failed to receive server hello");
+     }
+ 
+     ret = esp_xiaozhi_chat_audio_open(xiaozhi_chat);

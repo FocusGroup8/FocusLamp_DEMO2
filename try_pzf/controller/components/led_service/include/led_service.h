@@ -87,6 +87,8 @@ esp_err_t led_service_set_color(uint8_t r, uint8_t g, uint8_t b);
 
 /**
  * @brief Set global brightness.
+ *        In BREATH this explicitly selects a manual peak cap, applied immediately
+ *        when reduced; raw zero renders black. Re-select BREATHING to resume auto.
  * @param brightness  Raw brightness (0-30); larger values are clamped to 30
  * @return esp_err_t
  */
@@ -94,7 +96,7 @@ esp_err_t led_service_set_brightness(uint8_t brightness);
 
 /**
  * @brief Set brightness level (0-5).
- *        0 = off, 5 = max.
+ *        0 = off, 5 = max. In BREATH, nonzero levels select a manual peak cap.
  * @param level  Brightness level (0-5)
  * @return esp_err_t
  */
@@ -110,6 +112,7 @@ uint8_t led_service_level_from_ambient(uint8_t ambient_level);
 
 /**
  * @brief Get current brightness level (0-5).
+ *        This is the requested control level, not the ambient breath envelope.
  * @return uint8_t Current brightness level
  */
 uint8_t led_service_get_brightness_level(void);
@@ -128,6 +131,8 @@ esp_err_t led_service_brightness_down(void);
 
 /**
  * @brief Set LED lighting effect.
+ *        Selecting BREATHING, including again while active, clears its manual
+ *        override and resumes ambient adaptation without resetting the phase.
  * @param effect  Effect to apply
  * @return esp_err_t
  */
@@ -170,6 +175,10 @@ esp_err_t led_service_turn_on(uint8_t raw_brightness);
 
 /**
  * @brief Show breathing effect.
+ *        In BREATH, fresh ambient levels 0..4 target raw valley/peak pairs
+ *        4/12, 5/16, 6/20, 8/25, 10/30; invalid/stale data targets 5/30.
+ *        Envelope targets ease with a 400 ms time constant. An explicit brightness
+ *        setter overrides the peak until BREATHING is selected again.
  * @param elapsed_ms  Elapsed time in milliseconds for animation phase
  * @return esp_err_t
  */
@@ -213,6 +222,9 @@ esp_err_t led_service_show_system_state(led_module_system_state_t state);
 
 /**
  * @brief Get current LED service snapshot.
+ *        brightness is the driver's latest rendered raw brightness, which varies
+ *        during BREATH. brightness_level is the requested control level; automatic
+ *        ambient envelopes do not rewrite it or the device-state control value.
  * @param[out] snapshot  Snapshot structure to fill
  * @return esp_err_t
  */

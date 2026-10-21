@@ -1,0 +1,17 @@
+{
+  "voice": "Microsoft Huihui Desktop",
+  "sample_rate_hz": 16000,
+  "bits_per_sample": 16,
+  "channels": 1,
+  "messages": [
+    { "id": 1, "file": "welcome_01.wav", "text": "嗨，主人，想我了吗？Focus一直都在哦！" },
+    { "id": 2, "file": "welcome_02.wav", "text": "哈哈，摸得我脑袋痒痒的，开心值又加一啦！" },
+    { "id": 3, "file": "welcome_03.wav", "text": "欢迎回来！小灯已经就位，随时陪你出发。" },
+    { "id": 4, "file": "welcome_04.wav", "text": "今天也辛苦啦，先坐好，让Focus陪着你。" },
+    { "id": 5, "file": "welcome_05.wav", "text": "给你一点光，也给你一点好心情。" },
+    { "id": 6, "file": "welcome_06.wav", "text": "准备好了吗？我们一起专注，把事情做好。" },
+    { "id": 7, "file": "welcome_07.wav", "text": "收到摸摸头！今天也要元气满满哦。" },
+    { "id": 8, "file": "welcome_08.wav", "text": "别着急，我们一件一件慢慢来。" },
+    { "id": 9, "file": "welcome_09.wav", "text": "有你在，我的小世界又亮起来啦！" }
+  ]
+}

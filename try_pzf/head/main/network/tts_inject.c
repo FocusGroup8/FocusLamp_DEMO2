@@ -15,6 +15,7 @@
 #include "sdkconfig.h"
 
 #include <stdio.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -25,6 +26,54 @@ static const char *TAG = "TTS_INJECT";
  * 增加重试以提升欢迎语/提醒注入可靠性（临时诊断期间观察值）。 */
 #define TTS_INJECT_RETRY_COUNT 3
 #define TTS_INJECT_RETRY_DELAY_MS 300
+#define TTS_INJECT_RESPONSE_CAPACITY 256
+
+typedef struct {
+    char body[TTS_INJECT_RESPONSE_CAPACITY];
+    size_t length;
+    bool overflow;
+} tts_inject_response_t;
+
+/* perform() delivers both fixed-length and chunked response bodies here. */
+static esp_err_t tts_inject_http_event(esp_http_client_event_t *event)
+{
+    if (event->event_id != HTTP_EVENT_ON_DATA || event->data_len <= 0) {
+        return ESP_OK;
+    }
+
+    tts_inject_response_t *response = event->user_data;
+    if (!response || response->overflow) {
+        return ESP_OK;
+    }
+    size_t length = (size_t)event->data_len;
+    if (length > sizeof(response->body) - 1 - response->length) {
+        response->overflow = true;
+        return ESP_OK;  /* Drain the response; do not turn rejection into a retry. */
+    }
+    memcpy(response->body + response->length, event->data, length);
+    response->length += length;
+    response->body[response->length] = '\0';
+    return ESP_OK;
+}
+
+static bool tts_inject_response_accepted(const tts_inject_response_t *response)
+{
+    if (response->overflow || response->length == 0 ||
+        strlen(response->body) != response->length) {
+        return false;
+    }
+
+    /* Reject trailing garbage, embedded NULs, and non-boolean "ok" fields. */
+    cJSON *root = cJSON_ParseWithLengthOpts(response->body,
+                                          response->length + 1, NULL, true);
+    if (!root) {
+        return false;
+    }
+    const cJSON *ok = cJSON_GetObjectItemCaseSensitive(root, "ok");
+    bool accepted = cJSON_IsObject(root) && cJSON_IsBool(ok) && cJSON_IsTrue(ok);
+    cJSON_Delete(root);
+    return accepted;
+}
 
 esp_err_t tts_inject_speak(const char *text)
 {
@@ -68,10 +117,13 @@ esp_err_t tts_inject_speak(const char *text)
             ESP_LOGW(TAG, "TTS inject retry (%d/%d) -> %s", attempt, TTS_INJECT_RETRY_COUNT, url);
         }
 
+        tts_inject_response_t response = {0};
         esp_http_client_config_t config = {
             .url        = url,
             .method     = HTTP_METHOD_POST,
             .timeout_ms = TTS_INJECT_HTTP_TIMEOUT_MS,
+            .event_handler = tts_inject_http_event,
+            .user_data = &response,
         };
 
         esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -87,9 +139,15 @@ esp_err_t tts_inject_speak(const char *text)
         if (err == ESP_OK) {
             int status = esp_http_client_get_status_code(client);
             if (status == 200) {
-                ESP_LOGI(TAG, "TTS inject response: HTTP %d (attempt %d)", status, attempt);
+                if (tts_inject_response_accepted(&response)) {
+                    ESP_LOGI(TAG, "TTS request accepted (queued, not playback confirmation; attempt %d)", attempt);
+                } else {
+                    ESP_LOGW(TAG, "TTS request not accepted: invalid/rejected response (bytes=%u overflow=%d)",
+                             (unsigned)response.length, response.overflow);
+                    err = ESP_FAIL;
+                }
                 esp_http_client_cleanup(client);
-                break;
+                break;  /* An HTTP 200 business result must not be auto-retried. */
             }
             ESP_LOGW(TAG, "TTS inject HTTP %d (attempt %d)", status, attempt);
             err = ESP_FAIL;

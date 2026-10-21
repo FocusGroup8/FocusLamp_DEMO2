@@ -6,6 +6,7 @@
 
 #include "esp_check.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -15,6 +16,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include <stdio.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #include "xiaozhi_display_interface.h"
@@ -34,10 +36,27 @@
 #include "mipi_dsi_bridge.h"
 #include "task_manager.h"
 #include "wake_word_engine.h"
+#include "uplink_buffer.h"
+#include "speak_cycle.h"
 
 static const char *TAG = "XIAOZHI_MGR";
 
-static xiaozhi_manager_state_t s_state = XIAOZHI_MANAGER_STATE_IDLE;
+static portMUX_TYPE s_mic_diag_lock = portMUX_INITIALIZER_UNLOCKED;
+static xiaozhi_mic_diagnostics_t s_mic_diag;
+static void uplink_get_diagnostics(xiaozhi_mic_diagnostics_t *out);
+
+void xiaozhi_manager_get_mic_diagnostics(xiaozhi_mic_diagnostics_t *out) {
+  if (!out) return;
+  portENTER_CRITICAL(&s_mic_diag_lock);
+  *out = s_mic_diag;
+  portEXIT_CRITICAL(&s_mic_diag_lock);
+  int64_t now_us = esp_timer_get_time();
+  out->send_inflight_ms = out->send_started_us > 0 && now_us >= out->send_started_us
+      ? (now_us - out->send_started_us) / 1000 : 0;
+  uplink_get_diagnostics(out);
+}
+
+static _Atomic xiaozhi_manager_state_t s_state = XIAOZHI_MANAGER_STATE_IDLE;
 static esp_xiaozhi_chat_handle_t s_chat_handle = 0;
 /* Application-lifetime static storage: survives chat rebuilds and is never
  * freed while an asynchronous event or wake worker can still reference it. */
@@ -45,6 +64,10 @@ static StaticEventGroup_t s_audio_ready_storage;
 static EventGroupHandle_t s_audio_ready_events;
 #define AUDIO_CHANNEL_READY_BIT BIT0
 #define AUDIO_CHANNEL_READY_WAIT_MS 3000
+#define CHAT_EVENT_DRAINED_BIT BIT1
+ESP_EVENT_DEFINE_BASE(XIAOZHI_MANAGER_PRIVATE_EVENTS);
+static bool s_barrier_registered;
+static uint32_t s_barrier_sequence, s_barrier_ack;
 static esp_mcp_t *s_mcp_engine = NULL;
 static bool s_owns_mcp = false;
 
@@ -88,8 +111,281 @@ static bool s_chat_config_saved = false;
  * Protected by s_mic_mutex for thread safety (accessed from multiple
  * event callbacks and the mic task context). */
 static bool s_mic_active = false;
-static bool s_mic_paused_for_tts = false;
+static _Atomic bool s_mic_paused_for_tts = false;
 static SemaphoreHandle_t s_mic_mutex = NULL;
+
+/* One application-lifetime pool and two workers, reused across chat rebuilds
+ * and manager stop/start. No per-frame allocation or task deletion. The encoded
+ * queue is CPU-only; prefer PSRAM, leaving internal RAM for task stacks/TLS. */
+#define UPLINK_TASK_STACK_SIZE 8192
+#define RECONNECT_TASK_STACK_SIZE 4096
+#define CHAT_DRAIN_WAIT_MS 15000
+static portMUX_TYPE s_uplink_lock = portMUX_INITIALIZER_UNLOCKED;
+static uplink_buffer_t *s_uplink_buffer;
+static TaskHandle_t s_uplink_task;
+static TaskHandle_t s_reconnect_task;
+static StaticSemaphore_t s_lifecycle_mutex_storage;
+static SemaphoreHandle_t s_lifecycle_mutex;
+static uint32_t s_uplink_generation;
+static uint32_t s_reconnect_epoch;
+static uint32_t s_reconnect_requested_epoch;
+static unsigned s_chat_users;
+static bool s_chat_retiring = true;
+static _Atomic bool s_chat_rebuilding;
+static bool s_uplink_accepting;
+/* Local PCM owns speaker/mic admission without creating a cloud session. */
+static bool s_local_audio_active;
+static _Atomic(TaskHandle_t) s_chat_callback_task, s_chat_event_task;
+static uint32_t s_uplink_enqueued, s_uplink_dropped, s_uplink_discarded;
+static uint32_t s_uplink_rejected, s_uplink_high_water;
+/* Application observations only: no socket-readiness or SDK lock telemetry.
+ * Protected by the existing uplink lock and reset outside active transport
+ * states. A timestamp of zero is valid; -1 means not observed this connection. */
+static int64_t s_last_cloud_event_us = -1;
+static int64_t s_last_audio_rx_us = -1;
+static int64_t s_last_queue_dwell_ms = -1;
+
+/* The existing speak worker owns a complete, isolated text-injection cycle.
+ * This lock protects local progress, not SDK message identities. An old
+ * transport is stopped and its default-loop events drained before reuse. */
+static speak_cycle_t s_speak_cycle;
+static bool s_normal_tts_active;
+static bool s_normal_dialogue_active;
+static bool s_transport_fresh;
+static uint32_t s_transport_boundary_generation;
+static bool s_speak_reset_pending, s_speak_reset_running;
+static uint32_t s_speak_reset_generation;
+#define SPEAK_FIRST_TTS_WAIT_US (30LL * 1000000)
+
+static void speak_notify(void);
+static void speak_cancel(speak_outcome_t outcome);
+static void speak_reset_perform(uint32_t generation);
+static void chat_rebuild_runtime(bool preserve_speak_queue);
+
+static void uplink_task_func(void *arg);
+static void reconnect_task_func(void *arg);
+
+/* Only bookkeeping/copies in this critical section; never network, allocation,
+ * logging or waits. Every user pins the handle before leaving this section. */
+static void uplink_clear_locked(void) {
+  ++s_uplink_generation;
+  if (s_uplink_buffer) s_uplink_discarded += uplink_buffer_clear(s_uplink_buffer);
+}
+
+static void uplink_get_diagnostics(xiaozhi_mic_diagnostics_t *out) {
+  portENTER_CRITICAL(&s_uplink_lock);
+  out->enqueued = s_uplink_enqueued;
+  out->dropped_oldest = s_uplink_dropped;
+  out->discarded = s_uplink_discarded;
+  out->rejected_frames = s_uplink_rejected;
+  out->queued = s_uplink_buffer ? s_uplink_buffer->count : 0;
+  out->queue_high_water = s_uplink_high_water;
+  out->generation = s_uplink_generation;
+  out->chat_users = s_chat_users;
+  out->retiring = s_chat_retiring;
+  int64_t now_us = esp_timer_get_time();
+  out->cloud_event_age_ms = s_last_cloud_event_us >= 0 && now_us >= s_last_cloud_event_us
+      ? (now_us - s_last_cloud_event_us) / 1000 : -1;
+  out->audio_rx_age_ms = s_last_audio_rx_us >= 0 && now_us >= s_last_audio_rx_us
+      ? (now_us - s_last_audio_rx_us) / 1000 : -1;
+  out->queue_dwell_ms = s_last_queue_dwell_ms;
+  portEXIT_CRITICAL(&s_uplink_lock);
+  out->sender_stack_free = s_uplink_task ? uxTaskGetStackHighWaterMark(s_uplink_task) : 0;
+}
+
+static void uplink_suspend(bool retire_chat) {
+  portENTER_CRITICAL(&s_uplink_lock);
+  s_uplink_accepting = false;
+  if (retire_chat) s_chat_retiring = true;
+  uplink_clear_locked();
+  portEXIT_CRITICAL(&s_uplink_lock);
+}
+
+static void manager_set_state_locked(xiaozhi_manager_state_t state) {
+  s_state = state;
+  if (state != XIAOZHI_MANAGER_STATE_CONNECTED &&
+      state != XIAOZHI_MANAGER_STATE_LISTENING &&
+      state != XIAOZHI_MANAGER_STATE_SPEAKING) {
+    s_last_cloud_event_us = -1;
+    s_last_audio_rx_us = -1;
+    s_last_queue_dwell_ms = -1;
+  }
+  if (state != XIAOZHI_MANAGER_STATE_LISTENING) {
+    s_uplink_accepting = false;
+    uplink_clear_locked();
+  }
+}
+
+static void manager_set_state(xiaozhi_manager_state_t state) {
+  portENTER_CRITICAL(&s_uplink_lock);
+  manager_set_state_locked(state);
+  portEXIT_CRITICAL(&s_uplink_lock);
+}
+
+static bool manager_event_set_state(xiaozhi_manager_state_t state) {
+  portENTER_CRITICAL(&s_uplink_lock);
+  bool allowed = !s_chat_rebuilding;
+  if (allowed) manager_set_state_locked(state);
+  portEXIT_CRITICAL(&s_uplink_lock);
+  return allowed;
+}
+
+static void uplink_resume(void) {
+  portENTER_CRITICAL(&s_uplink_lock);
+  if (!s_chat_retiring && s_state == XIAOZHI_MANAGER_STATE_LISTENING &&
+      !s_mic_paused_for_tts && !s_local_audio_active &&
+      !speak_cycle_busy(&s_speak_cycle)) {
+    uplink_clear_locked();
+    s_uplink_accepting = true;
+  }
+  portEXIT_CRITICAL(&s_uplink_lock);
+}
+
+esp_err_t xiaozhi_manager_local_audio_begin(void) {
+  portENTER_CRITICAL(&s_uplink_lock);
+  bool allowed = !s_local_audio_active;
+  if (allowed) {
+    s_local_audio_active = true;
+    s_uplink_accepting = false;
+    uplink_clear_locked();
+  }
+  portEXIT_CRITICAL(&s_uplink_lock);
+  return allowed ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
+void xiaozhi_manager_local_audio_end(void) {
+  portENTER_CRITICAL(&s_uplink_lock);
+  s_local_audio_active = false;
+  portEXIT_CRITICAL(&s_uplink_lock);
+  /* Restore admission only if the existing cloud state permits listening.
+   * Never send listen/start or overwrite the cloud/TTS state for local PCM. */
+  uplink_resume();
+  speak_notify();
+}
+
+static bool chat_pin(esp_xiaozhi_chat_handle_t *handle) {
+  portENTER_CRITICAL(&s_uplink_lock);
+  bool allowed = s_chat_handle && !s_chat_retiring;
+  if (allowed) {
+    *handle = s_chat_handle;
+    ++s_chat_users;
+  }
+  portEXIT_CRITICAL(&s_uplink_lock);
+  return allowed;
+}
+
+/* A normal wake/open/listen operation cannot enter between an injection's
+ * idle check and reservation. Capture and pin are one critical section. */
+static bool dialogue_pin(esp_xiaozhi_chat_handle_t *handle) {
+  portENTER_CRITICAL(&s_uplink_lock);
+  bool allowed = s_chat_handle && !s_chat_retiring &&
+      !s_local_audio_active && !speak_cycle_busy(&s_speak_cycle);
+  if (allowed) {
+    *handle = s_chat_handle;
+    ++s_chat_users;
+  }
+  portEXIT_CRITICAL(&s_uplink_lock);
+  return allowed;
+}
+
+static void chat_unpin(void) {
+  portENTER_CRITICAL(&s_uplink_lock);
+  --s_chat_users;
+  portEXIT_CRITICAL(&s_uplink_lock);
+}
+
+/* Control calls also pin their handles: otherwise a wake/speak operation could
+ * enter the old chat while the new audio worker is safely quiesced. No lock is
+ * held across the SDK, including callbacks and audio-channel ready waits. */
+static esp_err_t chat_listen(int mode) {
+  esp_xiaozhi_chat_handle_t handle;
+  if (!chat_pin(&handle)) return ESP_ERR_INVALID_STATE;
+  esp_err_t ret = esp_xiaozhi_chat_send_start_listening(handle, mode);
+  chat_unpin();
+  return ret;
+}
+
+static esp_err_t chat_stop_listening(void) {
+  esp_xiaozhi_chat_handle_t handle;
+  if (!chat_pin(&handle)) return ESP_ERR_INVALID_STATE;
+  esp_err_t ret = esp_xiaozhi_chat_send_stop_listening(handle);
+  chat_unpin();
+  return ret;
+}
+
+static esp_err_t chat_detect(const char *text) {
+  esp_xiaozhi_chat_handle_t handle;
+  if (!chat_pin(&handle)) return ESP_ERR_INVALID_STATE;
+  esp_err_t ret = esp_xiaozhi_chat_send_wake_word(handle, text);
+  chat_unpin();
+  return ret;
+}
+
+static esp_err_t chat_abort(void) {
+  esp_xiaozhi_chat_handle_t handle;
+  if (!chat_pin(&handle)) return ESP_ERR_INVALID_STATE;
+  esp_err_t ret = esp_xiaozhi_chat_send_abort_speaking(
+      handle, ESP_XIAOZHI_CHAT_ABORT_SPEAKING_REASON_WAKE_WORD_DETECTED);
+  chat_unpin();
+  return ret;
+}
+
+static esp_err_t chat_close_channel(void) {
+  uplink_suspend(false);
+  esp_xiaozhi_chat_handle_t handle;
+  if (!chat_pin(&handle)) return ESP_ERR_INVALID_STATE;
+  esp_err_t ret = esp_xiaozhi_chat_close_audio_channel(handle);
+  chat_unpin();
+  return ret;
+}
+
+static bool chat_is_idle(void) {
+  portENTER_CRITICAL(&s_uplink_lock);
+  bool idle = s_chat_users == 0;
+  portEXIT_CRITICAL(&s_uplink_lock);
+  return idle;
+}
+
+static bool in_chat_callback_task(void) {
+  TaskHandle_t current = xTaskGetCurrentTaskHandle();
+  return current == s_chat_callback_task || current == s_chat_event_task;
+}
+
+static esp_err_t chat_wait_idle(void) {
+  int64_t start = esp_timer_get_time();
+  while (!chat_is_idle()) {
+    if (esp_timer_get_time() - start >= CHAT_DRAIN_WAIT_MS * 1000LL) {
+      ESP_LOGW(TAG, "Chat drain timed out; retaining old chat and worker (no force delete)");
+      return ESP_ERR_TIMEOUT;
+    }
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+  return ESP_OK;
+}
+
+static esp_err_t uplink_runtime_init(void) {
+  if (!s_lifecycle_mutex)
+    s_lifecycle_mutex = xSemaphoreCreateMutexStatic(&s_lifecycle_mutex_storage);
+  if (!s_uplink_buffer) {
+    s_uplink_buffer = heap_caps_calloc(1, sizeof(*s_uplink_buffer),
+                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_uplink_buffer)
+      s_uplink_buffer = heap_caps_calloc(1, sizeof(*s_uplink_buffer), MALLOC_CAP_8BIT);
+    if (!s_uplink_buffer) return ESP_ERR_NO_MEM;
+  }
+  if (!s_uplink_task && xTaskCreate(uplink_task_func, "xiaozhi_uplink",
+        UPLINK_TASK_STACK_SIZE, NULL, tskIDLE_PRIORITY + 4, &s_uplink_task) != pdPASS)
+    return ESP_ERR_NO_MEM;
+  if (!s_reconnect_task && xTaskCreate(reconnect_task_func, "xiaozhi_rebuild",
+        RECONNECT_TASK_STACK_SIZE, NULL, tskIDLE_PRIORITY + 4, &s_reconnect_task) != pdPASS)
+    return ESP_ERR_NO_MEM;
+  ESP_LOGI(TAG, "Async uplink ready: depth=%u frame_max=%u pool=%u bytes, "
+           "internal_free=%u internal_largest=%u",
+           UPLINK_QUEUE_DEPTH, UPLINK_FRAME_BYTES, (unsigned)sizeof(*s_uplink_buffer),
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  return ESP_OK;
+}
 
 /* Async TTS speak queue + task.
  * xiaozhi_manager_speak() enqueues a request and returns immediately, so
@@ -111,16 +407,61 @@ typedef struct {
 static QueueHandle_t s_speak_queue = NULL;
 static TaskHandle_t s_speak_task = NULL;
 
-/* [FIX 2026-08-10] Set when the current/next TTS playback was triggered by a
- * proactive text inject (tts_bridge / speak). On TTS_STOP the audio channel is
- * then closed back to CONNECTED, so the next conversation re-establishes a
- * fresh session instead of reusing a possibly-stale server session_id (which
- * caused "cannot start conversation" after injected broadcasts). */
-static bool s_inject_active = false;
+static void speak_notify(void) {
+  if (s_speak_task) xTaskNotifyGive(s_speak_task);
+}
+
+static void speak_cancel(speak_outcome_t outcome) {
+  portENTER_CRITICAL(&s_uplink_lock);
+  bool changed = speak_cycle_finish(&s_speak_cycle,
+      s_speak_cycle.generation, outcome);
+  if (changed) {
+    s_uplink_accepting = false;
+    uplink_clear_locked();
+  }
+  portEXIT_CRITICAL(&s_uplink_lock);
+  if (changed) speak_notify();
+}
+
+/* SDK connection events have no source-instance payload. Stop/deinit first,
+ * then this FIFO fence consumes all already-posted events before new init. */
+static void chat_barrier_handler(void *arg, esp_event_base_t base,
+                                 int32_t id, void *data) {
+  (void)arg;
+  (void)base;
+  (void)id;
+  if (!data) return;
+  portENTER_CRITICAL(&s_uplink_lock);
+  s_barrier_ack = *(const uint32_t *)data;
+  portEXIT_CRITICAL(&s_uplink_lock);
+  xEventGroupSetBits(s_audio_ready_events, CHAT_EVENT_DRAINED_BIT);
+}
+
+static esp_err_t chat_drain_events(void) {
+  uint32_t sequence;
+  portENTER_CRITICAL(&s_uplink_lock);
+  sequence = ++s_barrier_sequence;
+  portEXIT_CRITICAL(&s_uplink_lock);
+  xEventGroupClearBits(s_audio_ready_events, CHAT_EVENT_DRAINED_BIT);
+  esp_err_t ret = esp_event_post(XIAOZHI_MANAGER_PRIVATE_EVENTS, 0,
+      &sequence, sizeof(sequence), pdMS_TO_TICKS(1000));
+  if (ret != ESP_OK) return ret;
+  int64_t started_us = esp_timer_get_time();
+  do {
+    xEventGroupWaitBits(s_audio_ready_events, CHAT_EVENT_DRAINED_BIT,
+        pdTRUE, pdFALSE, pdMS_TO_TICKS(100));
+    portENTER_CRITICAL(&s_uplink_lock);
+    bool drained = s_barrier_ack == sequence;
+    portEXIT_CRITICAL(&s_uplink_lock);
+    if (drained) return ESP_OK;
+  } while (esp_timer_get_time() - started_us < 5000000);
+  return ESP_ERR_TIMEOUT;
+}
 
 /* Forward declarations */
 static void speak_task_func(void *arg);
 static esp_err_t speak_process_request(const speak_request_t *req);
+static esp_err_t send_wake_word_pinned(const char *wake_word);
 
 /* Forward declarations for MCP tool callbacks */
 static esp_mcp_value_t
@@ -142,6 +483,7 @@ static void cancel_reconnect(void);
 static esp_err_t register_mcp_tools(void);
 static void mic_force_stop(void);
 static void reconnect_timer_callback(void *arg);
+static void reconnect_perform(uint32_t epoch);
 static void xiaozhi_esp_event_handler(void *arg, esp_event_base_t event_base,
                                       int32_t event_id, void *event_data);
 
@@ -222,12 +564,79 @@ static esp_err_t request_full_reconnect_now(const char *reason) {
 
 static void reconnect_timer_callback(void *arg) {
   (void)arg;
+  /* esp_timer and SDK event threads must never wait for an active upload. */
+  portENTER_CRITICAL(&s_uplink_lock);
+  TaskHandle_t worker = s_reconnect_canceled ? NULL : s_reconnect_task;
+  s_reconnect_requested_epoch = s_reconnect_epoch;
+  portEXIT_CRITICAL(&s_uplink_lock);
+  if (worker) xTaskNotifyGive(worker);
+}
+
+static bool reconnect_request_valid(uint32_t epoch) {
+  portENTER_CRITICAL(&s_uplink_lock);
+  bool valid = !s_reconnect_canceled && epoch == s_reconnect_epoch;
+  portEXIT_CRITICAL(&s_uplink_lock);
+  return valid;
+}
+
+static void reconnect_task_func(void *arg) {
+  (void)arg;
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    xSemaphoreTake(s_lifecycle_mutex, portMAX_DELAY);
+    portENTER_CRITICAL(&s_uplink_lock);
+    uint32_t epoch = s_reconnect_requested_epoch;
+    bool speak_reset = s_speak_reset_pending;
+    uint32_t speak_generation = s_speak_reset_generation;
+    if (speak_reset) {
+      s_speak_reset_pending = false;
+      s_speak_reset_running = true;
+    }
+    portEXIT_CRITICAL(&s_uplink_lock);
+    if (speak_reset) {
+      speak_reset_perform(speak_generation);
+      portENTER_CRITICAL(&s_uplink_lock);
+      s_speak_reset_running = false;
+      portEXIT_CRITICAL(&s_uplink_lock);
+      speak_notify();
+    } else if (reconnect_request_valid(epoch)) reconnect_perform(epoch);
+    /* CONNECTED can win while we drain an old call. In that case retain the
+     * successfully reused transport instead of leaving its gate retired. */
+    portENTER_CRITICAL(&s_uplink_lock);
+    bool reused = !s_chat_rebuilding && s_chat_handle &&
+        (s_state == XIAOZHI_MANAGER_STATE_CONNECTED ||
+         s_state == XIAOZHI_MANAGER_STATE_LISTENING ||
+         s_state == XIAOZHI_MANAGER_STATE_SPEAKING);
+    if (reused) s_chat_retiring = false;
+    portEXIT_CRITICAL(&s_uplink_lock);
+    if (reused) uplink_resume();
+    xSemaphoreGive(s_lifecycle_mutex);
+  }
+}
+
+static void reconnect_perform(uint32_t epoch) {
+  if (s_state != XIAOZHI_MANAGER_STATE_INITIALIZED &&
+      s_state != XIAOZHI_MANAGER_STATE_ERROR) return;
+  uplink_suspend(true);
+  while (chat_wait_idle() != ESP_OK) {
+    /* No retry, delete or replacement while old calls own the old handle.
+     * This dedicated worker may wait; SDK/event/timer tasks remain free. */
+    if (!reconnect_request_valid(epoch)) return;
+  }
+  if (!reconnect_request_valid(epoch)) return;
+  portENTER_CRITICAL(&s_uplink_lock);
+  bool committed = epoch == s_reconnect_epoch && !s_reconnect_canceled &&
+      (s_state == XIAOZHI_MANAGER_STATE_INITIALIZED ||
+       s_state == XIAOZHI_MANAGER_STATE_ERROR);
+  if (committed) {
+    s_chat_rebuilding = true;
+    manager_set_state_locked(XIAOZHI_MANAGER_STATE_CONNECTING);
+  }
+  portEXIT_CRITICAL(&s_uplink_lock);
+  if (!committed) return;
   /* The one-shot timer has fired, so a subsequent real failure may schedule
    * the next backoff step. */
   s_reconnect_pending = false;
-  if (s_reconnect_canceled) {
-    return;
-  }
 
   if (s_waiting_transport_reconnect) {
     bool forced_by_wake_word = s_transport_reconnect_forced;
@@ -247,6 +656,8 @@ static void reconnect_timer_callback(void *arg) {
       ESP_LOGE(TAG, "Max reconnect attempts (%d) reached after transport "
                     "fallback timeout, giving up",
                s_config.reconnect_max_retries);
+      manager_set_state(XIAOZHI_MANAGER_STATE_ERROR);
+      s_chat_rebuilding = false;
       return;
     }
     s_reconnect_count = next_reconnect_count;
@@ -265,12 +676,12 @@ static void reconnect_timer_callback(void *arg) {
     }
   }
 
-  if (s_state != XIAOZHI_MANAGER_STATE_INITIALIZED &&
-      s_state != XIAOZHI_MANAGER_STATE_ERROR) {
-    return; /* Already connected or in progress */
-  }
   ESP_LOGI(TAG, "Auto-reconnecting (attempt %d)...", s_reconnect_count);
-  s_state = XIAOZHI_MANAGER_STATE_CONNECTING;
+
+  chat_rebuild_runtime(false);
+}
+
+static void chat_rebuild_runtime(bool preserve_speak_queue) {
 
   /* [FIX 2026-08-10] Drop queued speak requests on reconnect: TTS injects
    * enqueued before/while the connection dropped would otherwise fire the
@@ -278,7 +689,7 @@ static void reconnect_timer_callback(void *arg) {
    * re-connect handshake (observed "Websocket is not connected" during
    * auto-reconnect in long-run logs). speak_request_t is a value type, so
    * xQueueReset is memory-safe. */
-  if (s_speak_queue) {
+  if (!preserve_speak_queue && s_speak_queue) {
     UBaseType_t pending = uxQueueMessagesWaiting(s_speak_queue);
     if (pending > 0) {
       ESP_LOGW(TAG, "Reconnect: dropping %u queued speak request(s)", (unsigned)pending);
@@ -307,12 +718,37 @@ static void reconnect_timer_callback(void *arg) {
     s_owns_mcp = false;
   }
 
+  esp_err_t drained = chat_drain_events();
+  if (drained != ESP_OK) {
+    ESP_LOGE(TAG, "Old chat event drain failed: %s; new session remains gated",
+             esp_err_to_name(drained));
+    manager_set_state(XIAOZHI_MANAGER_STATE_ERROR);
+    schedule_reconnect_if_needed();
+    return;
+  }
+
+  /* No old WS callback remains, and old default-loop events are now drained.
+   * Clear local TTS state without sending listen/start or restarting capture. */
+  portENTER_CRITICAL(&s_uplink_lock);
+  s_normal_tts_active = false;
+  s_normal_dialogue_active = false;
+  s_transport_fresh = false;
+  s_mic_paused_for_tts = false;
+  ++s_transport_boundary_generation;
+  portEXIT_CRITICAL(&s_uplink_lock);
+  audio_bridge_flush_tts();
+  wake_word_engine_resume();
+  if (preserve_speak_queue && s_config.event_cb) {
+    s_config.event_cb(XIAOZHI_MANAGER_EVENT_AUDIO_CHANNEL_CLOSED, NULL,
+                      s_config.event_cb_ctx);
+  }
+
   /* Re-register MCP tools (needed because chat_deinit destroyed the
    * MCP engine that owned all registered tools) */
   esp_err_t ret = esp_mcp_create(&s_mcp_engine);
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to re-create MCP engine: %s", esp_err_to_name(ret));
-    s_state = XIAOZHI_MANAGER_STATE_ERROR;
+    manager_set_state(XIAOZHI_MANAGER_STATE_ERROR);
     schedule_reconnect_if_needed();
     return;
   }
@@ -324,7 +760,7 @@ static void reconnect_timer_callback(void *arg) {
     esp_mcp_destroy(s_mcp_engine);
     s_mcp_engine = NULL;
     s_owns_mcp = false;
-    s_state = XIAOZHI_MANAGER_STATE_ERROR;
+    manager_set_state(XIAOZHI_MANAGER_STATE_ERROR);
     schedule_reconnect_if_needed();
     return;
   }
@@ -335,7 +771,7 @@ static void reconnect_timer_callback(void *arg) {
     esp_mcp_destroy(s_mcp_engine);
     s_mcp_engine = NULL;
     s_owns_mcp = false;
-    s_state = XIAOZHI_MANAGER_STATE_ERROR;
+    manager_set_state(XIAOZHI_MANAGER_STATE_ERROR);
     schedule_reconnect_if_needed();
     return;
   }
@@ -350,11 +786,15 @@ static void reconnect_timer_callback(void *arg) {
     esp_mcp_destroy(s_mcp_engine);
     s_mcp_engine = NULL;
     s_owns_mcp = false;
-    s_state = XIAOZHI_MANAGER_STATE_ERROR;
+    manager_set_state(XIAOZHI_MANAGER_STATE_ERROR);
     schedule_reconnect_if_needed();
     return;
   }
   s_owns_mcp = false; /* chat owns MCP engine now */
+  portENTER_CRITICAL(&s_uplink_lock);
+  s_chat_retiring = false;
+  s_chat_rebuilding = false;
+  portEXIT_CRITICAL(&s_uplink_lock);
 
   /* Re-register event handler */
   ret = esp_event_handler_register(ESP_XIAOZHI_CHAT_EVENTS, ESP_EVENT_ANY_ID,
@@ -371,7 +811,7 @@ static void reconnect_timer_callback(void *arg) {
              "Reconnect attempt %d failed at chat_start: %s (WS/TLS "
              "establishment failed or network unreachable, next retry)",
              s_reconnect_count, esp_err_to_name(ret));
-    s_state = XIAOZHI_MANAGER_STATE_ERROR;
+    manager_set_state(XIAOZHI_MANAGER_STATE_ERROR);
     /* Schedule next retry */
     schedule_reconnect_if_needed();
   } else {
@@ -384,6 +824,33 @@ static void reconnect_timer_callback(void *arg) {
                   "CONNECTED event",
              s_reconnect_count);
   }
+}
+
+/* Runs only in the existing rebuild worker, never a WS/event/timer callback.
+ * Quiescing the real WS task plus the FIFO fence is the event-origin boundary;
+ * a local cycle number alone cannot identify late, untagged SDK callbacks. */
+static void speak_reset_perform(uint32_t generation) {
+  portENTER_CRITICAL(&s_uplink_lock);
+  bool valid = s_speak_cycle.generation == generation &&
+      speak_cycle_busy(&s_speak_cycle) && s_state != XIAOZHI_MANAGER_STATE_IDLE;
+  portEXIT_CRITICAL(&s_uplink_lock);
+  if (!valid) return;
+  uplink_suspend(true);
+  while (chat_wait_idle() != ESP_OK) {
+    portENTER_CRITICAL(&s_uplink_lock);
+    valid = s_speak_cycle.generation == generation &&
+        speak_cycle_busy(&s_speak_cycle) && s_state != XIAOZHI_MANAGER_STATE_IDLE;
+    portEXIT_CRITICAL(&s_uplink_lock);
+    if (!valid) return;
+  }
+  cancel_reconnect();
+  portENTER_CRITICAL(&s_uplink_lock);
+  s_chat_rebuilding = true;
+  manager_set_state_locked(XIAOZHI_MANAGER_STATE_CONNECTING);
+  portEXIT_CRITICAL(&s_uplink_lock);
+  ESP_LOGI(TAG, "Speak cycle=%u: replacing old transport before releasing session gate",
+           (unsigned)generation);
+  chat_rebuild_runtime(true);
 }
 
 static void schedule_reconnect_if_needed(void) {
@@ -456,7 +923,10 @@ static void schedule_reconnect_if_needed(void) {
 }
 
 static void cancel_reconnect(void) {
+  portENTER_CRITICAL(&s_uplink_lock);
+  ++s_reconnect_epoch;
   s_reconnect_canceled = true;
+  portEXIT_CRITICAL(&s_uplink_lock);
   s_reconnect_pending = false;
   s_waiting_transport_reconnect = false;
   s_transport_reconnect_forced = false;
@@ -486,10 +956,31 @@ esp_err_t xiaozhi_display_notify(xiaozhi_display_event_t event, void *data) {
 /*---------------------------------------------------------------
  * Internal: esp_xiaozhi chat audio callback
  *-------------------------------------------------------------*/
+static void note_cloud_callback(bool audio) {
+  portENTER_CRITICAL(&s_uplink_lock);
+  if (!s_chat_rebuilding && !s_chat_retiring &&
+      (s_state == XIAOZHI_MANAGER_STATE_CONNECTED ||
+       s_state == XIAOZHI_MANAGER_STATE_LISTENING ||
+       s_state == XIAOZHI_MANAGER_STATE_SPEAKING)) {
+    if (audio) s_last_audio_rx_us = esp_timer_get_time();
+    else s_last_cloud_event_us = esp_timer_get_time();
+  }
+  portEXIT_CRITICAL(&s_uplink_lock);
+}
+
 static void xiaozhi_audio_callback(const uint8_t *data, int len, void *ctx) {
+  portENTER_CRITICAL(&s_uplink_lock);
+  bool current = !s_chat_rebuilding && !s_chat_retiring && !s_local_audio_active &&
+      (s_speak_cycle.phase == SPEAK_PLAYING ||
+       (s_speak_cycle.phase == SPEAK_IDLE && s_normal_tts_active));
+  if (current) ++s_chat_users;
+  portEXIT_CRITICAL(&s_uplink_lock);
+  if (!current) return;
+  if (data && len > 0) note_cloud_callback(true);
   if (s_config.audio_cb) {
     s_config.audio_cb(data, len, s_config.audio_cb_ctx);
   }
+  chat_unpin();
 }
 
 /*---------------------------------------------------------------
@@ -498,14 +989,111 @@ static void xiaozhi_audio_callback(const uint8_t *data, int len, void *ctx) {
  * Called by audio_bridge's mic_task for each encoded OPUS frame.
  * Forwards the frame to the xiaozhi server via WebSocket.
  *-------------------------------------------------------------*/
+static esp_err_t uplink_enqueue(const uint8_t *data, size_t len) {
+  bool local_playing = audio_bridge_local_playing();
+  bool dropped = false;
+  esp_err_t ret = ESP_ERR_INVALID_STATE;
+  portENTER_CRITICAL(&s_uplink_lock);
+  if (!data || len == 0 || len > UPLINK_FRAME_BYTES) {
+    ++s_uplink_rejected;
+    ret = ESP_ERR_INVALID_ARG;
+  } else if (local_playing || s_local_audio_active) {
+    /* Do not retain pre-broadcast audio to upload after local speech ends. */
+    uplink_clear_locked();
+  } else if (s_uplink_accepting && !s_chat_retiring && s_uplink_task &&
+             s_chat_handle && s_state == XIAOZHI_MANAGER_STATE_LISTENING &&
+              !s_mic_paused_for_tts && !speak_cycle_busy(&s_speak_cycle) &&
+              s_uplink_buffer) {
+    if (uplink_buffer_push(s_uplink_buffer, data, len, s_uplink_generation,
+                           esp_timer_get_time(), &dropped)) {
+      ++s_uplink_enqueued;
+      if (dropped) ++s_uplink_dropped;
+      if (s_uplink_buffer->count > s_uplink_high_water)
+        s_uplink_high_water = s_uplink_buffer->count;
+      ret = ESP_OK;
+    }
+  }
+  portEXIT_CRITICAL(&s_uplink_lock);
+  if (ret == ESP_OK) xTaskNotifyGive(s_uplink_task);
+  return ret;
+}
+
+static void uplink_task_func(void *arg) {
+  (void)arg;
+  /* Private copy is never a pool slot: overflow cannot overwrite a frame
+   * currently being masked/read by the synchronous WebSocket transport. */
+  uplink_frame_t frame;
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    for (;;) {
+      esp_xiaozhi_chat_handle_t handle = 0;
+      bool local_playing = audio_bridge_local_playing();
+      portENTER_CRITICAL(&s_uplink_lock);
+      bool ready = s_uplink_accepting && !s_chat_retiring && !local_playing &&
+          !s_local_audio_active && !s_mic_paused_for_tts &&
+          !speak_cycle_busy(&s_speak_cycle) &&
+          s_state == XIAOZHI_MANAGER_STATE_LISTENING &&
+          s_chat_handle;
+      if (!ready) uplink_clear_locked();
+      if (ready && uplink_buffer_pop(s_uplink_buffer, &frame)) {
+        if (frame.generation == s_uplink_generation) {
+          handle = s_chat_handle;
+          ++s_chat_users;
+          s_last_queue_dwell_ms = uplink_frame_dwell_ms(&frame, esp_timer_get_time());
+        } else {
+          ++s_uplink_discarded;
+        }
+      }
+      portEXIT_CRITICAL(&s_uplink_lock);
+      if (!handle) break;
+
+      portENTER_CRITICAL(&s_mic_diag_lock);
+      ++s_mic_diag.send_attempts;
+      s_mic_diag.send_started_us = esp_timer_get_time();
+      portEXIT_CRITICAL(&s_mic_diag_lock);
+      esp_err_t ret = esp_xiaozhi_chat_send_audio_data(handle,
+          (const char *)frame.data, frame.len);
+      portENTER_CRITICAL(&s_mic_diag_lock);
+      s_mic_diag.send_started_us = 0;
+      if (ret == ESP_OK) ++s_mic_diag.send_ok;
+      else {
+        ++s_mic_diag.send_failed;
+        s_mic_diag.last_send_error = ret;
+      }
+      portEXIT_CRITICAL(&s_mic_diag_lock);
+
+      portENTER_CRITICAL(&s_uplink_lock);
+      if (frame.generation == s_uplink_generation && ret != ESP_OK) {
+        s_uplink_accepting = false;
+        uplink_clear_locked();
+      }
+      portEXIT_CRITICAL(&s_uplink_lock);
+      /* Always unpin, including a late result from an invalidated generation.
+       * Generation changes neither cancel the SDK nor release its handle. */
+      chat_unpin();
+    }
+  }
+}
+
 static void xiaozhi_mic_callback(const uint8_t *opus_data, int len, void *ctx) {
+  (void)ctx;
   /* Only send OPUS when in LISTENING state (audio channel opened).
    * mic_task runs continuously to support wake word detection,
    * but OPUS is only forwarded when server is ready to receive. */
-  if (s_state == XIAOZHI_MANAGER_STATE_LISTENING && !s_mic_paused_for_tts) {
-    esp_xiaozhi_chat_send_audio_data(s_chat_handle, (const char *)opus_data,
-                                     (size_t)len);
-  }
+  bool listening = s_state == XIAOZHI_MANAGER_STATE_LISTENING;
+  bool tts_paused = s_mic_paused_for_tts;
+  bool local_playing = audio_bridge_local_playing();
+  portENTER_CRITICAL(&s_uplink_lock);
+  local_playing = local_playing || s_local_audio_active;
+  portEXIT_CRITICAL(&s_uplink_lock);
+  portENTER_CRITICAL(&s_mic_diag_lock);
+  ++s_mic_diag.callbacks;
+  if (!listening) ++s_mic_diag.blocked_state;
+  if (tts_paused) ++s_mic_diag.blocked_tts;
+  if (local_playing) ++s_mic_diag.blocked_local;
+  portEXIT_CRITICAL(&s_mic_diag_lock);
+  /* No SDK, blocking queue call, mutex wait or allocation on mic_task. */
+  if (len > 0) (void)uplink_enqueue(opus_data, (size_t)len);
 }
 
 /*---------------------------------------------------------------
@@ -534,6 +1122,7 @@ static void mic_start_if_needed(void) {
 }
 
 static void mic_pause_for_tts(void) {
+  uplink_suspend(false);
   if (s_mic_mutex &&
       xSemaphoreTake(s_mic_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
     ESP_LOGW(TAG, "Failed to take mic mutex in mic_pause_for_tts");
@@ -567,6 +1156,7 @@ static void mic_resume_after_tts(void) {
       xSemaphoreGive(s_mic_mutex);
     return;
   }
+  uplink_suspend(false);
   s_mic_paused_for_tts = false;
   /* Mic task is still running — just resume sending OPUS to server */
   if (s_mic_mutex)
@@ -576,8 +1166,17 @@ static void mic_resume_after_tts(void) {
    * Without this, the server does not process incoming audio after TTS ends,
    * causing the conversation to stall after the first reply. */
   if (s_chat_handle) {
-    esp_err_t ret = esp_xiaozhi_chat_send_start_listening(
-        s_chat_handle, ESP_XIAOZHI_CHAT_LISTENING_MODE_AUTO);
+    portENTER_CRITICAL(&s_mic_diag_lock);
+    ++s_mic_diag.listen_attempts;
+    portEXIT_CRITICAL(&s_mic_diag_lock);
+    esp_err_t ret = chat_listen(ESP_XIAOZHI_CHAT_LISTENING_MODE_AUTO);
+    portENTER_CRITICAL(&s_mic_diag_lock);
+    if (ret == ESP_OK) ++s_mic_diag.listen_ok;
+    else {
+      ++s_mic_diag.listen_failed;
+      s_mic_diag.last_listen_error = ret;
+    }
+    portEXIT_CRITICAL(&s_mic_diag_lock);
     if (ret != ESP_OK) {
       /* [FIX 2026-08-10] Failed to resume listening (e.g. stale session_id):
        * reset the audio channel so the next conversation re-establishes a
@@ -585,15 +1184,17 @@ static void mic_resume_after_tts(void) {
       ESP_LOGW(TAG,
                "send_start_listening after TTS failed: %s - closing channel to reset",
                esp_err_to_name(ret));
-      esp_xiaozhi_chat_close_audio_channel(s_chat_handle);
+      chat_close_channel();
       return;
     }
   }
 
+  uplink_resume();
   ESP_LOGI(TAG, "Microphone resumed after TTS playback");
 }
 
 static void mic_force_stop(void) {
+  uplink_suspend(false);
   /* Force-stop mic regardless of state (used during disconnect/error cleanup).
    * Takes mutex if available, but proceeds even if mutex take fails. */
   bool mutex_taken = false;
@@ -602,6 +1203,8 @@ static void mic_force_stop(void) {
   }
   if (s_mic_active || s_mic_paused_for_tts) {
     audio_bridge_mic_stop();
+    /* The independent sender may still be inside the SDK. Only its actual
+     * return clears send_started_us and releases its handle pin. */
     s_mic_active = false;
     s_mic_paused_for_tts = false;
     ESP_LOGI(TAG, "Microphone force-stopped");
@@ -614,16 +1217,65 @@ static void mic_force_stop(void) {
 /*---------------------------------------------------------------
  * Internal: esp_xiaozhi chat event callback
  *-------------------------------------------------------------*/
+static void xiaozhi_event_process(esp_xiaozhi_chat_event_t event,
+                                  void *event_data, void *ctx);
+
 static void xiaozhi_event_callback(esp_xiaozhi_chat_event_t event,
                                    void *event_data, void *ctx) {
+  s_chat_callback_task = xTaskGetCurrentTaskHandle();
+  esp_xiaozhi_chat_handle_t handle;
+  if (!chat_pin(&handle)) return;
+  xiaozhi_event_process(event, event_data, ctx);
+  chat_unpin();
+}
+
+static void xiaozhi_event_process(esp_xiaozhi_chat_event_t event,
+                                  void *event_data, void *ctx) {
+  if (s_chat_rebuilding) return;
+  /* Local transport errors are not evidence of cloud data reception. MCP,
+   * hello and WS control frames bypass this business callback and are not
+   * covered; TTS audio is observed separately in xiaozhi_audio_callback. */
+  switch (event) {
+  case ESP_XIAOZHI_CHAT_EVENT_CHAT_SPEECH_STARTED:
+  case ESP_XIAOZHI_CHAT_EVENT_CHAT_SPEECH_STOPPED:
+  case ESP_XIAOZHI_CHAT_EVENT_CHAT_TEXT:
+  case ESP_XIAOZHI_CHAT_EVENT_CHAT_EMOJI:
+  case ESP_XIAOZHI_CHAT_EVENT_CHAT_TTS_STATE:
+  case ESP_XIAOZHI_CHAT_EVENT_CHAT_SYSTEM_CMD:
+    note_cloud_callback(false);
+    break;
+  default:
+    break;
+  }
   switch (event) {
   case ESP_XIAOZHI_CHAT_EVENT_CHAT_TTS_STATE: {
     esp_xiaozhi_chat_tts_state_t *tts_state =
         (esp_xiaozhi_chat_tts_state_t *)event_data;
     if (tts_state) {
       switch (tts_state->state) {
-      case ESP_XIAOZHI_CHAT_TTS_STATE_START:
-        s_state = XIAOZHI_MANAGER_STATE_SPEAKING;
+      case ESP_XIAOZHI_CHAT_TTS_STATE_START: {
+        portENTER_CRITICAL(&s_uplink_lock);
+        uint32_t generation = s_speak_cycle.generation;
+        bool injection = speak_cycle_busy(&s_speak_cycle);
+        bool allowed = !s_chat_retiring && !s_chat_rebuilding;
+        if (injection) {
+          speak_cycle_expire(&s_speak_cycle, generation,
+                             esp_timer_get_time(), SPEAK_FIRST_TTS_WAIT_US);
+          allowed = allowed && speak_cycle_start(&s_speak_cycle, generation);
+          if (!allowed) speak_cycle_finish(&s_speak_cycle, generation, SPEAK_OUTCOME_ERROR);
+        } else {
+          allowed = allowed && s_normal_dialogue_active &&
+              (s_state == XIAOZHI_MANAGER_STATE_LISTENING ||
+               s_state == XIAOZHI_MANAGER_STATE_SPEAKING);
+          if (allowed) s_normal_tts_active = true;
+        }
+        portEXIT_CRITICAL(&s_uplink_lock);
+        if (!allowed) {
+          ESP_LOGW(TAG, "Ignoring TTS START outside an active dialogue/injection response");
+          speak_notify();
+          break;
+        }
+        if (!manager_event_set_state(XIAOZHI_MANAGER_STATE_SPEAKING)) return;
         mic_pause_for_tts();
         /* Pause wake word engine during TTS to prevent loud echo audio
          * from crashing MultiNet's RNN-T beam search decoder.
@@ -639,27 +1291,43 @@ static void xiaozhi_event_callback(esp_xiaozhi_chat_event_t event,
         }
         xiaozhi_display_notify(XIAOZHI_DISPLAY_EVENT_STATE_CHANGED,
                                (void *)"speaking");
+        if (injection) {
+          ESP_LOGI(TAG, "Speak cycle=%u: TTS started", (unsigned)generation);
+          speak_notify();
+        }
         break;
-      case ESP_XIAOZHI_CHAT_TTS_STATE_STOP:
-        /* [FIX 2026-08-10] Injection-triggered TTS: close the audio channel
-         * back to CONNECTED so the next conversation opens a fresh session.
-         * Keeping it open after a proactive broadcast reuses a server session
-         * that the server may already consider finished, which made later
-         * wake-up/injects fail ("cannot start conversation"). The user must
-         * say the wake word again to talk — accepted trade-off. */
+      }
+      case ESP_XIAOZHI_CHAT_TTS_STATE_STOP: {
+        portENTER_CRITICAL(&s_uplink_lock);
+        uint32_t generation = s_speak_cycle.generation;
+        bool injection = speak_cycle_busy(&s_speak_cycle);
+        bool normal = !injection && !s_chat_retiring && s_normal_tts_active &&
+            s_normal_dialogue_active && s_state == XIAOZHI_MANAGER_STATE_SPEAKING;
+        bool finished = false;
+        if (injection) {
+          speak_outcome_t outcome = s_speak_cycle.phase == SPEAK_PLAYING ?
+              SPEAK_OUTCOME_DONE : SPEAK_OUTCOME_ERROR;
+          finished = speak_cycle_finish(&s_speak_cycle, generation, outcome);
+          s_uplink_accepting = false;
+          uplink_clear_locked();
+          /* Only local cleanup: never send listen/start before closing. */
+          if (finished) s_mic_paused_for_tts = false;
+        } else if (normal) s_normal_tts_active = false;
+        portEXIT_CRITICAL(&s_uplink_lock);
+        if (!finished && !normal) {
+          ESP_LOGD(TAG, "Ignoring unmatched/late TTS STOP");
+          break;
+        }
         audio_bridge_flush_tts();
         wake_word_engine_resume();
-        if (s_inject_active) {
-          s_inject_active = false;
-          ESP_LOGI(TAG, "Injected TTS finished - closing audio channel back to CONNECTED");
-          if (s_chat_handle) {
-            /* Triggers AUDIO_CHANNEL_CLOSED -> CONNECTED (see event handler) */
-            esp_xiaozhi_chat_close_audio_channel(s_chat_handle);
-          }
+        if (injection) {
+          ESP_LOGI(TAG, "Speak cycle=%u: TTS ended; cleanup stays in speak/rebuild workers",
+                   (unsigned)generation);
+          speak_notify();
         } else {
           /* Normal (user) conversation: TTS finished — return to LISTENING
            * to continue the conversation. */
-          s_state = XIAOZHI_MANAGER_STATE_LISTENING;
+          if (!manager_event_set_state(XIAOZHI_MANAGER_STATE_LISTENING)) return;
           mic_resume_after_tts();
         }
         /* Resume wake word engine after TTS ends.
@@ -671,9 +1339,15 @@ static void xiaozhi_event_callback(esp_xiaozhi_chat_event_t event,
                             s_config.event_cb_ctx);
         }
         xiaozhi_display_notify(XIAOZHI_DISPLAY_EVENT_STATE_CHANGED,
-                               (void *)"listening");
+                                (void *)(injection ? "idle" : "listening"));
         break;
+      }
       case ESP_XIAOZHI_CHAT_TTS_STATE_SENTENCE_START:
+        portENTER_CRITICAL(&s_uplink_lock);
+        bool active_tts = s_speak_cycle.phase == SPEAK_PLAYING ||
+            (s_speak_cycle.phase == SPEAK_IDLE && s_normal_tts_active);
+        portEXIT_CRITICAL(&s_uplink_lock);
+        if (!active_tts) break;
         if (s_config.event_cb) {
           s_config.event_cb(XIAOZHI_MANAGER_EVENT_TTS_SENTENCE,
                             (void *)tts_state->text, s_config.event_cb_ctx);
@@ -701,12 +1375,13 @@ static void xiaozhi_event_callback(esp_xiaozhi_chat_event_t event,
         (esp_xiaozhi_chat_error_info_t *)event_data;
     ESP_LOGE(TAG, "Chat error: code=%d source=%s", err_info->code,
              err_info->source ? err_info->source : "unknown");
+    speak_cancel(SPEAK_OUTCOME_ERROR);
     /* Clean up mic on error — it may still be running */
     mic_force_stop();
     /* Transition to ERROR state, but allow recovery by reconnecting.
      * The error state is recoverable: call xiaozhi_manager_stop() then
      * xiaozhi_manager_start() to retry. */
-    s_state = XIAOZHI_MANAGER_STATE_ERROR;
+    if (!manager_event_set_state(XIAOZHI_MANAGER_STATE_ERROR)) return;
     schedule_reconnect_if_needed(); /* Auto-reconnect after error */
     if (s_config.event_cb) {
       s_config.event_cb(XIAOZHI_MANAGER_EVENT_ERROR, err_info,
@@ -737,8 +1412,21 @@ static void xiaozhi_event_callback(esp_xiaozhi_chat_event_t event,
 /*---------------------------------------------------------------
  * Internal: esp_xiaozhi ESP event handler
  *-------------------------------------------------------------*/
+static void xiaozhi_esp_event_process(void *arg, esp_event_base_t event_base,
+                                      int32_t event_id, void *event_data);
+
 static void xiaozhi_esp_event_handler(void *arg, esp_event_base_t event_base,
                                       int32_t event_id, void *event_data) {
+  s_chat_event_task = xTaskGetCurrentTaskHandle();
+  esp_xiaozhi_chat_handle_t handle;
+  if (!chat_pin(&handle)) return;
+  xiaozhi_esp_event_process(arg, event_base, event_id, event_data);
+  chat_unpin();
+}
+
+static void xiaozhi_esp_event_process(void *arg, esp_event_base_t event_base,
+                                      int32_t event_id, void *event_data) {
+  if (s_chat_rebuilding) return;
   switch (event_id) {
   case ESP_XIAOZHI_CHAT_EVENT_CONNECTED: {
     bool transport_reused = s_waiting_transport_reconnect;
@@ -747,7 +1435,13 @@ static void xiaozhi_esp_event_handler(void *arg, esp_event_base_t event_base,
       transport_reconnect_ms =
           (esp_timer_get_time() - s_transport_reconnect_wait_started_us) / 1000;
     }
-    s_state = XIAOZHI_MANAGER_STATE_CONNECTED;
+    if (!manager_event_set_state(XIAOZHI_MANAGER_STATE_CONNECTED)) return;
+    portENTER_CRITICAL(&s_uplink_lock);
+    s_transport_fresh = true;
+    s_normal_dialogue_active = false;
+    s_normal_tts_active = false;
+    s_mic_paused_for_tts = false;
+    portEXIT_CRITICAL(&s_uplink_lock);
     if (s_audio_ready_events) xEventGroupClearBits(s_audio_ready_events, AUDIO_CHANNEL_READY_BIT);
     cancel_reconnect(); /* Reset reconnect counter on successful connection */
     if (transport_reused) {
@@ -771,9 +1465,18 @@ static void xiaozhi_esp_event_handler(void *arg, esp_event_base_t event_base,
     }
     xiaozhi_display_notify(XIAOZHI_DISPLAY_EVENT_STATE_CHANGED,
                            (void *)"connected");
+    speak_notify();
     break;
   }
   case ESP_XIAOZHI_CHAT_EVENT_DISCONNECTED: {
+    uplink_suspend(false);
+    speak_cancel(SPEAK_OUTCOME_DISCONNECTED);
+    portENTER_CRITICAL(&s_uplink_lock);
+    s_normal_dialogue_active = false;
+    s_normal_tts_active = false;
+    s_transport_fresh = false;
+    s_mic_paused_for_tts = false;
+    portEXIT_CRITICAL(&s_uplink_lock);
     if (s_audio_ready_events) xEventGroupClearBits(s_audio_ready_events, AUDIO_CHANNEL_READY_BIT);
     if (s_reconnect_pending) {
       ESP_LOGW(TAG, "Duplicate disconnect ignored (reconnect already pending)");
@@ -784,7 +1487,7 @@ static void xiaozhi_esp_event_handler(void *arg, esp_event_base_t event_base,
     /* INITIALIZED is deliberate: reconnect_timer_callback only permits
      * INITIALIZED/ERROR, so the grace timeout cannot be blocked by a stale
      * public CONNECTED state. The mic remains running on the reuse path. */
-    s_state = XIAOZHI_MANAGER_STATE_INITIALIZED;
+    if (!manager_event_set_state(XIAOZHI_MANAGER_STATE_INITIALIZED)) return;
     s_mcp_reconnect_count++;
     ESP_LOGW(TAG, "Disconnected from xiaozhi server (total reconnects: %d)",
              s_mcp_reconnect_count);
@@ -803,7 +1506,8 @@ static void xiaozhi_esp_event_handler(void *arg, esp_event_base_t event_base,
     break;
   }
   case ESP_XIAOZHI_CHAT_EVENT_AUDIO_CHANNEL_OPENED:
-    s_state = XIAOZHI_MANAGER_STATE_LISTENING;
+    if (!manager_event_set_state(XIAOZHI_MANAGER_STATE_LISTENING)) return;
+    uplink_resume();
     if (s_audio_ready_events) xEventGroupSetBits(s_audio_ready_events, AUDIO_CHANNEL_READY_BIT);
     ESP_LOGI(TAG, "Audio channel opened");
     /* mic_task is already running (started in CONNECTED event).
@@ -816,7 +1520,27 @@ static void xiaozhi_esp_event_handler(void *arg, esp_event_base_t event_base,
                            (void *)"listening");
     break;
   case ESP_XIAOZHI_CHAT_EVENT_AUDIO_CHANNEL_CLOSED:
-    s_state = XIAOZHI_MANAGER_STATE_CONNECTED;
+    uplink_suspend(false);
+    speak_cancel(SPEAK_OUTCOME_CANCELLED);
+    portENTER_CRITICAL(&s_uplink_lock);
+    s_normal_dialogue_active = false;
+    s_normal_tts_active = false;
+    s_mic_paused_for_tts = false;
+    portEXIT_CRITICAL(&s_uplink_lock);
+    audio_bridge_flush_tts();
+    wake_word_engine_resume();
+    speak_notify();
+    /* chat_stop() can queue CLOSED while the old instance is being rebuilt.
+     * It must not turn INITIALIZED/CONNECTING/ERROR into a false CONNECTED. */
+    if (s_reconnect_pending ||
+        (s_state != XIAOZHI_MANAGER_STATE_CONNECTED &&
+         s_state != XIAOZHI_MANAGER_STATE_LISTENING &&
+         s_state != XIAOZHI_MANAGER_STATE_SPEAKING)) {
+      ESP_LOGW(TAG, "Ignoring audio-channel close during recovery (state=%d)",
+               (int)s_state);
+      break;
+    }
+    if (!manager_event_set_state(XIAOZHI_MANAGER_STATE_CONNECTED)) return;
     if (s_audio_ready_events) xEventGroupClearBits(s_audio_ready_events, AUDIO_CHANNEL_READY_BIT);
     ESP_LOGI(TAG, "Audio channel closed");
     /* Do NOT stop mic_task — keep running for wake word detection.
@@ -828,11 +1552,12 @@ static void xiaozhi_esp_event_handler(void *arg, esp_event_base_t event_base,
     xiaozhi_display_notify(XIAOZHI_DISPLAY_EVENT_STATE_CHANGED, (void *)"idle");
     break;
   case ESP_XIAOZHI_CHAT_EVENT_SERVER_GOODBYE:
+    uplink_suspend(false);
     ESP_LOGI(TAG, "Server goodbye received — conversation ended");
     /* Close audio channel cleanly. This will trigger AUDIO_CHANNEL_CLOSED
      * event which handles mic cleanup and state transition. */
     if (s_chat_handle) {
-      esp_xiaozhi_chat_close_audio_channel(s_chat_handle);
+      chat_close_channel();
     }
     if (s_config.event_cb) {
       s_config.event_cb(XIAOZHI_MANAGER_EVENT_SERVER_GOODBYE, NULL,
@@ -1096,6 +1821,12 @@ esp_err_t xiaozhi_manager_init(const xiaozhi_manager_config_t *config) {
   ESP_RETURN_ON_FALSE(s_audio_ready_events, ESP_ERR_NO_MEM, TAG,
                       "Failed to create audio-ready event group");
   xEventGroupClearBits(s_audio_ready_events, AUDIO_CHANNEL_READY_BIT);
+  if (!s_barrier_registered) {
+    esp_err_t barrier_ret = esp_event_handler_register(
+        XIAOZHI_MANAGER_PRIVATE_EVENTS, 0, chat_barrier_handler, NULL);
+    ESP_RETURN_ON_ERROR(barrier_ret, TAG, "Failed to register chat event drain");
+    s_barrier_registered = true;
+  }
 
   /* Create mic state protection mutex */
   s_mic_mutex = xSemaphoreCreateMutex();
@@ -1256,7 +1987,34 @@ esp_err_t xiaozhi_manager_init(const xiaozhi_manager_config_t *config) {
     return ESP_ERR_NO_MEM;
   }
 
-  s_state = XIAOZHI_MANAGER_STATE_INITIALIZED;
+  ret = uplink_runtime_init();
+  if (ret != ESP_OK) {
+    /* Workers/pool are fixed application-lifetime resources, retained for a
+     * subsequent init retry. No audio can enter while s_chat_retiring is true. */
+    ESP_LOGE(TAG, "Failed to initialize async uplink: %s", esp_err_to_name(ret));
+    vTaskDelete(s_speak_task);
+    s_speak_task = NULL;
+    vQueueDelete(s_speak_queue);
+    s_speak_queue = NULL;
+    esp_event_handler_unregister(ESP_XIAOZHI_CHAT_EVENTS, ESP_EVENT_ANY_ID,
+                                 xiaozhi_esp_event_handler);
+    esp_xiaozhi_chat_stop(s_chat_handle);
+    esp_xiaozhi_chat_deinit(s_chat_handle);
+    s_chat_handle = 0;
+    s_chat_config_saved = false;
+    s_mcp_engine = NULL;
+    mipi_dsi_bridge_deinit();
+    device_controller_deinit();
+    task_manager_deinit();
+    vSemaphoreDelete(s_mic_mutex);
+    s_mic_mutex = NULL;
+    return ret;
+  }
+  portENTER_CRITICAL(&s_uplink_lock);
+  s_chat_retiring = false;
+  s_chat_rebuilding = false;
+  portEXIT_CRITICAL(&s_uplink_lock);
+  manager_set_state(XIAOZHI_MANAGER_STATE_INITIALIZED);
   ESP_LOGI(TAG, "Xiaozhi manager initialized successfully");
 
   return ESP_OK;
@@ -1267,23 +2025,54 @@ esp_err_t xiaozhi_manager_deinit(void) {
   if (s_state == XIAOZHI_MANAGER_STATE_IDLE) {
     return ESP_OK;
   }
+  ESP_RETURN_ON_FALSE(!in_chat_callback_task(), ESP_ERR_INVALID_STATE, TAG,
+                      "Deinit must run outside chat/event callbacks");
+  ESP_RETURN_ON_FALSE(s_lifecycle_mutex &&
+      xSemaphoreTake(s_lifecycle_mutex, pdMS_TO_TICKS(1000)) == pdTRUE,
+      ESP_ERR_TIMEOUT, TAG, "Lifecycle worker is busy; resources retained");
+  if (s_state == XIAOZHI_MANAGER_STATE_IDLE) {
+    xSemaphoreGive(s_lifecycle_mutex);
+    return ESP_OK;
+  }
+  uplink_suspend(true);
+  speak_cancel(SPEAK_OUTCOME_CANCELLED);
+  cancel_reconnect();
+  if (chat_wait_idle() != ESP_OK) {
+    xSemaphoreGive(s_lifecycle_mutex);
+    return ESP_ERR_TIMEOUT;
+  }
+  s_chat_rebuilding = true;
 
   /* Stop microphone capture first */
   mic_force_stop();
 
   /* Cancel any pending reconnection */
-  cancel_reconnect();
   if (s_reconnect_timer != NULL) {
     esp_timer_delete(s_reconnect_timer);
     s_reconnect_timer = NULL;
   }
 
   /* Stop chat if running */
+  esp_event_handler_unregister(ESP_XIAOZHI_CHAT_EVENTS, ESP_EVENT_ANY_ID,
+                               xiaozhi_esp_event_handler);
   if (s_chat_handle) {
     esp_xiaozhi_chat_stop(s_chat_handle);
     esp_xiaozhi_chat_deinit(s_chat_handle);
     s_chat_handle = 0;
   }
+  esp_err_t drain_ret = chat_drain_events();
+  if (drain_ret != ESP_OK) {
+    xSemaphoreGive(s_lifecycle_mutex);
+    return drain_ret;
+  }
+  portENTER_CRITICAL(&s_uplink_lock);
+  speak_cycle_release(&s_speak_cycle, s_speak_cycle.generation);
+  s_speak_reset_pending = false;
+  s_normal_dialogue_active = false;
+  s_normal_tts_active = false;
+  s_transport_fresh = false;
+  s_mic_paused_for_tts = false;
+  portEXIT_CRITICAL(&s_uplink_lock);
 
   /* Deinitialize sub-modules */
   mipi_dsi_bridge_deinit();
@@ -1309,10 +2098,12 @@ esp_err_t xiaozhi_manager_deinit(void) {
   s_mcp_engine = NULL;
   s_owns_mcp = false;
   s_chat_config_saved = false;
-  s_state = XIAOZHI_MANAGER_STATE_IDLE;
+  manager_set_state(XIAOZHI_MANAGER_STATE_IDLE);
+  s_chat_rebuilding = false;
   s_display_cb = NULL;
 
   ESP_LOGI(TAG, "Xiaozhi manager deinitialized");
+  xSemaphoreGive(s_lifecycle_mutex);
   return ESP_OK;
 }
 
@@ -1320,15 +2111,32 @@ esp_err_t xiaozhi_manager_start(void) {
   ESP_RETURN_ON_FALSE(s_chat_handle, ESP_ERR_INVALID_STATE, TAG,
                       "Not initialized");
 
-  s_state = XIAOZHI_MANAGER_STATE_CONNECTING;
+  ESP_RETURN_ON_FALSE(s_lifecycle_mutex &&
+      xSemaphoreTake(s_lifecycle_mutex, 0) == pdTRUE, ESP_ERR_INVALID_STATE,
+      TAG, "Lifecycle worker is busy");
+  if (!s_chat_handle || s_state == XIAOZHI_MANAGER_STATE_IDLE) {
+    xSemaphoreGive(s_lifecycle_mutex);
+    return ESP_ERR_INVALID_STATE;
+  }
+  if (!chat_is_idle()) {
+    xSemaphoreGive(s_lifecycle_mutex);
+    return ESP_ERR_INVALID_STATE;
+  }
+  portENTER_CRITICAL(&s_uplink_lock);
+  s_chat_retiring = false;
+  s_chat_rebuilding = false;
+  portEXIT_CRITICAL(&s_uplink_lock);
+  manager_set_state(XIAOZHI_MANAGER_STATE_CONNECTING);
   esp_err_t ret = esp_xiaozhi_chat_start(s_chat_handle);
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to start chat: %s", esp_err_to_name(ret));
-    s_state = XIAOZHI_MANAGER_STATE_ERROR;
+    manager_set_state(XIAOZHI_MANAGER_STATE_ERROR);
+    xSemaphoreGive(s_lifecycle_mutex);
     return ret;
   }
 
   ESP_LOGI(TAG, "Xiaozhi chat session started");
+  xSemaphoreGive(s_lifecycle_mutex);
   return ESP_OK;
 }
 
@@ -1336,24 +2144,72 @@ esp_err_t xiaozhi_manager_stop(void) {
   ESP_RETURN_ON_FALSE(s_chat_handle, ESP_ERR_INVALID_STATE, TAG,
                       "Not initialized");
 
+  ESP_RETURN_ON_FALSE(!in_chat_callback_task(), ESP_ERR_INVALID_STATE, TAG,
+                      "Stop must run outside chat/event callbacks");
+  ESP_RETURN_ON_FALSE(s_lifecycle_mutex &&
+      xSemaphoreTake(s_lifecycle_mutex, pdMS_TO_TICKS(1000)) == pdTRUE,
+      ESP_ERR_TIMEOUT, TAG, "Lifecycle worker is busy; resources retained");
+  if (!s_chat_handle || s_state == XIAOZHI_MANAGER_STATE_IDLE) {
+    xSemaphoreGive(s_lifecycle_mutex);
+    return ESP_ERR_INVALID_STATE;
+  }
+  uplink_suspend(true);
+  speak_cancel(SPEAK_OUTCOME_CANCELLED);
   /* Cancel any pending reconnection before stopping */
   cancel_reconnect();
   if (s_audio_ready_events) xEventGroupClearBits(s_audio_ready_events, AUDIO_CHANNEL_READY_BIT);
+  if (chat_wait_idle() != ESP_OK) {
+    xSemaphoreGive(s_lifecycle_mutex);
+    return ESP_ERR_TIMEOUT;
+  }
+  s_chat_rebuilding = true;
 
   esp_err_t ret = esp_xiaozhi_chat_stop(s_chat_handle);
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to stop chat: %s", esp_err_to_name(ret));
+    s_chat_rebuilding = false;
+    xSemaphoreGive(s_lifecycle_mutex);
     return ret;
   }
 
-  s_state = XIAOZHI_MANAGER_STATE_INITIALIZED;
+  ret = chat_drain_events();
+  if (ret != ESP_OK) {
+    xSemaphoreGive(s_lifecycle_mutex);
+    return ret;
+  }
+  portENTER_CRITICAL(&s_uplink_lock);
+  speak_cycle_release(&s_speak_cycle, s_speak_cycle.generation);
+  s_speak_reset_pending = false;
+  s_normal_dialogue_active = false;
+  s_normal_tts_active = false;
+  s_transport_fresh = false;
+  s_mic_paused_for_tts = false;
+  portEXIT_CRITICAL(&s_uplink_lock);
+  audio_bridge_flush_tts();
+  wake_word_engine_resume();
+
+  manager_set_state(XIAOZHI_MANAGER_STATE_INITIALIZED);
+  s_chat_rebuilding = false;
   ESP_LOGI(TAG, "Xiaozhi chat session stopped");
+  xSemaphoreGive(s_lifecycle_mutex);
   return ESP_OK;
 }
 
 xiaozhi_manager_state_t xiaozhi_manager_get_state(void) { return s_state; }
 
 esp_err_t xiaozhi_manager_send_wake_word(const char *wake_word) {
+  esp_xiaozhi_chat_handle_t handle;
+  if (!dialogue_pin(&handle)) {
+    ESP_LOGI(TAG, "Wake request deferred/rejected while broadcast or recovery owns the session");
+    return ESP_ERR_INVALID_STATE;
+  }
+  esp_err_t ret = send_wake_word_pinned(wake_word);
+  chat_unpin();
+  return ret;
+}
+
+static esp_err_t send_wake_word_pinned(const char *wake_word) {
+  if (audio_bridge_local_playing()) return ESP_ERR_INVALID_STATE;
   ESP_RETURN_ON_FALSE(s_chat_handle, ESP_ERR_INVALID_STATE, TAG,
                       "Not initialized");
   ESP_RETURN_ON_FALSE(wake_word, ESP_ERR_INVALID_ARG, TAG, "Invalid wake word");
@@ -1377,9 +2233,7 @@ esp_err_t xiaozhi_manager_send_wake_word(const char *wake_word) {
    * and ensures the server processes the new wake word correctly. */
   if (s_state == XIAOZHI_MANAGER_STATE_SPEAKING) {
     ESP_LOGI(TAG, "Aborting current TTS for new wake word: %s", wake_word);
-    esp_xiaozhi_chat_send_abort_speaking(
-        s_chat_handle,
-        ESP_XIAOZHI_CHAT_ABORT_SPEAKING_REASON_WAKE_WORD_DETECTED);
+    chat_abort();
   }
 
   /* [FIX 2026-08-10] Channel already open and server already listening:
@@ -1388,11 +2242,12 @@ esp_err_t xiaozhi_manager_send_wake_word(const char *wake_word) {
    * Just make sure the server keeps listening and stay in the session. */
   if (s_state == XIAOZHI_MANAGER_STATE_LISTENING) {
     ESP_LOGI(TAG, "Wake word while already LISTENING - keep listening, no duplicate detect");
-    esp_err_t ret = esp_xiaozhi_chat_send_start_listening(
-        s_chat_handle, ESP_XIAOZHI_CHAT_LISTENING_MODE_AUTO);
+    esp_err_t ret = chat_listen(ESP_XIAOZHI_CHAT_LISTENING_MODE_AUTO);
     if (ret != ESP_OK) {
       ESP_LOGW(TAG, "start_listening while LISTENING failed: %s",
                esp_err_to_name(ret));
+    } else {
+      uplink_resume();
     }
     return ret;
   }
@@ -1430,7 +2285,7 @@ esp_err_t xiaozhi_manager_send_wake_word(const char *wake_word) {
   }
 
   ESP_LOGI(TAG, "Wake word detected: %s", wake_word);
-  esp_err_t ret = esp_xiaozhi_chat_send_wake_word(s_chat_handle, wake_word);
+  esp_err_t ret = chat_detect(wake_word);
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to send wake word: %s", esp_err_to_name(ret));
     return ret;
@@ -1441,8 +2296,7 @@ esp_err_t xiaozhi_manager_send_wake_word(const char *wake_word) {
    * was detected but does not begin processing incoming audio frames.
    * This aligns with the official esp_xiaozhi state machine:
    *   detect -> start listening (auto mode) */
-  ret = esp_xiaozhi_chat_send_start_listening(
-      s_chat_handle, ESP_XIAOZHI_CHAT_LISTENING_MODE_AUTO);
+  ret = chat_listen(ESP_XIAOZHI_CHAT_LISTENING_MODE_AUTO);
   if (ret != ESP_OK) {
     ESP_LOGW(TAG, "Failed to send start_listening after wake word: %s",
              esp_err_to_name(ret));
@@ -1456,13 +2310,15 @@ esp_err_t xiaozhi_manager_interrupt_speaking(void) {
   ESP_RETURN_ON_FALSE(s_chat_handle, ESP_ERR_INVALID_STATE, TAG,
                       "Not initialized");
 
+  esp_xiaozhi_chat_handle_t handle;
+  if (!dialogue_pin(&handle)) return ESP_ERR_INVALID_STATE;
+  esp_err_t ret = ESP_OK;
   if (s_state == XIAOZHI_MANAGER_STATE_SPEAKING) {
     ESP_LOGI(TAG, "Barge-in: interrupting current TTS");
-    return esp_xiaozhi_chat_send_abort_speaking(
-        s_chat_handle,
-        ESP_XIAOZHI_CHAT_ABORT_SPEAKING_REASON_WAKE_WORD_DETECTED);
+    ret = chat_abort();
   }
-  return ESP_OK;
+  chat_unpin();
+  return ret;
 }
 
 esp_err_t xiaozhi_manager_open_audio_channel(void) {
@@ -1470,7 +2326,38 @@ esp_err_t xiaozhi_manager_open_audio_channel(void) {
                       "Not initialized");
 
   ESP_LOGI(TAG, "Opening audio channel...");
-  return esp_xiaozhi_chat_open_audio_channel(s_chat_handle, NULL, NULL, 0);
+  esp_xiaozhi_chat_handle_t opening_handle;
+  bool injection_owner = xTaskGetCurrentTaskHandle() == s_speak_task;
+  if (injection_owner ? !chat_pin(&opening_handle) : !dialogue_pin(&opening_handle))
+    return ESP_ERR_INVALID_STATE;
+  portENTER_CRITICAL(&s_uplink_lock);
+  s_transport_fresh = false;
+  if (!injection_owner) s_normal_dialogue_active = true;
+  portEXIT_CRITICAL(&s_uplink_lock);
+  uplink_suspend(false);
+  esp_err_t ret = esp_xiaozhi_chat_open_audio_channel(opening_handle, NULL, NULL, 0);
+  if (ret != ESP_OK && !injection_owner) {
+    portENTER_CRITICAL(&s_uplink_lock);
+    if (s_chat_handle == opening_handle &&
+        s_state == XIAOZHI_MANAGER_STATE_CONNECTED && !s_normal_tts_active)
+      s_normal_dialogue_active = false;
+    portEXIT_CRITICAL(&s_uplink_lock);
+    speak_notify();
+  }
+  if (ret == ESP_ERR_TIMEOUT && s_chat_handle == opening_handle &&
+      s_state == XIAOZHI_MANAGER_STATE_CONNECTED) {
+    /* A connected WS socket is not a completed audio handshake. Do not leave
+     * every subsequent wake retrying hello on this same unresponsive session.
+     * Use the existing reconnect timer; never rebuild the chat in this call. */
+    ESP_LOGW(TAG, "Audio hello timed out; scheduling full session recovery");
+    manager_set_state(XIAOZHI_MANAGER_STATE_ERROR);
+    if (s_audio_ready_events)
+      xEventGroupClearBits(s_audio_ready_events, AUDIO_CHANNEL_READY_BIT);
+    mic_force_stop();
+    schedule_reconnect_if_needed();
+  }
+  chat_unpin();
+  return ret;
 }
 
 esp_err_t xiaozhi_manager_close_audio_channel(void) {
@@ -1478,7 +2365,27 @@ esp_err_t xiaozhi_manager_close_audio_channel(void) {
                       "Not initialized");
 
   ESP_LOGI(TAG, "Closing audio channel...");
-  return esp_xiaozhi_chat_close_audio_channel(s_chat_handle);
+  esp_xiaozhi_chat_handle_t handle = 0;
+  portENTER_CRITICAL(&s_uplink_lock);
+  bool injection = speak_cycle_busy(&s_speak_cycle);
+  if (injection) {
+    speak_cycle_finish(&s_speak_cycle, s_speak_cycle.generation, SPEAK_OUTCOME_CANCELLED);
+    s_uplink_accepting = false;
+    uplink_clear_locked();
+  } else if (s_chat_handle && !s_chat_retiring) {
+    handle = s_chat_handle;
+    ++s_chat_users;
+  }
+  portEXIT_CRITICAL(&s_uplink_lock);
+  if (injection) {
+    speak_notify();
+    return ESP_OK; /* Cancellation accepted; worker performs transport cleanup. */
+  }
+  if (!handle) return ESP_ERR_INVALID_STATE;
+  uplink_suspend(false);
+  esp_err_t ret = esp_xiaozhi_chat_close_audio_channel(handle);
+  chat_unpin();
+  return ret;
 }
 
 esp_err_t xiaozhi_manager_send_audio(const char *data, size_t data_len) {
@@ -1487,7 +2394,7 @@ esp_err_t xiaozhi_manager_send_audio(const char *data, size_t data_len) {
   ESP_RETURN_ON_FALSE(data && data_len > 0, ESP_ERR_INVALID_ARG, TAG,
                       "Invalid audio data");
 
-  return esp_xiaozhi_chat_send_audio_data(s_chat_handle, data, data_len);
+  return uplink_enqueue((const uint8_t *)data, data_len);
 }
 
 esp_mcp_t *xiaozhi_manager_get_mcp_engine(void) { return s_mcp_engine; }
@@ -1495,94 +2402,156 @@ esp_mcp_t *xiaozhi_manager_get_mcp_engine(void) { return s_mcp_engine; }
 /*---------------------------------------------------------------
  * Internal: Process a single speak request (runs in speak task context)
  *
- * Same state machine as the original synchronous flow, but executed in
- * the dedicated speak task so the caller never blocks:
- *   1. If currently speaking, abort and wait for TTS_STOP -> LISTENING
- *   2. If connected but channel closed, open channel, wait for LISTENING
- *   3. Only inject the text when in LISTENING state
+ * One complete broadcast per worker iteration. Normal dialogues take priority;
+ * already-accepted text remains in the existing FIFO instead of interrupting
+ * user speech or being silently dropped by an injection-only guard.
  *-------------------------------------------------------------*/
-static esp_err_t speak_process_request(const speak_request_t *req) {
-  ESP_LOGI(TAG, "Speak process: \"%s\" (prio=%d) state=%d", req->text,
-           req->priority, (int)s_state);
-
-  /* If currently speaking, abort first and wait for TTS_STOP event
-   * to transition state back to LISTENING (or channel closed -> CONNECTED).
-   * The abort is asynchronous — the server sends TTS stop after processing
-   * the abort request. Do NOT bail out here; fall through so the
-   * CONNECTED branch below can re-open the channel if needed. */
-  if (s_state == XIAOZHI_MANAGER_STATE_SPEAKING) {
-    ESP_LOGI(TAG, "Aborting current TTS for speak: \"%s\"", req->text);
-    esp_xiaozhi_chat_send_abort_speaking(
-        s_chat_handle,
-        ESP_XIAOZHI_CHAT_ABORT_SPEAKING_REASON_WAKE_WORD_DETECTED);
-    /* Wait for the abort to take effect (TTS_STOP -> LISTENING, or
-     * CHANNEL_CLOSED -> CONNECTED). Typical latency is 100-500ms. */
-    int wait_ms = 0;
-    while (s_state == XIAOZHI_MANAGER_STATE_SPEAKING && wait_ms < 3000) {
-      vTaskDelay(pdMS_TO_TICKS(50));
-      wait_ms += 50;
-    }
-    if (s_state == XIAOZHI_MANAGER_STATE_SPEAKING) {
-      ESP_LOGW(TAG, "TTS abort not processed after %d ms (state=%d)", wait_ms,
-               (int)s_state);
-      return ESP_ERR_INVALID_STATE;
-    }
-  }
-
-  /* If connected but audio channel not open, open it first */
-  if (s_state == XIAOZHI_MANAGER_STATE_CONNECTED) {
-    ESP_LOGI(TAG, "Opening audio channel for speak: \"%s\"", req->text);
-    esp_err_t ret = xiaozhi_manager_open_audio_channel();
-    if (ret != ESP_OK) {
-      ESP_LOGE(TAG, "Failed to open audio channel for speak: %s",
-               esp_err_to_name(ret));
-      return ret;
-    }
-    /* Wait for audio channel to fully open and MCP initialization to complete.
-     * MCP init + tools/list takes ~1s, so we need a longer delay here.
-     * During this wait, the audio channel open callback will set state to
-     * LISTENING. */
-    int wait_ms = 0;
-    while (s_state != XIAOZHI_MANAGER_STATE_LISTENING && wait_ms < 3000) {
-      vTaskDelay(pdMS_TO_TICKS(100));
-      wait_ms += 100;
-    }
-    if (s_state != XIAOZHI_MANAGER_STATE_LISTENING) {
-      ESP_LOGW(TAG, "Audio channel not ready after %d ms (state=%d)", wait_ms,
-               (int)s_state);
-      return ESP_ERR_INVALID_STATE;
-    }
-  }
-
-  /* Only proceed when in LISTENING state (audio channel open) */
-  if (s_state != XIAOZHI_MANAGER_STATE_LISTENING) {
-    ESP_LOGW(TAG, "Cannot speak in state %d, need LISTENING", (int)s_state);
+static esp_err_t speak_transport_reset(uint32_t generation) {
+  portENTER_CRITICAL(&s_uplink_lock);
+  if (s_speak_cycle.generation != generation || !speak_cycle_busy(&s_speak_cycle)) {
+    portEXIT_CRITICAL(&s_uplink_lock);
     return ESP_ERR_INVALID_STATE;
   }
+  uint32_t previous_boundary = s_transport_boundary_generation;
+  s_speak_reset_generation = generation;
+  s_speak_reset_pending = true;
+  portEXIT_CRITICAL(&s_uplink_lock);
+  xTaskNotifyGive(s_reconnect_task);
+  for (;;) {
+    portENTER_CRITICAL(&s_uplink_lock);
+    bool current = s_speak_cycle.generation == generation &&
+        speak_cycle_busy(&s_speak_cycle) && s_state != XIAOZHI_MANAGER_STATE_IDLE;
+    bool drained = s_transport_boundary_generation != previous_boundary &&
+        !s_speak_reset_pending && !s_speak_reset_running;
+    portEXIT_CRITICAL(&s_uplink_lock);
+    if (!current) return ESP_ERR_INVALID_STATE;
+    if (drained) return ESP_OK;
+    /* A stuck SDK call still owns its handle: never free it on a timer. */
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
+  }
+}
 
-  /* Send command text directly as listen detect — server processes it as
-   * startToChat(text) without wake word greeting. This is the key change:
-   * no wake word means no "你好小智" TTS response, so the user only
-   * hears the actual broadcast content. */
-  esp_err_t ret = esp_xiaozhi_chat_send_wake_word(s_chat_handle, req->text);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to send command text: %s", esp_err_to_name(ret));
-    return ret;
+static esp_err_t speak_send(uint32_t generation, const char *text) {
+  esp_xiaozhi_chat_handle_t handle = 0;
+  portENTER_CRITICAL(&s_uplink_lock);
+  if (s_speak_cycle.generation == generation && !s_chat_retiring && s_chat_handle &&
+      (s_speak_cycle.phase == SPEAK_WAITING || s_speak_cycle.phase == SPEAK_PLAYING)) {
+    handle = s_chat_handle;
+    ++s_chat_users;
+  }
+  portEXIT_CRITICAL(&s_uplink_lock);
+  if (!handle) return ESP_ERR_INVALID_STATE;
+  esp_err_t ret = text ? esp_xiaozhi_chat_send_wake_word(handle, text) :
+      esp_xiaozhi_chat_send_start_listening(handle, ESP_XIAOZHI_CHAT_LISTENING_MODE_AUTO);
+  chat_unpin();
+  return ret;
+}
+
+static esp_err_t speak_process_request(const speak_request_t *req) {
+  uint32_t generation = 0;
+  bool fresh = false, logged_deferred = false;
+  for (;;) {
+    bool local_playing = audio_bridge_local_playing();
+    portENTER_CRITICAL(&s_uplink_lock);
+    bool stopped = s_state == XIAOZHI_MANAGER_STATE_IDLE ||
+        (s_state == XIAOZHI_MANAGER_STATE_INITIALIZED && s_reconnect_canceled);
+    bool ready = s_chat_handle && !s_chat_retiring && !s_chat_rebuilding &&
+        s_state == XIAOZHI_MANAGER_STATE_CONNECTED && !s_normal_dialogue_active &&
+        !s_normal_tts_active && s_chat_users == 0 && !local_playing &&
+        !s_local_audio_active;
+    bool reserved = ready && speak_cycle_begin(&s_speak_cycle, &generation);
+    if (reserved) {
+      fresh = s_transport_fresh;
+      s_uplink_accepting = false;
+      uplink_clear_locked();
+    }
+    portEXIT_CRITICAL(&s_uplink_lock);
+    if (stopped) return ESP_ERR_INVALID_STATE;
+    if (reserved) break;
+    if (!logged_deferred) {
+      ESP_LOGI(TAG, "Speak request remains queued/deferred until normal dialogue and recovery are idle");
+      logged_deferred = true;
+    }
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
+  }
+  ESP_LOGI(TAG, "Speak cycle=%u reserved: prio=%d", (unsigned)generation, req->priority);
+  esp_err_t ret = ESP_OK;
+  if (!fresh) ret = speak_transport_reset(generation);
+  if (ret == ESP_OK) {
+    /* New transport connection is asynchronous. No SDK handle is held while
+     * this worker waits, so teardown and its callbacks can make progress. */
+    for (;;) {
+      portENTER_CRITICAL(&s_uplink_lock);
+      bool current = s_speak_cycle.generation == generation &&
+          s_speak_cycle.phase == SPEAK_OPENING;
+      bool connected = s_state == XIAOZHI_MANAGER_STATE_CONNECTED &&
+          !s_chat_retiring && !s_chat_rebuilding;
+      bool failed = s_state == XIAOZHI_MANAGER_STATE_ERROR ||
+          s_state == XIAOZHI_MANAGER_STATE_IDLE;
+      portEXIT_CRITICAL(&s_uplink_lock);
+      if (!current || failed) { ret = ESP_ERR_INVALID_STATE; break; }
+      if (connected) break;
+      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
+    }
+  }
+  bool attempted_open = false;
+  if (ret == ESP_OK) {
+    attempted_open = true;
+    ret = xiaozhi_manager_open_audio_channel();
+  }
+  if (ret == ESP_OK) {
+    int64_t opened_us = esp_timer_get_time();
+    for (;;) {
+      portENTER_CRITICAL(&s_uplink_lock);
+      bool registered = s_state == XIAOZHI_MANAGER_STATE_LISTENING &&
+          speak_cycle_wait(&s_speak_cycle, generation, esp_timer_get_time());
+      bool current = s_speak_cycle.generation == generation &&
+          s_speak_cycle.phase == SPEAK_OPENING;
+      portEXIT_CRITICAL(&s_uplink_lock);
+      if (registered) break;
+      if (!current || esp_timer_get_time() - opened_us >= AUDIO_CHANNEL_READY_WAIT_MS * 1000LL) {
+        ret = ESP_ERR_INVALID_STATE;
+        break;
+      }
+      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
+    }
+  }
+  if (ret == ESP_OK) ret = speak_send(generation, req->text);
+  if (ret == ESP_OK) ret = speak_send(generation, NULL);
+  if (ret != ESP_OK) speak_cancel(SPEAK_OUTCOME_ERROR);
+  else ESP_LOGI(TAG, "Speak cycle=%u submitted; waiting for cloud TTS (not playback confirmed)",
+                (unsigned)generation);
+
+  speak_outcome_t outcome;
+  for (;;) {
+    portENTER_CRITICAL(&s_uplink_lock);
+    bool current = s_speak_cycle.generation == generation &&
+        speak_cycle_busy(&s_speak_cycle);
+    bool expired = speak_cycle_expire(&s_speak_cycle, generation,
+        esp_timer_get_time(), SPEAK_FIRST_TTS_WAIT_US);
+    bool closing = s_speak_cycle.phase == SPEAK_CLOSING;
+    outcome = s_speak_cycle.outcome;
+    portEXIT_CRITICAL(&s_uplink_lock);
+    if (!current) return ESP_ERR_INVALID_STATE;
+    if (expired) ESP_LOGW(TAG, "Speak cycle=%u: no TTS START within first-response budget",
+                          (unsigned)generation);
+    if (closing) break;
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
   }
 
-  /* Start listening so server processes the detect message */
-  ret = esp_xiaozhi_chat_send_start_listening(
-      s_chat_handle, ESP_XIAOZHI_CHAT_LISTENING_MODE_AUTO);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to start listening: %s", esp_err_to_name(ret));
-    return ret;
+  /* Includes partial submission and timeout: detach from the old WS before
+   * admitting any new normal speech or a later FIFO item. No text re-send. */
+  if (attempted_open) {
+    esp_err_t cleanup = speak_transport_reset(generation);
+    if (cleanup != ESP_OK) return cleanup;
   }
-
-  ESP_LOGI(TAG, "Direct text inject: \"%s\" (no wake word)", req->text);
-  /* Mark the coming TTS as injection-triggered so TTS_STOP closes the
-   * audio channel back to CONNECTED (see TTS_STATE_STOP handler). */
-  s_inject_active = true;
-  return ESP_OK;
+  portENTER_CRITICAL(&s_uplink_lock);
+  speak_cycle_release(&s_speak_cycle, generation);
+  portEXIT_CRITICAL(&s_uplink_lock);
+  ESP_LOGI(TAG, "Speak cycle=%u released after cleanup: outcome=%d",
+           (unsigned)generation, (int)outcome);
+  if (outcome == SPEAK_OUTCOME_DONE) return ESP_OK;
+  return outcome == SPEAK_OUTCOME_TIMEOUT ? ESP_ERR_TIMEOUT : ESP_FAIL;
 }
 
 /*---------------------------------------------------------------
@@ -1636,7 +2605,12 @@ esp_err_t xiaozhi_manager_start_listening(int mode) {
                       "Not initialized");
 
   ESP_LOGI(TAG, "Starting listening (mode=%d)", mode);
-  return esp_xiaozhi_chat_send_start_listening(s_chat_handle, mode);
+  esp_xiaozhi_chat_handle_t handle;
+  if (!dialogue_pin(&handle)) return ESP_ERR_INVALID_STATE;
+  esp_err_t ret = chat_listen(mode);
+  if (ret == ESP_OK) uplink_resume();
+  chat_unpin();
+  return ret;
 }
 
 esp_err_t xiaozhi_manager_stop_listening(void) {
@@ -1644,7 +2618,12 @@ esp_err_t xiaozhi_manager_stop_listening(void) {
                       "Not initialized");
 
   ESP_LOGI(TAG, "Stopping listening");
-  return esp_xiaozhi_chat_send_stop_listening(s_chat_handle);
+  esp_xiaozhi_chat_handle_t handle;
+  if (!dialogue_pin(&handle)) return ESP_ERR_INVALID_STATE;
+  uplink_suspend(false);
+  esp_err_t ret = chat_stop_listening();
+  chat_unpin();
+  return ret;
 }
 
 #else /* XIAOZHI_MANAGER_ENABLE == 0 */

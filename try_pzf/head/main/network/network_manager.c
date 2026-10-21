@@ -222,7 +222,8 @@ static esp_err_t mcp_cb_camera_set_quality(const void *args_json, char *response
         }
     }
     esp_err_t ret = camera_stream_set_quality(quality);
-    snprintf(response_buf, response_buf_size, "{\"ok\":%s,\"quality\":%d}", ret == ESP_OK ? "true" : "false", quality);
+    snprintf(response_buf, response_buf_size, "{\"ok\":%s,\"quality\":%d,\"requested_quality\":%d}",
+             ret == ESP_OK ? "true" : "false", ret == ESP_OK ? camera_stream_get_quality() : quality, quality);
     return ret;
 }
 
@@ -332,9 +333,10 @@ static esp_err_t rest_api_camera_quality_handler(httpd_req_t *req)
     }
 
     esp_err_t err = camera_stream_set_quality(quality);
-    char resp[96];
-    snprintf(resp, sizeof(resp), "{\"code\":%d,\"message\":\"%s\",\"data\":{\"quality\":%d}}", err == ESP_OK ? 0 : 1,
-             err == ESP_OK ? "success" : "set quality failed", quality);
+    char resp[128];
+    snprintf(resp, sizeof(resp), "{\"code\":%d,\"message\":\"%s\",\"data\":{\"quality\":%d,\"requested_quality\":%d}}",
+             err == ESP_OK ? 0 : 1, err == ESP_OK ? "success" : "set quality failed",
+             err == ESP_OK ? camera_stream_get_quality() : quality, quality);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, resp);
     return ESP_OK;

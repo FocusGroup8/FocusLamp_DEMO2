@@ -61,6 +61,8 @@ static const char *TAG = "WAKE_WORD";
 static bool s_initialized = false;
 static volatile bool s_detecting = false;
 static volatile bool s_paused = false;
+/* Serialized by the existing model mutex, not a naked cross-task bool. */
+static bool s_regular_pause = false, s_local_audio_pause = false;
 static wake_word_state_t s_state = WAKE_WORD_STATE_IDLE;
 static wake_word_lang_t s_current_lang = WAKE_WORD_LANG_CN;
 
@@ -450,6 +452,7 @@ static void afe_processing_task(void *arg)
             float prob = 0;
             char phrase[256] = {0};
             bool detected = false;
+            bool phrase_missing = false;
             wake_word_lang_t lang = s_current_lang;
             wake_word_detect_cb_t cb = NULL;
             void *ctx = NULL;
@@ -457,13 +460,24 @@ static void afe_processing_task(void *arg)
             if (state == ESP_MN_STATE_DETECTED) {
                 esp_mn_results_t *result = s_mn_handle->get_results(s_mn_data);
                 if (result && result->num > 0) {
-                    detected = true;
                     id = result->command_id[0];
                     prob = result->prob[0];
-                    memcpy(phrase, result->string, sizeof(phrase) - 1);
+                    /* Resolve registration text under the existing model lock;
+                     * MultiNet's result string can be a phoneme sequence. */
+                    for (int i = 0; i < s_stored_command_count; ++i) {
+                        if (s_stored_commands[i].active &&
+                            s_stored_commands[i].lang == lang &&
+                            s_stored_commands[i].command_id == id &&
+                            s_stored_commands[i].phrase[0]) {
+                            strncpy(phrase, s_stored_commands[i].phrase, sizeof(phrase) - 1);
+                            detected = true;
+                            break;
+                        }
+                    }
+                    phrase_missing = !detected;
                     cb = s_config.detect_cb;
                     ctx = s_config.detect_cb_ctx;
-                    s_state = WAKE_WORD_STATE_DETECTED;
+                    if (detected) s_state = WAKE_WORD_STATE_DETECTED;
                 }
             }
             if (state == ESP_MN_STATE_DETECTED || state == ESP_MN_STATE_TIMEOUT)
@@ -476,6 +490,9 @@ static void afe_processing_task(void *arg)
             model_unlock();
 
             /* Callback can reenter pause/resume/language APIs. */
+            if (phrase_missing) {
+                ESP_LOGW(TAG, "Wake phrase missing: lang=%d id=%d; phonemes not forwarded", lang, id);
+            }
             if (detected) {
                 ESP_LOGI(TAG, "Wake word detected: id=%d phrase='%s' prob=%.4f",
                          id, phrase, prob);
@@ -640,6 +657,7 @@ static esp_err_t wake_word_engine_init_locked(const wake_word_engine_config_t *c
     s_stopping = false;
     s_afe_task_exited = false;
     s_detecting = s_paused = s_tts_active = false;
+    s_regular_pause = s_local_audio_pause = false;
     s_barge_in_frames = 0;
     s_barge_in_triggered = false;
     s_stored_command_count = 0;
@@ -715,6 +733,7 @@ esp_err_t wake_word_engine_deinit(void)
     s_stopping = true;
     s_detecting = false;
     s_paused = false;
+    s_regular_pause = s_local_audio_pause = false;
     s_tts_active = false;
     ++s_audio_epoch;
     s_state = WAKE_WORD_STATE_IDLE;
@@ -799,6 +818,7 @@ static esp_err_t wake_word_engine_start_locked(void)
 
     s_detecting = true;
     s_paused = false;
+    s_regular_pause = s_local_audio_pause = false;
     s_state = WAKE_WORD_STATE_LISTENING;
 
     ESP_LOGI(TAG, "Wake word detection started (lang=%s)", lang_to_string(s_current_lang));
@@ -825,6 +845,7 @@ static esp_err_t wake_word_engine_stop_locked(void)
 
     s_detecting = false;
     s_paused = false;
+    s_regular_pause = s_local_audio_pause = false;
     s_state = WAKE_WORD_STATE_IDLE;
 
     ESP_LOGI(TAG, "Wake word detection stopped");
@@ -862,6 +883,7 @@ esp_err_t wake_word_engine_pause(void)
     model_lock();
     if (s_stopping) { model_unlock(); return ESP_ERR_INVALID_STATE; }
     esp_err_t result = wake_word_engine_pause_locked();
+    if (result == ESP_OK) s_regular_pause = true;
     model_unlock();
     return result;
 }
@@ -893,7 +915,30 @@ esp_err_t wake_word_engine_resume(void)
     if (!ensure_mutex()) return ESP_ERR_NO_MEM;
     model_lock();
     if (s_stopping) { model_unlock(); return ESP_ERR_INVALID_STATE; }
-    esp_err_t result = wake_word_engine_resume_locked();
+    s_regular_pause = false;
+    esp_err_t result = s_local_audio_pause ? ESP_OK : wake_word_engine_resume_locked();
+    model_unlock();
+    return result;
+}
+
+esp_err_t wake_word_engine_pause_local_audio(void)
+{
+    if (!ensure_mutex()) return ESP_ERR_NO_MEM;
+    model_lock();
+    if (s_stopping || s_local_audio_pause) { model_unlock(); return ESP_ERR_INVALID_STATE; }
+    esp_err_t result = wake_word_engine_pause_locked();
+    if (result == ESP_OK) s_local_audio_pause = true;
+    model_unlock();
+    return result;
+}
+
+esp_err_t wake_word_engine_resume_local_audio(void)
+{
+    if (!ensure_mutex()) return ESP_ERR_NO_MEM;
+    model_lock();
+    if (s_stopping) { model_unlock(); return ESP_ERR_INVALID_STATE; }
+    s_local_audio_pause = false;
+    esp_err_t result = s_regular_pause ? ESP_OK : wake_word_engine_resume_locked();
     model_unlock();
     return result;
 }

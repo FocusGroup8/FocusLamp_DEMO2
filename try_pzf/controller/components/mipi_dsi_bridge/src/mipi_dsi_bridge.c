@@ -7,6 +7,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <inttypes.h>
+
+#include "cJSON.h"
 
 #include "esp_check.h"
 #include "esp_http_client.h"
@@ -102,8 +106,78 @@ mcp_tool_eyes_get_expression(const esp_mcp_property_list_t *properties);
  * @param resp_size  Response buffer size
  * @return ESP_OK on HTTP 200, error code otherwise
  *-------------------------------------------------------------*/
-static esp_err_t http_post(const char *path, const char *post_body,
-                           char *resp_buf, int resp_size) {
+typedef struct {
+  char *body;
+  size_t capacity;
+  size_t stored;
+  size_t received;
+  bool overflow;
+  bool crc_present;
+  bool crc_invalid;
+  char crc_header[8];
+} bridge_response_t;
+
+/* perform() consumes the body. Capture response data during its callbacks,
+ * never with read()/get_header() afterwards (get_header reads request headers). */
+static esp_err_t bridge_http_event(esp_http_client_event_t *event) {
+  bridge_response_t *response = event->user_data;
+  if (event->event_id == HTTP_EVENT_ON_HEADER && event->header_key &&
+      strcasecmp(event->header_key, "X-CRC16") == 0) {
+    response->crc_present = true;
+    size_t length = event->header_value ? strlen(event->header_value) : 0;
+    if (length == 0 || length >= sizeof(response->crc_header)) {
+      response->crc_invalid = true;
+    } else {
+      memcpy(response->crc_header, event->header_value, length + 1);
+    }
+  } else if (event->event_id == HTTP_EVENT_ON_DATA && event->data_len > 0) {
+    size_t length = (size_t)event->data_len;
+    response->received += length;
+    if (response->body && !response->overflow) {
+      if (length > response->capacity - 1 - response->stored) {
+        response->overflow = true;
+      } else {
+        memcpy(response->body + response->stored, event->data, length);
+        response->stored += length;
+        response->body[response->stored] = '\0';
+      }
+    }
+  }
+  return ESP_OK;
+}
+
+static void diagnose_response_crc(const bridge_response_t *response) {
+  if (!response->crc_present || !response->body || response->overflow) {
+    return;
+  }
+  char *end = NULL;
+  unsigned long expected = strtoul(response->crc_header, &end, 16);
+  if (response->crc_invalid || strlen(response->crc_header) != 4 ||
+      !end || *end != '\0' || expected > UINT16_MAX ||
+      strspn(response->crc_header, "0123456789abcdefABCDEF") != 4) {
+    ESP_LOGW(TAG, "Invalid response X-CRC16 header (diagnostic only)");
+    return;
+  }
+  uint16_t actual = crc16_ccitt((const uint8_t *)response->body,
+                              (int)response->stored);
+  if ((uint16_t)expected != actual) {
+    ESP_LOGW(TAG, "Response CRC mismatch: recv=%04X calc=%04X (diagnostic only)",
+             (unsigned)expected, actual);
+  }
+}
+
+/* Only content-dependent queries reject collection overflow. Commands retain
+ * their HTTP success semantics but never expose a truncated response. */
+static esp_err_t http_request(esp_http_client_method_t method, const char *path,
+                              const char *post_body, char *resp_buf,
+                              int resp_size, bool require_body) {
+  if ((resp_buf && resp_size <= 0) ||
+      (require_body && (!resp_buf || resp_size <= 0))) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  if (resp_buf) {
+    resp_buf[0] = '\0';
+  }
   if (!s_initialized) {
     ESP_LOGE(TAG, "Bridge not initialized");
     return ESP_ERR_INVALID_STATE;
@@ -117,10 +191,20 @@ static esp_err_t http_post(const char *path, const char *post_body,
   char url[128];
   snprintf(url, sizeof(url), "http://%s:%u%s", peer.host, (unsigned)peer.port, path);
 
+  bridge_response_t response = {
+      .body = resp_buf,
+      .capacity = resp_buf ? (size_t)resp_size : 0,
+  };
+
   esp_http_client_config_t config = {
       .url = url,
-      .method = HTTP_METHOD_POST,
+      .method = method,
       .timeout_ms = MIPI_DSI_BRIDGE_HTTP_TIMEOUT_MS,
+      .event_handler = bridge_http_event,
+      .user_data = &response,
+      /* A bridge endpoint must answer directly, not redirect to another host
+       * or mix multiple response bodies into this collection context. */
+      .disable_auto_redirect = true,
   };
 
   esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -129,104 +213,71 @@ static esp_err_t http_post(const char *path, const char *post_body,
     return ESP_ERR_NO_MEM;
   }
 
-  esp_http_client_set_header(client, "Content-Type", "application/json");
+  esp_err_t err = ESP_OK;
+  if (method == HTTP_METHOD_POST) {
+    err = esp_http_client_set_header(client, "Content-Type", "application/json");
+  }
 
-  if (post_body) {
-    esp_http_client_set_post_field(client, post_body, strlen(post_body));
+  if (err == ESP_OK && post_body) {
+    err = esp_http_client_set_post_field(client, post_body, strlen(post_body));
     /* CRC16 checksum of request body for integrity verification */
     uint16_t crc = crc16_ccitt((const uint8_t *)post_body, strlen(post_body));
     char crc_hdr[8];
     snprintf(crc_hdr, sizeof(crc_hdr), "%04X", crc);
-    esp_http_client_set_header(client, "X-CRC16", crc_hdr);
+    if (err == ESP_OK) {
+      err = esp_http_client_set_header(client, "X-CRC16", crc_hdr);
+    }
   }
 
-  esp_err_t err = esp_http_client_perform(client);
-  int status_code = 0;
-
   if (err == ESP_OK) {
-    status_code = esp_http_client_get_status_code(client);
-    int content_length = esp_http_client_get_content_length(client);
-
-    if (resp_buf && resp_size > 0 && content_length > 0) {
-      int read_len = esp_http_client_read(client, resp_buf, resp_size - 1);
-      if (read_len >= 0) {
-        resp_buf[read_len] = '\0';
-        /* Verify response CRC16 if X-CRC16 header is present */
-        char *resp_crc_val = NULL;
-        if (esp_http_client_get_header(client, "X-CRC16", &resp_crc_val) ==
-                ESP_OK &&
-            resp_crc_val != NULL) {
-          uint16_t recv_crc = (uint16_t)strtol(resp_crc_val, NULL, 16);
-          uint16_t calc_crc = crc16_ccitt((const uint8_t *)resp_buf, read_len);
-          if (recv_crc != calc_crc) {
-            ESP_LOGW(TAG, "Response CRC mismatch: recv=%04X calc=%04X",
-                     recv_crc, calc_crc);
-          }
-        }
-      }
-    }
-
-    if (status_code != 200) {
-      ESP_LOGW(TAG, "HTTP POST %s -> %d", path, status_code);
+    err = esp_http_client_perform(client);
+  }
+  int status_code = esp_http_client_get_status_code(client);
+  int64_t content_length = esp_http_client_get_content_length(client);
+  bool complete = esp_http_client_is_complete_data_received(client);
+  bool chunked = esp_http_client_is_chunked_response(client);
+  ESP_LOGI(TAG, "HTTP %s %s: status=%d content_length=%" PRId64
+                " chunked=%d received=%u stored=%u overflow=%d complete=%d",
+           method == HTTP_METHOD_POST ? "POST" : "GET", path, status_code,
+           content_length, chunked, (unsigned)response.received,
+           (unsigned)response.stored, response.overflow, complete);
+  if (err == ESP_OK && (status_code != 200 || !complete)) {
+    err = ESP_ERR_INVALID_RESPONSE;
+  }
+  if (response.overflow) {
+    ESP_LOGW(TAG, "Response collection overflow: %s (%u bytes, capacity=%u)",
+             path, (unsigned)response.received, (unsigned)response.capacity);
+    if (require_body && err == ESP_OK) {
       err = ESP_ERR_INVALID_RESPONSE;
     }
-  } else {
-    ESP_LOGW(TAG, "HTTP POST %s failed: %s", path, esp_err_to_name(err));
+  }
+  if (err == ESP_OK && !response.overflow) {
+    diagnose_response_crc(&response);
+  }
+  if (resp_buf && (err != ESP_OK || response.overflow)) {
+    resp_buf[0] = '\0';
+  }
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "HTTP %s failed: %s", path, esp_err_to_name(err));
   }
 
   esp_http_client_cleanup(client);
   return err;
 }
 
+static esp_err_t http_post(const char *path, const char *post_body,
+                           char *resp_buf, int resp_size) {
+  return http_request(HTTP_METHOD_POST, path, post_body, resp_buf, resp_size,
+                      false);
+}
+
 /*---------------------------------------------------------------
  * HTTP GET helper for ping/status check
  *-------------------------------------------------------------*/
-static esp_err_t http_get(const char *path, char *resp_buf, int resp_size) {
-  if (!s_initialized) {
-    return ESP_ERR_INVALID_STATE;
-  }
-
-  focuslamp_endpoint_t peer;
-  if (focuslamp_discovery_get_peer(FOCUSLAMP_ROLE_HEAD, &peer) != ESP_OK) {
-    return ESP_ERR_NOT_FOUND;
-  }
-
-  char url[128];
-  snprintf(url, sizeof(url), "http://%s:%u%s", peer.host, (unsigned)peer.port, path);
-
-  esp_http_client_config_t config = {
-      .url = url,
-      .method = HTTP_METHOD_GET,
-      .timeout_ms = MIPI_DSI_BRIDGE_HTTP_TIMEOUT_MS,
-  };
-
-  esp_http_client_handle_t client = esp_http_client_init(&config);
-  if (!client) {
-    return ESP_ERR_NO_MEM;
-  }
-
-  esp_err_t err = esp_http_client_perform(client);
-  int status_code = 0;
-
-  if (err == ESP_OK) {
-    status_code = esp_http_client_get_status_code(client);
-    int content_length = esp_http_client_get_content_length(client);
-
-    if (resp_buf && resp_size > 0 && content_length > 0) {
-      int read_len = esp_http_client_read(client, resp_buf, resp_size - 1);
-      if (read_len >= 0) {
-        resp_buf[read_len] = '\0';
-      }
-    }
-
-    if (status_code != 200) {
-      ESP_LOGW(TAG, "HTTP GET %s -> %d", path, status_code);
-      err = ESP_ERR_INVALID_RESPONSE;
-    }
-  }
-
-  esp_http_client_cleanup(client);
-  return err;
+static esp_err_t http_get(const char *path, char *resp_buf, int resp_size,
+                          bool require_body) {
+  return http_request(HTTP_METHOD_GET, path, NULL, resp_buf, resp_size,
+                      require_body);
 }
 
 /*---------------------------------------------------------------
@@ -510,13 +561,22 @@ mcp_tool_touch_wake(const esp_mcp_property_list_t *properties) {
   ESP_LOGI(TAG, "[MCP] mipi_dsi.touch.wake");
 
   char resp[128] = {0};
-  esp_err_t ret = http_get("/api/touch/wake", resp, sizeof(resp));
+  esp_err_t ret = http_get("/api/touch/wake", resp, sizeof(resp), true);
 
   if (ret == ESP_OK) {
     ESP_LOGI(TAG, "Touch wake response: %s", resp);
-    /* Parse wake_pending from JSON response */
-    /* Simple string search for "wake_pending":true */
-    bool wake_pending = (strstr(resp, "\"wake_pending\":true") != NULL);
+    cJSON *root = cJSON_ParseWithOpts(resp, NULL, true);
+    const cJSON *code = cJSON_GetObjectItemCaseSensitive(root, "code");
+    const cJSON *data = cJSON_GetObjectItemCaseSensitive(root, "data");
+    const cJSON *pending = cJSON_GetObjectItemCaseSensitive(data, "wake_pending");
+    if (!cJSON_IsObject(root) || !cJSON_IsNumber(code) || code->valuedouble != 0 ||
+        !cJSON_IsObject(data) || !cJSON_IsBool(pending)) {
+      ESP_LOGW(TAG, "Invalid touch wake response JSON or wake_pending field");
+      cJSON_Delete(root);
+      return esp_mcp_value_create_bool(false);
+    }
+    bool wake_pending = cJSON_IsTrue(pending);
+    cJSON_Delete(root);
     return esp_mcp_value_create_bool(wake_pending);
   }
   return esp_mcp_value_create_bool(false);
@@ -528,7 +588,7 @@ mcp_tool_touch_brightness(const esp_mcp_property_list_t *properties) {
   ESP_LOGI(TAG, "[MCP] mipi_dsi.touch.brightness");
 
   char resp[128] = {0};
-  esp_err_t ret = http_get("/api/touch/brightness", resp, sizeof(resp));
+  esp_err_t ret = http_get("/api/touch/brightness", resp, sizeof(resp), false);
 
   if (ret == ESP_OK) {
     ESP_LOGI(TAG, "Touch brightness response: %s", resp);
@@ -632,25 +692,24 @@ mcp_tool_eyes_get_expression(const esp_mcp_property_list_t *properties) {
   ESP_LOGI(TAG, "[MCP] mipi_dsi.eyes.get_expression");
 
   char resp[128] = {0};
-  esp_err_t ret = http_get("/api/eyes/expression", resp, sizeof(resp));
+  esp_err_t ret = http_get("/api/eyes/expression", resp, sizeof(resp), true);
 
   if (ret == ESP_OK) {
     ESP_LOGI(TAG, "Get expression response: %s", resp);
-    /* Simple extraction: look for "expression":"xxx" in JSON */
-    char *start = strstr(resp, "\"expression\":\"");
-    if (start) {
-      start += strlen("\"expression\":\"");
-      char *end = strchr(start, '"');
-      if (end) {
-        int len = end - start;
-        char expr[32] = {0};
-        if (len < (int)sizeof(expr)) {
-          memcpy(expr, start, len);
-          return esp_mcp_value_create_string(expr);
-        }
-      }
+    cJSON *root = cJSON_ParseWithOpts(resp, NULL, true);
+    const cJSON *code = cJSON_GetObjectItemCaseSensitive(root, "code");
+    const cJSON *data = cJSON_GetObjectItemCaseSensitive(root, "data");
+    const cJSON *expression = cJSON_GetObjectItemCaseSensitive(data, "expression");
+    if (!cJSON_IsObject(root) || !cJSON_IsNumber(code) || code->valuedouble != 0 ||
+        !cJSON_IsObject(data) || !cJSON_IsString(expression) ||
+        !expression->valuestring || !expression->valuestring[0]) {
+      ESP_LOGW(TAG, "Invalid eyes expression response JSON or expression field");
+      cJSON_Delete(root);
+      return esp_mcp_value_create_string("");
     }
-    return esp_mcp_value_create_string("unknown");
+    esp_mcp_value_t result = esp_mcp_value_create_string(expression->valuestring);
+    cJSON_Delete(root);
+    return result;
   }
   return esp_mcp_value_create_string("");
 }
@@ -913,7 +972,7 @@ esp_err_t mipi_dsi_bridge_ping(void) {
                       "Not initialized");
 
   char resp[128] = {0};
-  esp_err_t ret = http_get("/api/status", resp, sizeof(resp));
+  esp_err_t ret = http_get("/api/status", resp, sizeof(resp), false);
 
   if (ret == ESP_OK) {
     ESP_LOGI(TAG, "Ping successful, status: %s", resp);

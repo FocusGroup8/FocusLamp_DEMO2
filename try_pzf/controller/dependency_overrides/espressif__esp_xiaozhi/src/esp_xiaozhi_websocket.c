@@ -8,6 +8,9 @@
 #include <esp_log.h>
 #include <esp_websocket_client.h>
 #include <esp_crt_bundle.h>
+#include <esp_timer.h>
+#include <inttypes.h>
+#include <limits.h>
 
 #include "esp_xiaozhi_keystore.h"
 #include "esp_xiaozhi_board.h"
@@ -30,6 +33,10 @@ typedef struct esp_xiaozhi_websocket_s {
 } esp_xiaozhi_websocket_t;
 
 static const char *TAG = "ESP_XIAOZHI_WEBSOCKET";
+
+/* Trial lock/poll timeout, NOT a strict end-to-end TLS write deadline. */
+#define XIAOZHI_AUDIO_SEND_TIMEOUT_MS 10000
+#define XIAOZHI_AUDIO_SEND_SLOW_MS 1000
 
 static esp_err_t esp_xiaozhi_websocket_map_missing_config_error(esp_err_t err, const char *field_name)
 {
@@ -312,20 +319,31 @@ esp_err_t esp_xiaozhi_websocket_send_binary(esp_xiaozhi_websocket_handle_t handl
 {
     ESP_RETURN_ON_FALSE(handle, ESP_ERR_INVALID_ARG, TAG, "Invalid handle");
     ESP_RETURN_ON_FALSE(data, ESP_ERR_INVALID_ARG, TAG, "Invalid data");
-    ESP_RETURN_ON_FALSE(data_len > 0, ESP_ERR_INVALID_ARG, TAG, "Invalid data_len");
+    ESP_RETURN_ON_FALSE(data_len > 0 && data_len <= INT_MAX, ESP_ERR_INVALID_ARG, TAG, "Invalid data_len");
 
     esp_xiaozhi_websocket_t *websocket = (esp_xiaozhi_websocket_t *)handle;
     ESP_RETURN_ON_FALSE(websocket->websocket_client, ESP_ERR_INVALID_STATE, TAG, "Websocket client not initialized");
     ESP_RETURN_ON_FALSE(websocket->websocket_connected, ESP_ERR_INVALID_STATE, TAG, "Websocket is not connected");
 
-    int sent = esp_websocket_client_send_bin(websocket->websocket_client, (const char *)data, data_len, portMAX_DELAY);
-    if (sent < 0) {
+    int64_t started_us = esp_timer_get_time();
+    int sent = esp_websocket_client_send_bin(websocket->websocket_client, (const char *)data,
+                                            (int)data_len, pdMS_TO_TICKS(XIAOZHI_AUDIO_SEND_TIMEOUT_MS));
+    int64_t elapsed_ms = (esp_timer_get_time() - started_us) / 1000;
+    if (sent != (int)data_len) {
+        /* Log before the existing callback: event delivery/cleanup can also
+         * wait. Never report a short/zero write as successful audio delivery. */
+        ESP_LOGE(TAG, "Audio binary send incomplete: sent=%d requested=%u elapsed_ms=%" PRIi64
+                 " timeout_ms=%d; no retry",
+                 sent, (unsigned)data_len, elapsed_ms, XIAOZHI_AUDIO_SEND_TIMEOUT_MS);
         websocket->websocket_connected = false;
         if (websocket->callbacks.on_disconnected_callback) {
             websocket->callbacks.on_disconnected_callback((esp_xiaozhi_transport_handle_t)websocket->transport_handle);
         }
-        ESP_LOGE(TAG, "Failed to send binary frame");
         return ESP_FAIL;
+    }
+    if (elapsed_ms >= XIAOZHI_AUDIO_SEND_SLOW_MS) {
+        ESP_LOGW(TAG, "Audio binary send slow: sent=%d requested=%u elapsed_ms=%" PRIi64
+                 " timeout_ms=%d", sent, (unsigned)data_len, elapsed_ms, XIAOZHI_AUDIO_SEND_TIMEOUT_MS);
     }
     return ESP_OK;
 }

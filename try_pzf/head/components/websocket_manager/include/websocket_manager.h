@@ -183,7 +183,8 @@ esp_err_t ws_manager_server_send_camera_text(const char *data, int len);
  * @brief Send a frame_header text frame + JPEG binary frame to the /camera
  *        client as one atomic batch (single s_server_mutex critical section).
  *
- * Both frames use the raw blocking send() path so they cannot interleave with
+ * Both frames use per-call nonblocking send() with a shared trial deadline,
+ * under the mutex so they cannot interleave with
  * frames from other tasks on the same socket. The algorithm client pairs the
  * text frame with the following binary frame to obtain the frame sequence.
  *
@@ -191,7 +192,9 @@ esp_err_t ws_manager_server_send_camera_text(const char *data, int len);
  * @param text_len  text payload length
  * @param bin       JPEG binary payload
  * @param bin_len   binary payload length
- * @return ESP_OK on success, ESP_ERR_NOT_FOUND if no /camera client is connected
+ * @return ESP_OK on success; ESP_ERR_NOT_FOUND if no camera client;
+ *         ESP_ERR_TIMEOUT for budget exhaustion with zero group bytes (keeps
+ *         connection); ESP_FAIL for other send failures (closes connection).
  */
 esp_err_t ws_manager_server_send_camera_pair(const char *text, int text_len, const char *bin, int bin_len);
 
@@ -201,6 +204,11 @@ esp_err_t ws_manager_server_send_camera_pair(const char *text, int text_len, con
  * @return Number of connected clients
  */
 int ws_manager_server_get_client_count(void);
+
+/** Camera-only state snapshot. Uses a short state lock, never the send mutex.
+ * session_id changes on acceptance; unrelated WS connections do not affect it.
+ */
+ws_camera_client_state_t ws_manager_server_get_camera_state(void);
 
 /**
  * @brief Get WebSocket server send statistics
@@ -214,7 +222,7 @@ int ws_manager_server_get_client_count(void);
 esp_err_t ws_manager_server_get_send_stats(ws_send_stats_t *stats);
 
 /**
- * @brief Reset send statistics counters
+ * @brief Reset window send statistics, preserving camera_budget_timeouts
  *
  * Useful for periodic sampling: read stats, reset, wait interval, read again
  * to compute delta-based metrics (e.g., failures per second).

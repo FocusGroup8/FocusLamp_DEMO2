@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <unistd.h>
 
 /* Callback storage */
@@ -46,6 +47,18 @@ static void camera_client_reset_failures(void);
 
 /* EWMA smoothing factor for send duration (α=0.2, ~5 samples time constant) */
 #define WS_SEND_DURATION_EWMA_ALPHA 0.2f
+#define CAMERA_SEND_BUDGET_US (1500 * 1000) /* Trial budget, shared by metadata + JPEG. */
+
+typedef enum {
+    WS_SEND_COMPLETE = 0,
+    WS_SEND_BUDGET_TIMEOUT,
+    WS_SEND_CONN_ERROR,
+} ws_send_reason_t;
+
+typedef struct {
+    size_t bytes; /* All wire bytes: both WS headers and both payloads. */
+    ws_send_reason_t reason;
+} ws_send_progress_t;
 
 typedef struct {
     uint8_t data[WS_FRAME_BUF_SIZE];
@@ -69,6 +82,10 @@ static struct {
     int64_t last_send_duration_us; /* Last send duration (queue to completion) */
     int64_t avg_send_duration_us;  /* EWMA of send duration */
 } s_send_stats;
+
+/* Never cleared by window resets or server restarts: a stream observer must
+ * still see a timeout after the failed camera connection has been closed. */
+static atomic_uint s_camera_budget_timeouts_total = 0;
 
 /* Acquire a free buffer from the pool. Returns NULL if all in use. */
 static ws_frame_buf_t *ws_frame_pool_acquire(void)
@@ -323,13 +340,26 @@ static SemaphoreHandle_t s_server_mutex = NULL;
  * Dead-connection fast reclaim: when the camera client disappears (TCP RST /
  * half-open), TCP keepalive takes up to ~7s to detect it. During that window
  * s_camera_client_fd still holds the dead fd and new /camera connections are
- * rejected with 403 (observed as "connection fails / black screen"). To fix
+ * rejected after upgrade (observed as "connection fails / black screen"). To fix
  * this, consecutive send failures on the camera fd mark it "dead"; the slot
  * is then reclaimed immediately (httpd_sess_trigger_close) so the next
  * /camera connection is accepted. Transient congestion (EAGAIN/TIMEOUT) does
  * NOT count toward the dead mark. */
 #define WS_CAMERA_MAX_CLIENTS 1
 static int s_camera_client_fd = -1;
+static portMUX_TYPE s_camera_state_lock = portMUX_INITIALIZER_UNLOCKED;
+static ws_camera_client_state_t s_camera_state;
+
+/* Keep observation state consistent without holding a spinlock during I/O.
+ * Existing socket ownership/close handling stays with HTTPD. */
+static void camera_client_set_fd(int fd)
+{
+    portENTER_CRITICAL(&s_camera_state_lock);
+    s_camera_client_fd = fd;
+    s_camera_state.connected = fd >= 0;
+    if (fd >= 0) ++s_camera_state.session_id;
+    portEXIT_CRITICAL(&s_camera_state_lock);
+}
 /* The DEMO2 deployment has one result producer. Reconnect replaces it rather
  * than consuming another slot until TCP detects the previous connection. */
 static int s_algo_client_fd = -1;
@@ -353,7 +383,7 @@ static void camera_client_kick(const char *reason)
     if (s_server) {
         httpd_sess_trigger_close(s_server, fd);
     }
-    s_camera_client_fd  = -1;
+    camera_client_set_fd(-1);
     s_camera_fail_count = 0;
 }
 
@@ -394,10 +424,15 @@ static uint8_t s_recv_buf[WS_MANAGER_BUFFER_SIZE];
 /* Maximum frame size: reject frames larger than this */
 #define WS_MANAGER_MAX_FRAME_SIZE (16 * 1024) /* 16KB */
 
-static bool track_client_add(int fd)
+static bool track_client_add(int fd, bool is_camera)
 {
     if (s_server_mutex) {
         xSemaphoreTake(s_server_mutex, portMAX_DELAY);
+    }
+    if (is_camera && s_camera_client_fd >= 0) {
+        ESP_LOGW(TAG, "Server: /camera slot occupied at admission fd=%d current=%d", fd, s_camera_client_fd);
+        if (s_server_mutex) xSemaphoreGive(s_server_mutex);
+        return false;
     }
     /* Memory water level check */
     if (esp_get_free_heap_size() < WS_MANAGER_MEM_WATERMARK) {
@@ -408,7 +443,16 @@ static bool track_client_add(int fd)
         return false;
     }
     bool accepted = s_client_count < WS_MANAGER_SERVER_MAX_CONN;
-    if (accepted) s_client_fds[s_client_count++] = fd;
+    if (accepted) {
+        s_client_fds[s_client_count++] = fd;
+        /* Publish the camera slot under the SAME mutex used by frame sends
+         * and removal. A sender must never observe the gap between tracking
+         * admission and publishing the new socket. */
+        if (is_camera) {
+            camera_client_set_fd(fd);
+            camera_client_reset_failures();
+        }
+    }
     if (s_server_mutex) {
         xSemaphoreGive(s_server_mutex);
     }
@@ -433,7 +477,7 @@ static void track_client_remove(int fd)
     }
     /* Also clear camera client tracking */
     if (s_camera_client_fd == fd) {
-        s_camera_client_fd = -1;
+        camera_client_set_fd(-1);
         ESP_LOGI(TAG, "Server: /camera client slot released (fd=%d)", fd);
     }
     if (s_algo_client_fd == fd) {
@@ -493,7 +537,7 @@ static esp_err_t ws_session_open_cb(httpd_handle_t hd, int sockfd)
      * Without keepalive, a half-open connection (e.g., client lost WiFi)
      * can persist for 30+ seconds before TCP detects it. During this time,
      * s_camera_client_fd still holds the old fd, and new connections are
-     * rejected with 403, making auto-reconnect appear broken.
+     * rejected after upgrade, making auto-reconnect appear broken.
      * With keepalive idle=3s, interval=2s, count=2, a dead connection
      * is detected in ~7 seconds. */
     int keepalive = 1;
@@ -517,18 +561,47 @@ static esp_err_t ws_session_open_cb(httpd_handle_t hd, int sockfd)
 }
 
 static esp_err_t ws_send_ws_frame(int client_fd, uint8_t opcode, const uint8_t *data,
-                                 size_t len, int64_t send_start_us);
+                                 size_t len, int64_t send_start_us, ws_send_progress_t *group);
+
+/* URI matching in HTTPD ignores the query string. Keep endpoint ownership
+ * consistent with that routing decision, e.g. /camera?client=demo. */
+static bool ws_uri_is(const char *uri, const char *path)
+{
+    size_t len = strlen(path);
+    return strncmp(uri, path, len) == 0 && (uri[len] == '\0' || uri[len] == '?');
+}
+
+/* IDF has already marked a received Close (including synthetic Close on EOF)
+ * before calling this handler. Let request cleanup own the close, rather
+ * than also forcing immediate deletion via an error return. */
+static esp_err_t ws_finish_close(httpd_req_t *req)
+{
+    int fd = httpd_req_to_sockfd(req);
+    xSemaphoreTake(s_server_mutex, portMAX_DELAY);
+    if (s_camera_client_fd == fd) {
+        camera_client_set_fd(-1);
+        camera_client_reset_failures();
+    }
+    xSemaphoreGive(s_server_mutex);
+    return ESP_OK;
+}
 
 static esp_err_t ws_server_handler(httpd_req_t *req)
 {
     if (req->method == HTTP_GET) {
-        /* Handshake complete - new client connected */
         int fd = httpd_req_to_sockfd(req);
+        /* IDF also calls this GET handler when no upgrade was requested.
+         * Only a completed WebSocket handshake may consume a WS slot. */
+        if (httpd_ws_get_fd_info(req->handle, fd) != HTTPD_WS_CLIENT_WEBSOCKET) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "WebSocket upgrade required");
+        }
+        bool is_camera = ws_uri_is(req->uri, "/camera");
+        bool is_algo = ws_uri_is(req->uri, "/algo");
 
         /* Camera stream client limit: reject if /camera already occupied by a
          * healthy client; replace the client when the slot is held by a dead
          * one (send-failure threshold reached) so reconnects never stall. */
-        if (strcmp(req->uri, "/camera") == 0) {
+        if (is_camera) {
             if (s_camera_client_fd >= 0 && s_camera_fail_count < WS_CAMERA_FAIL_KICK_THRESHOLD) {
                 ESP_LOGW(TAG, "Server: rejecting /camera client fd=%d (already occupied by fd=%d)", fd,
                          s_camera_client_fd);
@@ -541,7 +614,7 @@ static esp_err_t ws_server_handler(httpd_req_t *req)
                 camera_client_kick("replaced by new /camera client");
                 track_client_remove(old_fd);
             }
-        } else if (strcmp(req->uri, "/algo") == 0) {
+        } else if (is_algo) {
             if (s_algo_client_fd >= 0 && s_algo_client_fd != fd) {
                 int old_fd = s_algo_client_fd;
                 esp_err_t close_ret = httpd_sess_trigger_close(s_server, old_fd);
@@ -555,11 +628,8 @@ static esp_err_t ws_server_handler(httpd_req_t *req)
             }
         }
 
-        if (!track_client_add(fd)) return ESP_FAIL;
-        if (strcmp(req->uri, "/camera") == 0) {
-            s_camera_client_fd = fd;
-            camera_client_reset_failures();
-        } else if (strcmp(req->uri, "/algo") == 0) s_algo_client_fd = fd;
+        if (!track_client_add(fd, is_camera)) return ESP_FAIL;
+        if (is_algo) s_algo_client_fd = fd;
         ESP_LOGI(TAG, "Server: new %s client connected, fd=%d tracked=%d/%d", req->uri,
                  fd, s_client_count, WS_MANAGER_SERVER_MAX_CONN);
         dispatch_event(WS_MANAGER_EVENT_SERVER_CONNECT, NULL);
@@ -576,7 +646,7 @@ static esp_err_t ws_server_handler(httpd_req_t *req)
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Server: recv frame len failed: fd=%d error=%s errno=%d",
                  httpd_req_to_sockfd(req), esp_err_to_name(ret), errno);
-        return ret;
+        return ws_pkt.type == HTTPD_WS_TYPE_CLOSE ? ws_finish_close(req) : ret;
     }
 
     /* /camera owns control frames so IDF's automatic Pong cannot interleave
@@ -584,11 +654,15 @@ static esp_err_t ws_server_handler(httpd_req_t *req)
     if (ws_pkt.type == HTTPD_WS_TYPE_PING || ws_pkt.type == HTTPD_WS_TYPE_PONG ||
         ws_pkt.type == HTTPD_WS_TYPE_CLOSE) {
         uint8_t payload[125];
-        if (ws_pkt.len > sizeof(payload) || !ws_pkt.final) return ESP_FAIL;
+        if (ws_pkt.len > sizeof(payload) || !ws_pkt.final) {
+            return ws_pkt.type == HTTPD_WS_TYPE_CLOSE ? ws_finish_close(req) : ESP_FAIL;
+        }
         if (ws_pkt.len) {
             ws_pkt.payload = payload;
             ret = httpd_ws_recv_frame(req, &ws_pkt, sizeof(payload));
-            if (ret != ESP_OK) return ret;
+            if (ret != ESP_OK) {
+                return ws_pkt.type == HTTPD_WS_TYPE_CLOSE ? ws_finish_close(req) : ret;
+            }
         }
         if (ws_pkt.type == HTTPD_WS_TYPE_PONG) return ESP_OK;
         int fd = httpd_req_to_sockfd(req);
@@ -596,11 +670,15 @@ static esp_err_t ws_server_handler(httpd_req_t *req)
         ret = fd == s_camera_client_fd
             ? ws_send_ws_frame(fd, ws_pkt.type == HTTPD_WS_TYPE_PING
                                      ? HTTPD_WS_TYPE_PONG : HTTPD_WS_TYPE_CLOSE,
-                               payload, ws_pkt.len, esp_timer_get_time())
+                               payload, ws_pkt.len, esp_timer_get_time(), NULL)
             : ESP_ERR_INVALID_STATE;
+        if (ws_pkt.type == HTTPD_WS_TYPE_CLOSE && s_camera_client_fd == fd) {
+            camera_client_set_fd(-1);
+            camera_client_reset_failures();
+        }
         xSemaphoreGive(s_server_mutex);
-        /* Returning an error closes the session after replying to Close. */
-        return ws_pkt.type == HTTPD_WS_TYPE_CLOSE ? ESP_FAIL : ret;
+        /* A Close send failure still has IDF's pending Close cleanup owner. */
+        return ws_pkt.type == HTTPD_WS_TYPE_CLOSE ? ESP_OK : ret;
     }
 
     if (ws_pkt.len > 0) {
@@ -794,7 +872,7 @@ esp_err_t ws_manager_server_stop(void)
     s_server           = NULL;
     s_server_running   = false;
     s_client_count     = 0;
-    s_camera_client_fd = -1;
+    camera_client_set_fd(-1);
     s_algo_client_fd   = -1;
 
     if (s_server_mutex) {
@@ -836,43 +914,66 @@ esp_err_t ws_manager_server_send_text(int client_fd, const char *data, int len)
     return httpd_ws_send_frame_async(s_server, client_fd, &ws_pkt);
 }
 
-/* Raw blocking send with partial-write handling and a total-timeout bound.
- * httpd's WS send path calls send_fn once and treats a partial write as
- * success, which truncates frames; here we loop until the whole buffer is
- * sent. Returns true on success, false on connection error or after 5s of
- * sustained congestion (so the camera stream task cannot block forever). */
-static bool ws_raw_send_all(int fd, const uint8_t *data, size_t len, int64_t send_start_us)
+/* Per-call nonblocking writes preserve HTTPD's socket mode. The caller shares
+ * one deadline across metadata and JPEG. Count progress even on failure. */
+static ws_send_reason_t ws_raw_send_all(int fd, const uint8_t *data, size_t len,
+                                        int64_t send_start_us, ws_send_progress_t *progress)
 {
     size_t sent = 0;
     while (sent < len) {
-        int n = send(fd, data + sent, len - sent, MSG_NOSIGNAL);
+        int64_t remaining_us = CAMERA_SEND_BUDGET_US - (esp_timer_get_time() - send_start_us);
+        if (remaining_us <= 0) {
+            errno = EAGAIN;
+            return WS_SEND_BUDGET_TIMEOUT;
+        }
+        int n = send(fd, data + sent, len - sent, MSG_NOSIGNAL | MSG_DONTWAIT);
         if (n < 0) {
             if (errno == EINTR) {
                 continue;
             }
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                if (esp_timer_get_time() - send_start_us > 5 * 1000 * 1000) {
-                    return false; /* total congestion timeout */
+                remaining_us = CAMERA_SEND_BUDGET_US - (esp_timer_get_time() - send_start_us);
+                if (remaining_us <= 0) {
+                    errno = EAGAIN;
+                    return WS_SEND_BUDGET_TIMEOUT;
+                }
+                fd_set writable;
+                FD_ZERO(&writable);
+                FD_SET(fd, &writable);
+                struct timeval timeout = {
+                    .tv_sec = remaining_us / 1000000,
+                    .tv_usec = remaining_us % 1000000,
+                };
+                int ready = select(fd + 1, NULL, &writable, NULL, &timeout);
+                if (ready == 0) {
+                    errno = EAGAIN;
+                    return WS_SEND_BUDGET_TIMEOUT;
+                }
+                if (ready < 0 && errno != EINTR) {
+                    return WS_SEND_CONN_ERROR;
                 }
                 continue;
             }
-            return false; /* connection-level error (e.g. ECONNRESET) */
+            return WS_SEND_CONN_ERROR;
         }
         if (n == 0) {
             errno = ECONNRESET;
-            return false;
+            return WS_SEND_CONN_ERROR;
         }
         sent += (size_t)n;
+        progress->bytes += (size_t)n;
     }
-    return true;
+    return WS_SEND_COMPLETE;
 }
 
 /* Build a server-side WebSocket frame (FIN + opcode + length, server side
  * needs no masking) and send it with full partial-write handling.
- * Returns ESP_OK on success, ESP_FAIL on connection error / 5s timeout. */
+ * Returns ESP_OK on success, ESP_FAIL on connection error / pair deadline. */
 static esp_err_t ws_send_ws_frame(int client_fd, uint8_t opcode, const uint8_t *data, size_t len,
-                                  int64_t send_start_us)
+                                  int64_t send_start_us, ws_send_progress_t *group)
 {
+    ws_send_progress_t local = {0};
+    ws_send_progress_t *progress = group ? group : &local;
     uint8_t ws_hdr[10];
     size_t ws_hdr_len;
     ws_hdr[0] = 0x80 | opcode; /* FIN bit + opcode */
@@ -892,15 +993,15 @@ static esp_err_t ws_send_ws_frame(int client_fd, uint8_t opcode, const uint8_t *
         }
         ws_hdr_len = 10;
     }
-    if (!ws_raw_send_all(client_fd, ws_hdr, ws_hdr_len, send_start_us)) {
-        int saved_errno = errno;
-        shutdown(client_fd, SHUT_RDWR); /* A partial frame must never be reused. */
-        errno = saved_errno;
-        return ESP_FAIL;
+    progress->reason = ws_raw_send_all(client_fd, ws_hdr, ws_hdr_len, send_start_us, progress);
+    if (progress->reason == WS_SEND_COMPLETE) {
+        progress->reason = ws_raw_send_all(client_fd, data, len, send_start_us, progress);
     }
-    if (!ws_raw_send_all(client_fd, data, len, send_start_us)) {
+    if (progress->reason != WS_SEND_COMPLETE) {
         int saved_errno = errno;
-        shutdown(client_fd, SHUT_RDWR);
+        /* Group caller decides after inspecting the complete group's progress.
+         * Other callers retain failure-always-closes behavior. */
+        if (group == NULL) shutdown(client_fd, SHUT_RDWR);
         errno = saved_errno;
         return ESP_FAIL;
     }
@@ -938,7 +1039,7 @@ esp_err_t ws_manager_server_send_binary(int client_fd, const char *data, int len
      * length, server side needs no masking) with full partial-write handling. */
     int64_t send_start_us = esp_timer_get_time();
     bool ok               = (ws_send_ws_frame(client_fd, HTTPD_WS_TYPE_BINARY, buf->data, (size_t)buf->len,
-                                       send_start_us) == ESP_OK);
+                                       send_start_us, NULL) == ESP_OK);
 
     int64_t dur_us = esp_timer_get_time() - buf->start_time_us;
     esp_err_t ret  = ESP_OK;
@@ -965,8 +1066,8 @@ esp_err_t ws_manager_server_send_binary(int client_fd, const char *data, int len
         s_send_stats.consecutive_failures++;
         s_send_stats.last_send_duration_us = dur_us;
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            /* Sustained congestion (5s send timeout): drop this frame but do
-             * NOT mark the connection dead — congestion is not a disconnect. */
+            /* The raw sender shut down the socket: a partial frame must
+             * never be followed by another frame on that connection. */
             s_send_stats.last_error = EAGAIN;
             ret                     = ESP_FAIL;
         } else {
@@ -977,6 +1078,9 @@ esp_err_t ws_manager_server_send_binary(int client_fd, const char *data, int len
                 camera_client_record_failure();
             }
             ret = ESP_FAIL;
+        }
+        if (camera_client_matches(client_fd)) {
+            camera_client_kick("binary send failed; partial stream cannot be reused");
         }
     }
 
@@ -1055,12 +1159,6 @@ esp_err_t ws_manager_server_send_camera_pair(const char *text, int text_len, con
     if (!s_server_running || s_server == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
-    /* Only the /camera client receives this header+JPEG pair. /mcp and /algo
-     * clients expect JSON-RPC only and would log warnings on unexpected
-     * frames. */
-    if (s_camera_client_fd < 0) {
-        return ESP_ERR_NOT_FOUND;
-    }
     if (bin_len > WS_FRAME_BUF_SIZE) {
         ESP_LOGW(TAG, "Frame too large (%d > %d), dropping", bin_len, WS_FRAME_BUF_SIZE);
         return ESP_ERR_INVALID_SIZE;
@@ -1070,21 +1168,30 @@ esp_err_t ws_manager_server_send_camera_pair(const char *text, int text_len, con
      * atomic batch inside s_server_mutex: no other task can interleave a
      * frame on the same socket in between, which previously corrupted the
      * WS stream when text (sync) and binary (async httpd) were sent on
-     * separate paths. Both frames use the raw blocking send() path. */
+     * separate paths. Both frames share the same nonblocking send deadline. */
     esp_err_t ret = ESP_OK;
     if (s_server_mutex) {
         xSemaphoreTake(s_server_mutex, portMAX_DELAY);
     }
 
+    /* Recheck after acquiring the admission/removal mutex and retain this
+     * socket for the ENTIRE group, including its failure/close path. */
+    const int client_fd = s_camera_client_fd;
+    if (client_fd < 0) {
+        if (s_server_mutex) xSemaphoreGive(s_server_mutex);
+        return ESP_ERR_NOT_FOUND;
+    }
+
     int64_t send_start_us = esp_timer_get_time();
-    bool ok               = (ws_send_ws_frame(s_camera_client_fd, HTTPD_WS_TYPE_TEXT, (const uint8_t *)text,
-                                      (size_t)text_len, send_start_us) == ESP_OK) &&
-                            (ws_send_ws_frame(s_camera_client_fd, HTTPD_WS_TYPE_BINARY, (const uint8_t *)bin,
-                                      (size_t)bin_len, send_start_us) == ESP_OK);
+    ws_send_progress_t group = {0};
+    bool ok               = (ws_send_ws_frame(client_fd, HTTPD_WS_TYPE_TEXT, (const uint8_t *)text,
+                                      (size_t)text_len, send_start_us, &group) == ESP_OK) &&
+                            (ws_send_ws_frame(client_fd, HTTPD_WS_TYPE_BINARY, (const uint8_t *)bin,
+                                      (size_t)bin_len, send_start_us, &group) == ESP_OK);
 
     int64_t dur_us = esp_timer_get_time() - send_start_us;
     if (ok) {
-        (void)httpd_sess_update_lru_counter(s_server, s_camera_client_fd);
+        (void)httpd_sess_update_lru_counter(s_server, client_fd);
         s_send_stats.total_sent++;
         s_send_stats.consecutive_failures  = 0;
         s_send_stats.last_error            = 0;
@@ -1098,22 +1205,47 @@ esp_err_t ws_manager_server_send_camera_pair(const char *text, int text_len, con
         }
         camera_client_reset_failures();
     } else {
+        int saved_errno = errno;
+        bool zero_progress_drop = group.reason == WS_SEND_BUDGET_TIMEOUT && group.bytes == 0;
+        /* Include drops in BBA congestion signals, but not in dead-client
+         * failure tracking. ESP_ERR_TIMEOUT still counts as a failed frame. */
         s_send_stats.total_failed++;
         s_send_stats.consecutive_failures++;
         s_send_stats.last_send_duration_us = dur_us;
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            /* Raw transmission may already have sent part of this frame.
-             * Closing is required even for congestion, not just TCP errors. */
-            s_send_stats.last_error = EAGAIN;
-            ret                     = ESP_FAIL;
-        } else {
-            /* Connection-level error (e.g. ECONNRESET/EBADF): mark dead so
-             * the camera slot is reclaimed quickly. */
-            s_send_stats.last_error = errno;
-            camera_client_record_failure();
-            ret = ESP_FAIL;
+        s_send_stats.last_error = saved_errno;
+        if (group.reason == WS_SEND_BUDGET_TIMEOUT) {
+            atomic_fetch_add(&s_camera_budget_timeouts_total, 1);
         }
-        camera_client_kick("frame send failed; partial stream cannot be reused");
+        ret = zero_progress_drop ? ESP_ERR_TIMEOUT : ESP_FAIL;
+        if (!zero_progress_drop) {
+            /* Even zero-byte connection errors close. Any group progress is
+             * conservatively closed; never reuse a possibly partial WS frame. */
+            shutdown(client_fd, SHUT_RDWR);
+            /* EOF wakes HTTPD, whose synthetic Close owns final deletion.
+             * Do not queue an additional async close for the same session.
+             * Release only this socket's camera slot, under the send mutex. */
+            if (s_camera_client_fd == client_fd) {
+                camera_client_set_fd(-1);
+                camera_client_reset_failures();
+            }
+        }
+        static uint32_t budget_timeouts, conn_errors, zero_drops, closed_groups;
+        static int64_t last_failure_log_us;
+        if (group.reason == WS_SEND_BUDGET_TIMEOUT) budget_timeouts++;
+        else conn_errors++;
+        if (zero_progress_drop) zero_drops++;
+        else closed_groups++;
+        int64_t now_us = esp_timer_get_time();
+        if (last_failure_log_us == 0 || now_us - last_failure_log_us >= 10000000) {
+            ESP_LOGW(TAG, "Camera group: fd=%d reason=%s action=%s bytes=%u dur_ms=%lld errno=%d "
+                     "totals[budget=%u conn=%u zero_drop=%u closed=%u]",
+                     client_fd,
+                     group.reason == WS_SEND_BUDGET_TIMEOUT ? "BUDGET_TIMEOUT" : "CONN_ERROR",
+                     zero_progress_drop ? "DROP_KEEP" : "CLOSE", (unsigned)group.bytes,
+                     (long long)(dur_us / 1000), saved_errno, (unsigned)budget_timeouts,
+                     (unsigned)conn_errors, (unsigned)zero_drops, (unsigned)closed_groups);
+            last_failure_log_us = now_us;
+        }
     }
 
     if (s_server_mutex) {
@@ -1125,6 +1257,15 @@ esp_err_t ws_manager_server_send_camera_pair(const char *text, int text_len, con
 int ws_manager_server_get_client_count(void)
 {
     return s_client_count;
+}
+
+ws_camera_client_state_t ws_manager_server_get_camera_state(void)
+{
+    ws_camera_client_state_t state;
+    portENTER_CRITICAL(&s_camera_state_lock);
+    state = s_camera_state;
+    portEXIT_CRITICAL(&s_camera_state_lock);
+    return state;
 }
 
 esp_err_t ws_manager_server_get_send_stats(ws_send_stats_t *stats)
@@ -1146,6 +1287,7 @@ esp_err_t ws_manager_server_get_send_stats(ws_send_stats_t *stats)
     stats->last_error            = s_send_stats.last_error;
     stats->last_send_duration_us = s_send_stats.last_send_duration_us;
     stats->avg_send_duration_us  = s_send_stats.avg_send_duration_us;
+    stats->camera_budget_timeouts = atomic_load(&s_camera_budget_timeouts_total);
     return ESP_OK;
 }
 

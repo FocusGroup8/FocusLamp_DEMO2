@@ -15,6 +15,8 @@
 #include "websocket_manager.h"
 
 #include <stdio.h>
+#include <stdatomic.h>
+#include <sys/param.h>
 #include <string.h>
 
 static const char *TAG = "cam_stream";
@@ -38,14 +40,12 @@ static uint32_t s_frame_seq = 0;
 /* Quality levels: each defines JPEG quality and target FPS.
  * Constraint: JPEG quality must be ≥ 15 (user requirement).
  * Based on empirical estimates at 800x640 YUV420:
- * LOW:  ~10KB/frame @ 5fps  → ~50KB/s  (0.40 Mbps) - very stable
- * MID:  ~10KB/frame @ 10fps → ~100KB/s (0.80 Mbps) - stable, current baseline
- * HIGH: ~12KB/frame @ 10fps → ~120KB/s (0.96 Mbps) - best effort
- * [FIX 2026-08-10] HIGH lowered 20q/12fps->18q/10fps (~156KB/s->120KB/s):
- * the ESP-Hosted (SDIO bridged) link sustained high send-duration/failure
- * at the former peak during long runs (repeated send:119 + reconnect
- * cycles); capping the peak keeps the stream within the link's real
- * throughput while BBA still adapts below it. */
+ * LOW:  ~10KB/frame @ 2fps → ~20KB/s
+ * MID:  ~10KB/frame @ 5fps → ~50KB/s (initial baseline)
+ * HIGH: ~12KB/frame @ 5fps -> ~60KB/s.
+ * Quality adaptation may reduce the base quality, never raise it. The PI
+ * target is feedback, not a hard traffic cap. A user ceiling <=2fps selects
+ * fixed Q15 at the encoder for a controlled low-load mode. */
 typedef enum { BBA_LEVEL_LOW = 0, BBA_LEVEL_MID = 1, BBA_LEVEL_HIGH = 2, BBA_LEVEL_COUNT } bba_level_t;
 
 typedef struct {
@@ -54,9 +54,9 @@ typedef struct {
 } bba_level_config_t;
 
 static const bba_level_config_t s_bba_levels[BBA_LEVEL_COUNT] = {
-    [BBA_LEVEL_LOW]  = {.quality = 15, .fps = 5},
-    [BBA_LEVEL_MID]  = {.quality = 16, .fps = 10},
-    [BBA_LEVEL_HIGH] = {.quality = 18, .fps = 10},
+    [BBA_LEVEL_LOW]  = {.quality = 15, .fps = 2},
+    [BBA_LEVEL_MID]  = {.quality = 16, .fps = 5},
+    [BBA_LEVEL_HIGH] = {.quality = 18, .fps = 5},
 };
 
 /* BBA evaluation interval (seconds) */
@@ -67,11 +67,10 @@ static const bba_level_config_t s_bba_levels[BBA_LEVEL_COUNT] = {
 
 /* Minimum send attempts before allowing step-up (prevents false healthy
  * assessment when client just connected and few frames sent) */
-#define BBA_MIN_SAMPLES_FOR_STEPUP 5
+#define BBA_MIN_SAMPLES_FOR_STEPUP 2 /* LOW produces only two samples per second. */
 
-/* Client stable connection time (seconds): client must be connected for at
- * least this duration before BBA allows step-up. Prevents oscillation caused
- * by rapid connect/disconnect cycles where WS stats reset to 0 failures. */
+/* Require continuous healthy windows at the current level before step-up.
+ * A bad/empty window, session change, or level change restarts this period. */
 #define BBA_CLIENT_STABLE_TIME_SEC 10
 
 /* Congestion thresholds */
@@ -91,69 +90,101 @@ typedef struct {
     bba_level_t pending_level;
     int hysteresis_counter;
     int64_t last_eval_time;
-    /* Accumulated stats for 10-sec log (since BBA resets WS stats every 1 sec) */
+    /* Accumulated window stats for logging; actual sample intervals can stretch. */
     uint32_t accum_sent;
     uint32_t accum_failed;
-    /* Client stable connection tracking (anti-oscillation) */
-    int prev_client_count;
-    int64_t client_connect_time; /* Timestamp when client connected */
+    /* Camera-only connection tracking (anti-oscillation). */
+    bool prev_camera_connected;
+    uint32_t camera_session;
+    uint32_t last_budget_timeouts;
+    int64_t healthy_since; /* First healthy sample at the current level; 0 if interrupted */
 } bba_state_t;
 
 /* Evaluate BBA level based on WebSocket send statistics.
  * Returns the current (possibly updated) BBA level. */
-static bba_level_t bba_evaluate(bba_state_t *bba, const ws_send_stats_t *stats, int client_count)
+static bba_level_t bba_evaluate(bba_state_t *bba, const ws_send_stats_t *stats,
+                               ws_camera_client_state_t camera)
 {
     int64_t now = esp_timer_get_time();
 
     /* Track client connection state transitions */
-    if (client_count > 0 && bba->prev_client_count == 0) {
-        /* Client just connected (from 0): record timestamp */
-        bba->client_connect_time = now;
+    if (camera.connected && (!bba->prev_camera_connected || camera.session_id != bba->camera_session)) {
+        /* Session identity also catches disconnect/reconnect between samples,
+         * including a new socket that reuses the previous integer fd. */
+        bba->healthy_since = 0;
         bba->hysteresis_counter  = 0;
         bba->pending_level       = bba->current_level;
-        ESP_LOGI(TAG, "BBA: client connected, stable period %d sec started", BBA_CLIENT_STABLE_TIME_SEC);
-    } else if (client_count < bba->prev_client_count) {
-        /* Client disconnected (any client): reset stable time.
-         * This handles multi-client scenarios where client_count never
-         * reaches 0 but a disconnect-reconnect cycle still occurred. */
-        bba->client_connect_time = now;
+        ESP_LOGI(TAG, "BBA: camera session=%u connected, require %d sec continuous healthy windows",
+                 (unsigned)camera.session_id, BBA_CLIENT_STABLE_TIME_SEC);
+    } else if (!camera.connected && bba->prev_camera_connected) {
+        bba->healthy_since = 0;
         bba->hysteresis_counter  = 0;
         bba->pending_level       = bba->current_level;
-        ESP_LOGI(TAG, "BBA: client disconnected (%d->%d), stable period reset", bba->prev_client_count, client_count);
+        ESP_LOGI(TAG, "BBA: camera disconnected, stable period reset");
     }
-    bba->prev_client_count = client_count;
+    bba->prev_camera_connected = camera.connected;
+    bba->camera_session = camera.session_id;
 
-    /* No clients: freeze at current level, reset hysteresis */
-    if (client_count == 0) {
+    /* Consume durable evidence BEFORE the disconnected early return. A single
+     * budget failure closes a partial frame, so waiting for consecutive bad
+     * windows can miss it. Choose LOW directly rather than waiting to step
+     * down through MID, retaining the baseline's response to budget failure.
+     * Unsigned subtraction handles the boot counter's eventual wraparound. */
+    uint32_t budget_events = stats->camera_budget_timeouts - bba->last_budget_timeouts;
+    bba->last_budget_timeouts = stats->camera_budget_timeouts;
+    if (budget_events > 0) {
+        bba_level_t previous = bba->current_level;
+        bba->current_level = BBA_LEVEL_LOW;
+        bba->pending_level = BBA_LEVEL_LOW;
+        bba->hysteresis_counter = 0;
+        /* Even at LOW or on a zero-progress drop that keeps the connection,
+         * require a new healthy interval before allowing recovery. */
+        bba->healthy_since = 0;
+        ESP_LOGW(TAG, "BBA: budget timeout -> LOW level=%d->%d Q=%d fps=%d "
+                 "camera=%d events=%u total=%u",
+                 previous, BBA_LEVEL_LOW, s_bba_levels[BBA_LEVEL_LOW].quality,
+                 s_bba_levels[BBA_LEVEL_LOW].fps, camera.connected,
+                 (unsigned)budget_events, (unsigned)stats->camera_budget_timeouts);
+        return bba->current_level;
+    }
+
+    /* No camera: freeze at current level after consuming any timeout evidence. */
+    if (!camera.connected) {
+        bba->healthy_since = 0;
         bba->hysteresis_counter = 0;
         bba->pending_level      = bba->current_level;
         return bba->current_level;
     }
 
-    /* Compute client stable duration */
-    int64_t client_stable_sec = (now - bba->client_connect_time) / 1000000;
-
     /* Compute failure rate over the sampling window */
     uint32_t total          = stats->total_sent + stats->total_failed;
     float failure_rate      = (total > 0) ? (float)stats->total_failed / (float)total : 0.0f;
     int64_t avg_duration_ms = stats->avg_send_duration_us / 1000;
+    bool congested = stats->consecutive_failures >= BBA_CONSEC_FAIL_HIGH ||
+                     failure_rate > BBA_FAILURE_RATE_HIGH || avg_duration_ms > BBA_SEND_DUR_HIGH_MS;
+    bool healthy = !congested && total >= BBA_MIN_SAMPLES_FOR_STEPUP &&
+                   failure_rate < BBA_FAILURE_RATE_LOW && avg_duration_ms < BBA_SEND_DUR_LOW_MS;
+    if (!healthy) {
+        bba->healthy_since = 0;
+    } else if (bba->healthy_since == 0) {
+        bba->healthy_since = now;
+    }
+    int64_t healthy_sec = bba->healthy_since ? (now - bba->healthy_since) / 1000000 : 0;
 
     /* Determine target level based on network conditions */
     bba_level_t target = bba->current_level;
 
     /* Step down: severe congestion (immediate) or sustained congestion */
-    if (stats->consecutive_failures >= BBA_CONSEC_FAIL_HIGH || failure_rate > BBA_FAILURE_RATE_HIGH ||
-        avg_duration_ms > BBA_SEND_DUR_HIGH_MS) {
+    if (congested) {
         if (bba->current_level > BBA_LEVEL_LOW) {
             target = (bba_level_t)(bba->current_level - 1);
         }
     }
     /* Step up: network healthy — require ALL conditions:
      * 1. Minimum sample count (prevent false healthy on few frames)
-     * 2. Client stable connection time (prevent oscillation on reconnect)
+     * 2. Continuous health at this level (restart after each level switch)
      * 3. Low failure rate and fast send duration */
-    else if (total >= BBA_MIN_SAMPLES_FOR_STEPUP && client_stable_sec >= BBA_CLIENT_STABLE_TIME_SEC &&
-             failure_rate < BBA_FAILURE_RATE_LOW && avg_duration_ms < BBA_SEND_DUR_LOW_MS &&
+    else if (healthy && healthy_sec >= BBA_CLIENT_STABLE_TIME_SEC &&
              bba->current_level < BBA_LEVEL_HIGH) {
         target = (bba_level_t)(bba->current_level + 1);
     }
@@ -164,6 +195,7 @@ static bba_level_t bba_evaluate(bba_state_t *bba, const ws_send_stats_t *stats, 
             bba->hysteresis_counter++;
             if (bba->hysteresis_counter >= BBA_HYSTERESIS_THRESHOLD) {
                 bba->current_level      = target;
+                bba->healthy_since      = 0;
                 bba->hysteresis_counter = 0;
                 bba->pending_level      = target;
                 ESP_LOGI(TAG,
@@ -196,9 +228,9 @@ static bba_level_t bba_evaluate(bba_state_t *bba, const ws_send_stats_t *stats, 
 
 /* Target bitrate per BBA level (bytes/sec) */
 static const uint32_t s_bba_target_bitrate[BBA_LEVEL_COUNT] = {
-    [BBA_LEVEL_LOW]  = 50 * 1024,  /*  50 KB/s (0.40 Mbps) */
-    [BBA_LEVEL_MID]  = 100 * 1024, /* 100 KB/s (0.80 Mbps) */
-    [BBA_LEVEL_HIGH] = 120 * 1024, /* 120 KB/s (0.96 Mbps) */
+    [BBA_LEVEL_LOW]  = 20 * 1024,  /* 2 fps */
+    [BBA_LEVEL_MID]  = 50 * 1024,  /* 5 fps */
+    [BBA_LEVEL_HIGH] = 60 * 1024,  /* 5 fps, larger JPEGs; feedback, not a hard cap. */
 };
 
 /* Q value range constraints per BBA level.
@@ -209,10 +241,19 @@ typedef struct {
 } bba_q_range_t;
 
 static const bba_q_range_t s_bba_q_ranges[BBA_LEVEL_COUNT] = {
-    [BBA_LEVEL_LOW]  = {.q_min = 15, .q_max = 18},
-    [BBA_LEVEL_MID]  = {.q_min = 15, .q_max = 22},
-    [BBA_LEVEL_HIGH] = {.q_min = 18, .q_max = 35},
+    [BBA_LEVEL_LOW]  = {.q_min = 15, .q_max = 15},
+    [BBA_LEVEL_MID]  = {.q_min = 15, .q_max = 16},
+    [BBA_LEVEL_HIGH] = {.q_min = 15, .q_max = 18},
 };
+
+static uint32_t stream_target_bitrate(bba_level_t level, int fps_limit)
+{
+    int applied_fps = MIN(s_bba_levels[level].fps, fps_limit);
+    if (fps_limit <= ADAPTIVE_FPS_MIN) {
+        return 10 * 1024 * applied_fps; /* Fixed Q15: retain the LOW per-frame budget. */
+    }
+    return (uint32_t)((uint64_t)s_bba_target_bitrate[level] * applied_fps / s_bba_levels[level].fps);
+}
 
 /* PI controller parameters */
 #define PI_KP 0.5f /* Proportional gain */
@@ -223,12 +264,11 @@ static const bba_q_range_t s_bba_q_ranges[BBA_LEVEL_COUNT] = {
 #define PI_INTEGRAL_LIMIT 15.0f  /* Anti-windup: integral clamp */
 #define PI_EMA_ALPHA 0.15f       /* Output EMA smoothing coefficient */
 #define PI_DEADZONE_RATIO 0.05f  /* ±5% dead zone */
-#define PI_MIN_INTERVAL_FRAMES 3 /* Min frames between Q changes */
 
 /* PI controller state */
 typedef struct {
     float integral;
-    int smoothed_quality;
+    float smoothed_quality;
     uint32_t target_bitrate_bps;
     uint32_t actual_bitrate_bps;
     bool initialized;
@@ -247,7 +287,7 @@ static void pi_controller_reset(pi_state_t *pi, int base_quality, uint32_t targe
 /* Update PI controller and return new JPEG quality.
  * Called every 1 second (aligned with BBA evaluation).
  *
- * actual_bitrate_bps: measured bytes sent in the last 1-sec window
+ * actual_bitrate_bps: successful JPEG payload bytes normalized by elapsed time
  * target_bitrate_bps: target bytes/sec for current BBA level
  * base_quality: BBA-defined base quality for current level
  * q_range: min/max Q bounds for current BBA level
@@ -258,11 +298,10 @@ static void pi_controller_reset(pi_state_t *pi, int base_quality, uint32_t targe
  * - Anti-windup: integral clamped to ±15
  * - EMA smoothing: output filtered with α=0.15
  *
- * Note: PI_MIN_INTERVAL_FRAMES (3) is inherently satisfied because PI
- * runs at 1Hz while FPS ≥ 5, meaning ≥5 frames pass between updates.
+ * elapsed_sec accounts for windows stretched by capture or send blocking.
  */
 static int pi_controller_update(pi_state_t *pi, uint32_t actual_bitrate_bps, uint32_t target_bitrate_bps,
-                                int base_quality, const bba_q_range_t *q_range)
+                                int base_quality, const bba_q_range_t *q_range, float elapsed_sec)
 {
     pi->actual_bitrate_bps = actual_bitrate_bps;
     pi->target_bitrate_bps = target_bitrate_bps;
@@ -282,7 +321,7 @@ static int pi_controller_update(pi_state_t *pi, uint32_t actual_bitrate_bps, uin
     }
 
     /* Update integral with anti-windup */
-    pi->integral += error * PI_KI;
+    pi->integral += error * PI_KI * elapsed_sec;
     if (pi->integral > PI_INTEGRAL_LIMIT) {
         pi->integral = PI_INTEGRAL_LIMIT;
     } else if (pi->integral < -PI_INTEGRAL_LIMIT) {
@@ -293,7 +332,7 @@ static int pi_controller_update(pi_state_t *pi, uint32_t actual_bitrate_bps, uin
      * With PI_KP=0.5, PI_Q_SCALE=20: 15% error → 1.5 Q steps,
      * 30% error → 3 Q steps. Integral accumulates for steady-state correction. */
     float adjustment = (PI_KP * error + pi->integral) * PI_Q_SCALE;
-    int target_q     = base_quality + (int)adjustment;
+    float target_q   = base_quality + adjustment;
 
     /* Clamp to BBA level Q range */
     if (target_q < q_range->q_min)
@@ -302,9 +341,9 @@ static int pi_controller_update(pi_state_t *pi, uint32_t actual_bitrate_bps, uin
         target_q = q_range->q_max;
 
     /* EMA smoothing */
-    pi->smoothed_quality = (int)(PI_EMA_ALPHA * target_q + (1.0f - PI_EMA_ALPHA) * pi->smoothed_quality);
+    pi->smoothed_quality = PI_EMA_ALPHA * target_q + (1.0f - PI_EMA_ALPHA) * pi->smoothed_quality;
 
-    return pi->smoothed_quality;
+    return (int)(pi->smoothed_quality + 0.5f);
 }
 
 /*---------------------------------------------------------------
@@ -415,8 +454,10 @@ typedef struct {
     SemaphoreHandle_t lock;
 
     /* Runtime state */
-    int current_quality;
-    int current_fps;
+    atomic_int current_quality;
+    atomic_int current_fps;
+    atomic_int fps_limit; /* User ceiling; BBA must not override it. */
+    atomic_int bba_fps;
 
     /* Statistics */
     uint32_t frames_sent;
@@ -434,6 +475,9 @@ static stream_state_t s_state = {0};
  *-------------------------------------------------------------*/
 static void camera_stream_task(void *arg)
 {
+    /* A restarted stream observes new failures, not old boot-history events. */
+    ws_send_stats_t initial_ws_stats = {0};
+    (void)ws_manager_server_get_send_stats(&initial_ws_stats);
     /* Initialize BBA state — start at MID level (current baseline) */
     bba_state_t bba = {
         .current_level       = BBA_LEVEL_MID,
@@ -442,27 +486,37 @@ static void camera_stream_task(void *arg)
         .last_eval_time      = esp_timer_get_time(),
         .accum_sent          = 0,
         .accum_failed        = 0,
-        .prev_client_count   = 0,
-        .client_connect_time = 0,
+        .prev_camera_connected = false,
+        .camera_session = 0,
+        .last_budget_timeouts = initial_ws_stats.camera_budget_timeouts,
+        .healthy_since       = 0,
     };
 
     /* Initialize PI controller state — fine-tunes JPEG quality within BBA level */
     pi_state_t pi = {0};
-    pi_controller_reset(&pi, s_bba_levels[bba.current_level].quality, s_bba_target_bitrate[bba.current_level]);
+    int applied_fps_limit = atomic_load(&s_state.fps_limit);
+    int initial_quality = applied_fps_limit <= ADAPTIVE_FPS_MIN ? 15 : s_bba_levels[bba.current_level].quality;
+    pi_controller_reset(&pi, initial_quality, stream_target_bitrate(bba.current_level, applied_fps_limit));
 
-    /* Initialize motion detection state — reduces FPS when scene is static */
+    /* Motion remains diagnostic; static-scene FPS throttling is disabled. */
     motion_state_t motion = {0};
 
-    /* Track bytes sent in current 1-sec window for PI bitrate measurement */
-    uint32_t window_bytes_sent = 0;
+    /* Successful JPEG payload accepted by the socket, not over-the-air bytes.
+     * This clock advances only when its matching byte counter is cleared. */
+    uint64_t window_bytes_sent = 0;
+    int64_t window_start_us = esp_timer_get_time();
 
     /* Apply initial BBA settings */
-    s_state.current_quality = s_bba_levels[bba.current_level].quality;
-    s_state.current_fps     = s_bba_levels[bba.current_level].fps;
+    s_state.current_quality = initial_quality;
+    s_state.bba_fps         = s_bba_levels[bba.current_level].fps;
+    s_state.current_fps     = MIN(s_bba_levels[bba.current_level].fps, applied_fps_limit);
 
     ESP_LOGI(TAG, "Streaming task started (BBA: level=%d, Q=%d, fps=%d, PI: target=%lu B/s, motion: enabled)",
              bba.current_level, s_state.current_quality, s_state.current_fps,
-             (unsigned long)s_bba_target_bitrate[bba.current_level]);
+             (unsigned long)pi.target_bitrate_bps);
+    ESP_LOGI(TAG, "BBA policy: camera-only sessions, budget timeout -> LOW, continuous healthy recovery=%ds per level",
+             BBA_CLIENT_STABLE_TIME_SEC);
+    ESP_LOGI(TAG, "Camera profile: conservative-5fps-v1, cap<=2 -> fixed Q15, adaptive Q ceilings=15/16/18");
 
     int64_t last_stats_log = esp_timer_get_time();
     bool was_throttled     = false; /* Track throttle state for logging */
@@ -470,72 +524,91 @@ static void camera_stream_task(void *arg)
     while (s_state.running) {
         int64_t now           = esp_timer_get_time();
         TickType_t tick_start = xTaskGetTickCount();
+        int fps_limit = atomic_load(&s_state.fps_limit);
+        bool cap_changed = fps_limit != applied_fps_limit;
 
-        /* BBA + PI evaluation: every 1 second.
+        /* BBA + PI evaluation: target interval 1 second; blocking may stretch it.
          * BBA (coarse): evaluates network congestion, switches quality level.
          * PI  (fine):   adjusts JPEG quality within BBA level to track target bitrate. */
-        if ((now - bba.last_eval_time) >= BBA_EVAL_INTERVAL_SEC * 1000000) {
+        if (cap_changed || (now - bba.last_eval_time) >= BBA_EVAL_INTERVAL_SEC * 1000000) {
             ws_send_stats_t ws_stats;
             if (ws_manager_server_get_send_stats(&ws_stats) == ESP_OK) {
-                int client_count = ws_manager_server_get_client_count();
+                ws_camera_client_state_t camera = ws_manager_server_get_camera_state();
 
-                /* Accumulate for 10-sec log (BBA resets WS stats every 1 sec) */
+                /* Accumulate window counters before resetting them. */
                 bba.accum_sent += ws_stats.total_sent;
                 bba.accum_failed += ws_stats.total_failed;
 
                 /* BBA: evaluate and possibly switch level (coarse control) */
-                bba_level_t prev_level = bba.current_level;
-                bba_level_t curr_level = bba_evaluate(&bba, &ws_stats, client_count);
-                if (curr_level != prev_level) {
-                    /* BBA level changed: update FPS and reset PI for new target */
-                    s_state.current_fps = s_bba_levels[curr_level].fps;
-                    pi_controller_reset(&pi, s_bba_levels[curr_level].quality, s_bba_target_bitrate[curr_level]);
-                    s_state.current_quality = s_bba_levels[curr_level].quality;
-                    ESP_LOGI(TAG, "PI: reset on BBA level %d->%d (Q=%d, target=%lu B/s)", prev_level, curr_level,
-                             s_state.current_quality, (unsigned long)s_bba_target_bitrate[curr_level]);
+                if (cap_changed) {
+                    bba.healthy_since = 0;
+                    bba.hysteresis_counter = 0;
+                    bba.pending_level = bba.current_level;
                 }
-
-                /* PI: fine-tune quality within current BBA level.
-                 * Skip when scene is static (FPS reduced → bitrate naturally lower,
-                 * PI would incorrectly try to compensate by raising quality). */
-                if (client_count > 0 && !motion.is_static) {
-                    uint32_t actual_bitrate = window_bytes_sent; /* bytes in 1-sec window */
-                    int base_q              = s_bba_levels[curr_level].quality;
-                    int new_q = pi_controller_update(&pi, actual_bitrate, s_bba_target_bitrate[curr_level], base_q,
-                                                     &s_bba_q_ranges[curr_level]);
-                    if (new_q != s_state.current_quality) {
-                        ESP_LOGD(TAG,
-                                 "PI: Q %d -> %d (actual=%lu B/s, target=%lu B/s, "
-                                 "integral=%.2f)",
-                                 s_state.current_quality, new_q, (unsigned long)actual_bitrate,
-                                 (unsigned long)s_bba_target_bitrate[curr_level], pi.integral);
-                        s_state.current_quality = new_q;
+                bool budget_changed = ws_stats.camera_budget_timeouts != bba.last_budget_timeouts;
+                bba_level_t prev_level = bba.current_level;
+                bba_level_t curr_level = bba_evaluate(&bba, &ws_stats, camera);
+                applied_fps_limit = fps_limit;
+                s_state.bba_fps = s_bba_levels[curr_level].fps;
+                s_state.current_fps = MIN(s_bba_levels[curr_level].fps, fps_limit);
+                uint32_t target_bitrate = stream_target_bitrate(curr_level, fps_limit);
+                bool fixed_low = fps_limit <= ADAPTIVE_FPS_MIN;
+                if (curr_level != prev_level || cap_changed || budget_changed) {
+                    /* Discard the transition sample: it was collected under
+                     * the previous cadence/target, not the newly applied one. */
+                    int base_q = fixed_low ? 15 : s_bba_levels[curr_level].quality;
+                    pi_controller_reset(&pi, base_q, target_bitrate);
+                    s_state.current_quality = base_q;
+                    ESP_LOGI(TAG, "PI: reset level=%d->%d fps_cap=%d mode=%s (Q=%d target=%lu B/s)",
+                             prev_level, curr_level, fps_limit, fixed_low ? "fixed-low" : "adaptive",
+                             base_q, (unsigned long)target_bitrate);
+                } else {
+                    int64_t elapsed_us = now - window_start_us;
+                    if (elapsed_us > 0) {
+                        uint32_t actual_bitrate = (uint32_t)(window_bytes_sent * 1000000ULL / (uint64_t)elapsed_us);
+                        pi.actual_bitrate_bps = actual_bitrate;
+                        pi.target_bitrate_bps = target_bitrate;
+                        /* Static scenes still use the selected cadence, so
+                         * they need the same PI feedback as moving scenes. */
+                        if (camera.connected && !fixed_low) {
+                            int new_q = pi_controller_update(&pi, actual_bitrate, target_bitrate,
+                                                             s_bba_levels[curr_level].quality,
+                                                             &s_bba_q_ranges[curr_level],
+                                                             (float)elapsed_us / 1000000.0f);
+                            s_state.current_quality = new_q;
+                        } else if (fixed_low) {
+                            s_state.current_quality = 15;
+                        }
                     }
                 }
 
                 /* Reset window and WS stats for next sampling period */
                 window_bytes_sent = 0;
+                window_start_us = now;
                 ws_manager_server_reset_send_stats();
+            } else {
+                /* An unobserved window cannot extend continuous health. Do
+                 * not reset the PI byte counter or its clock on this path. */
+                bba.healthy_since = 0;
+                bba.hysteresis_counter = 0;
+                bba.pending_level = bba.current_level;
             }
             bba.last_eval_time = now;
         }
 
-        /* Determine effective FPS based on client presence and motion state.
-         * Priority: no clients → min FPS; static scene → static FPS; else BBA FPS */
-        int client_count = ws_manager_server_get_client_count();
+        /* Only /camera consumes JPEGs; /algo or /mcp must not keep full FPS. */
+        ws_camera_client_state_t camera = ws_manager_server_get_camera_state();
         int effective_fps;
-        if (client_count == 0) {
-            effective_fps = ADAPTIVE_FPS_MIN;
+        if (!camera.connected) {
+            effective_fps = MIN(ADAPTIVE_FPS_MIN, (int)s_state.fps_limit);
             if (!was_throttled) {
                 ESP_LOGI(TAG, "No camera client: throttling fps %d -> %d", s_state.current_fps, ADAPTIVE_FPS_MIN);
                 was_throttled = true;
             }
         } else {
-            /* [TEMP A/B 2026-08-08] motion static FPS throttle disabled:
-             * static scene locked FPS to 3 (MOTION_STATIC_FPS) shortly after
-             * boot, overriding BBA 10fps. Target is >=10fps. Re-enable by
-             * restoring `else if (motion.is_static)` branch below. */
-            effective_fps = s_state.current_fps;
+            /* Read the BBA cadence directly so a concurrent FPS setter cannot
+             * leave a stale cached cadence above a newly reduced BBA level. */
+            effective_fps = MIN((int)s_state.bba_fps, (int)s_state.fps_limit);
             was_throttled = false;
         }
 
@@ -553,7 +626,7 @@ static void camera_stream_task(void *arg)
         /* Motion detection: check if new HIST data is available from ISR.
          * HIST is computed by ISP hardware during frame processing, so by
          * the time capture returns, the histogram for this frame should be ready.
-         * Motion state affects the NEXT frame's FPS decision. */
+         * Motion statistics are diagnostic and do not change FPS or PI. */
         if (s_hist_ready) {
             uint32_t curr_hist[MOTION_HIST_BINS];
             portENTER_CRITICAL(&s_hist_spinlock);
@@ -576,7 +649,12 @@ static void camera_stream_task(void *arg)
 
         /* Encode JPEG with BBA+PI-controlled quality */
         uint32_t jpeg_size = 0;
-        ret                = camera_encode_jpeg(s_state.config.camera, s_state.current_quality, &jpeg_size);
+        int frame_fps_limit = atomic_load(&s_state.fps_limit);
+        bool frame_fixed_low = frame_fps_limit <= ADAPTIVE_FPS_MIN;
+        int frame_quality = frame_fixed_low ? 15 : atomic_load(&s_state.current_quality);
+        effective_fps = MIN(effective_fps, frame_fps_limit);
+        frame_period = pdMS_TO_TICKS(1000 / effective_fps);
+        ret = camera_encode_jpeg(s_state.config.camera, frame_quality, &jpeg_size);
         if (ret != ESP_OK || jpeg_size == 0) {
             ESP_LOGW(TAG, "JPEG encode failed: %s", esp_err_to_name(ret));
             s_state.frames_failed++;
@@ -609,12 +687,19 @@ static void camera_stream_task(void *arg)
         int header_len =
             snprintf(header_buf, sizeof(header_buf), "{\"type\":\"frame_header\",\"seq\":%u}", (unsigned)s_frame_seq);
         ret = ESP_OK;
+        int64_t send_call_start_us = esp_timer_get_time();
         if (header_len > 0 && header_len < (int)sizeof(header_buf)) {
             ret = ws_manager_server_send_camera_pair(header_buf, header_len, (const char *)jpeg_buf, (int)jpeg_size);
         } else {
             /* Header build failure: fall back to sending just the binary frame */
             ret = ws_manager_server_broadcast_binary((const char *)jpeg_buf, (int)jpeg_size);
         }
+        /* Optional per-frame trace. Call time includes waiting for the send
+         * mutex; the WS group's dur_ms measures only its own send deadline. */
+        ESP_LOGD(TAG, "Frame: seq=%u actualQ=%d mode=%s jpeg=%u send_call_ms=%lld ret=%s",
+                 (unsigned)s_frame_seq, frame_quality, frame_fixed_low ? "fixed-low" : "adaptive",
+                 (unsigned)jpeg_size, (long long)((esp_timer_get_time() - send_call_start_us) / 1000),
+                 esp_err_to_name(ret));
 
         /* Send failures are tracked by ws_manager's send stats which BBA reads.
          * ESP_ERR_NOT_FOUND (no /camera client) is not counted as a failure. */
@@ -636,19 +721,24 @@ static void camera_stream_task(void *arg)
              * diagnostic: avg_size/avg_dur ≈ effective link throughput). */
             int64_t ws_avg_dur_ms  = 0;
             int64_t ws_last_dur_ms = 0;
-            ws_send_stats_t ws_stats_log;
+            ws_send_stats_t ws_stats_log = {0};
             if (ws_manager_server_get_send_stats(&ws_stats_log) == ESP_OK) {
                 ws_avg_dur_ms  = ws_stats_log.avg_send_duration_us / 1000;
                 ws_last_dur_ms = ws_stats_log.last_send_duration_us / 1000;
             }
+            ws_camera_client_state_t camera_log = ws_manager_server_get_camera_state();
             ESP_LOGI(TAG,
-                     "Stats: sent=%u failed=%u avg_size=%u fps=%d Q=%d bba=%d "
+                     "Stats: sent=%u failed=%u avg_size=%u target_fps=%d actualQ=%d mode=%s bba=%d "
                      "[ws: sent=%u failed=%u avg_dur=%lldms last=%lldms] "
+                     "[camera: connected=%d session=%u budget_total=%u] "
                      "[PI: actual=%lu target=%lu B/s integral=%.2f] "
                      "[motion: %s SAD=%.4f static_cnt=%d]",
                      (unsigned)s_state.frames_sent, (unsigned)s_state.frames_failed, (unsigned)avg_size, effective_fps,
-                     s_state.current_quality, bba.current_level, (unsigned)bba.accum_sent, (unsigned)bba.accum_failed,
-                     (long long)ws_avg_dur_ms, (long long)ws_last_dur_ms, (unsigned long)pi.actual_bitrate_bps,
+                     frame_quality, frame_fixed_low ? "fixed-low" : "adaptive", bba.current_level,
+                     (unsigned)bba.accum_sent, (unsigned)bba.accum_failed,
+                     (long long)ws_avg_dur_ms, (long long)ws_last_dur_ms,
+                     camera_log.connected, (unsigned)camera_log.session_id,
+                     (unsigned)ws_stats_log.camera_budget_timeouts, (unsigned long)pi.actual_bitrate_bps,
                      (unsigned long)pi.target_bitrate_bps, pi.integral, motion.is_static ? "STATIC" : "ACTIVE",
                      motion.last_sad, motion.static_count);
             last_stats_log = now;
@@ -694,6 +784,7 @@ esp_err_t camera_stream_init(const camera_stream_config_t *config)
 
     s_state.current_quality = s_state.config.default_quality;
     s_state.current_fps     = s_state.config.default_fps;
+    s_state.fps_limit       = s_state.config.default_fps;
 
     s_state.lock = xSemaphoreCreateMutex();
     if (!s_state.lock) {
@@ -835,9 +926,10 @@ esp_err_t camera_stream_set_quality(int quality)
     if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(100)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
-    s_state.current_quality = quality;
+    int applied_quality = s_state.fps_limit <= ADAPTIVE_FPS_MIN ? 15 : quality;
+    s_state.current_quality = applied_quality;
     xSemaphoreGive(s_state.lock);
-    ESP_LOGD(TAG, "Quality set to %d", quality);
+    ESP_LOGD(TAG, "Quality requested=%d applied=%d", quality, applied_quality);
     return ESP_OK;
 }
 
@@ -849,7 +941,11 @@ esp_err_t camera_stream_set_fps(int fps)
     if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(100)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
-    s_state.current_fps = fps;
+    s_state.fps_limit = fps;
+    s_state.current_fps = MIN((int)s_state.bba_fps, fps);
+    if (fps <= ADAPTIVE_FPS_MIN) {
+        s_state.current_quality = 15;
+    }
     xSemaphoreGive(s_state.lock);
     ESP_LOGD(TAG, "FPS set to %d", fps);
     return ESP_OK;
@@ -857,12 +953,12 @@ esp_err_t camera_stream_set_fps(int fps)
 
 int camera_stream_get_quality(void)
 {
-    return s_state.current_quality;
+    return s_state.fps_limit <= ADAPTIVE_FPS_MIN ? 15 : (int)s_state.current_quality;
 }
 
 int camera_stream_get_fps(void)
 {
-    return s_state.current_fps;
+    return MIN((int)s_state.current_fps, (int)s_state.fps_limit);
 }
 
 void camera_stream_get_stats(uint32_t *frames_sent, uint32_t *frames_failed, uint32_t *avg_frame_size,

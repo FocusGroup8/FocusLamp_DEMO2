@@ -83,13 +83,22 @@ bool camera_stream_is_running(void);
 /**
  * @brief Set JPEG encoding quality
  *
+ * Adaptive control may subsequently replace this value. With an FPS ceiling
+ * of 1 or 2, low-load mode always applies Q15 (including at the encoder).
+ * Use get_quality() for current control state and Stats actualQ for the last
+ * logged frame's encoder input.
+ *
  * @param quality  JPEG quality (1-100)
  * @return ESP_OK on success
  */
 esp_err_t camera_stream_set_quality(int quality);
 
 /**
- * @brief Set target frame rate
+ * @brief Set the user frame-rate ceiling
+ *
+ * BBA may select a lower cadence; the conservative profile tops out at 5 FPS.
+ * A ceiling of 1 or 2 also enables fixed-Q15 low-load mode. This is a runtime
+ * setting, not a persistent firmware configuration.
  *
  * @param fps  Target FPS (1-30)
  * @return ESP_OK on success

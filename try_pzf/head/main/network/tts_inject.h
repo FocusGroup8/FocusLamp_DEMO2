@@ -26,7 +26,8 @@ extern "C" {
  * @brief Ask the voice board to speak the given text
  *
  * @param text UTF-8 text to broadcast
- * @return ESP_OK on success, otherwise an esp_err_t error code
+ * @return ESP_OK only when HTTP 200 carries JSON {"ok":true}: the request
+ *         was accepted/queued, not confirmed spoken. Otherwise an error code.
  */
 esp_err_t tts_inject_speak(const char *text);
 

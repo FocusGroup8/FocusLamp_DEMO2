@@ -72,3 +72,4 @@ marker is `Camera WS: serialized JPEG/Pong/Close, partial-send failure closes
 session`. Check continuous image delivery, actual `Inference OK:
 algorithm=gesture_mantis` logs and real-hand responses. Do not interpret
 healthy-container status or webpage WebSocket status as image delivery proof.
+

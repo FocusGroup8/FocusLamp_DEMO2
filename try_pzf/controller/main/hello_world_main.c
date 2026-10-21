@@ -30,7 +30,7 @@
 #include "led_service.h"
 #include "servo_driver.h"
 #include "motion_controller.h"
-#include "light_sensor_driver.h"
+#include "ambient_service.h"
 #include "peripheral_inputs.h"
 #include "controller_modes.h"
 #include "mode_http_api.h"
@@ -255,6 +255,7 @@ static void xiaozhi_event_callback(xiaozhi_manager_event_t event, void *data, vo
         break;
     case XIAOZHI_MANAGER_EVENT_TTS_SENTENCE:
         ESP_LOGI(TAG, "[Xiaozhi] TTS sentence: %s", data ? (const char *)data : "");
+        demo_behaviors_note_tts_text(data ? (const char *)data : NULL);
         break;
     case XIAOZHI_MANAGER_EVENT_STT_TEXT:
         ESP_LOGI(TAG, "[Xiaozhi] STT text: %s", data ? (const char *)data : "");
@@ -378,9 +379,9 @@ static void init_local_motion(void)
 }
 static void init_local_light(void)
 {
-    esp_err_t ret=light_sensor_driver_init();
+    esp_err_t ret=ambient_service_start();
     if (ret!=ESP_OK) ESP_LOGW(TAG,"Local ambient init failed: %s (voice/arm continue)",esp_err_to_name(ret));
-    else ESP_LOGI(TAG,"Local ambient sensor ready (GPIO21, estimated lux)");
+    else ESP_LOGI(TAG,"Local ambient sampling started (GPIO21, estimated lux, 10s freshness)");
 }
 
 void app_main(void)
@@ -393,6 +394,10 @@ void app_main(void)
     esp_log_level_set("ESP_XIAOZHI_CHAT", ESP_LOG_INFO);
     esp_log_level_set("esp_mcp_mgr", ESP_LOG_INFO);
     esp_log_level_set("ESP_XIAOZHI_MCP", ESP_LOG_INFO);
+    /* Keep AFE errors, but silence its repeated empty-ringbuffer warnings.
+     * This only changes logging; it does not stop microphone/AFE processing
+     * or fix a failed cloud connection. Other tags keep their current level. */
+    esp_log_level_set("AFE", ESP_LOG_ERROR);
 
     init_local_led();
     init_local_motion();
@@ -667,9 +672,57 @@ void app_main(void)
 
     ESP_LOGI(TAG, "=== Setup complete ===");
 
-    /* Main loop - monitor system health */
+    /* Independent of mic callbacks: zero progress still produces diagnostics.
+     * Counters are lifetime uint32 values; subtraction handles wraparound. */
+    audio_bridge_mic_diagnostics_t previous_audio = {0};
+    xiaozhi_mic_diagnostics_t previous_cloud = {0};
+    audio_bridge_get_mic_diagnostics(&previous_audio);
+    xiaozhi_manager_get_mic_diagnostics(&previous_cloud);
+    unsigned health_tick = 0;
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(10000));
+        vTaskDelay(pdMS_TO_TICKS(5000));
+
+        audio_bridge_mic_diagnostics_t audio;
+        xiaozhi_mic_diagnostics_t cloud;
+        audio_bridge_get_mic_diagnostics(&audio);
+        xiaozhi_manager_get_mic_diagnostics(&cloud);
+#define AUDIO_DELTA(field) ((unsigned)(audio.field - previous_audio.field))
+#define CLOUD_DELTA(field) ((unsigned)(cloud.field - previous_cloud.field))
+        ESP_LOGI(TAG, "[MIC_DIAG] delta: read=%u rx=%u rx_err=%u partial=%u peak=%u "
+                 "enc_try=%u enc=%u enc_err=%u enc_empty=%u",
+                 AUDIO_DELTA(read_calls), AUDIO_DELTA(rx_frames), AUDIO_DELTA(read_errors),
+                 AUDIO_DELTA(partial_reads), (unsigned)audio.peak,
+                 AUDIO_DELTA(encode_calls), AUDIO_DELTA(encoded_frames),
+                 AUDIO_DELTA(encode_errors), AUDIO_DELTA(empty_encoded));
+        ESP_LOGI(TAG, "[UPLINK_DIAG] state=%d local=%d delta: cb=%u block_state=%u "
+                 "block_tts=%u block_local=%u send_try=%u send_ok=%u send_fail=%u "
+                 "resume_try=%u resume_ok=%u resume_fail=%u last_send_fail=%s last_resume_fail=%s "
+                 "total_send_try=%u total_send_done=%u total_send_cancelled=%u inflight_ms=%" PRIi64
+                 " cloud_event_age_ms=%" PRIi64 " audio_rx_age_ms=%" PRIi64
+                 " queue_dwell_ms=%" PRIi64,
+                 xiaozhi_manager_get_state(), audio_bridge_local_playing(),
+                 CLOUD_DELTA(callbacks), CLOUD_DELTA(blocked_state),
+                 CLOUD_DELTA(blocked_tts), CLOUD_DELTA(blocked_local),
+                 CLOUD_DELTA(send_attempts), CLOUD_DELTA(send_ok), CLOUD_DELTA(send_failed),
+                 CLOUD_DELTA(listen_attempts), CLOUD_DELTA(listen_ok), CLOUD_DELTA(listen_failed),
+                 esp_err_to_name(cloud.last_send_error), esp_err_to_name(cloud.last_listen_error),
+                 (unsigned)cloud.send_attempts, (unsigned)(cloud.send_ok + cloud.send_failed),
+                 (unsigned)cloud.send_cancelled,
+                 cloud.send_inflight_ms, cloud.cloud_event_age_ms,
+                 cloud.audio_rx_age_ms, cloud.queue_dwell_ms);
+        ESP_LOGI(TAG, "[UPLINK_QUEUE] queued=%u/8 high=%u enqueued=%u "
+                 "drop_oldest=%u discarded=%u rejected=%u gen=%u users=%u "
+                 "retiring=%d sender_stack_free=%u",
+                 (unsigned)cloud.queued, (unsigned)cloud.queue_high_water,
+                 (unsigned)cloud.enqueued, (unsigned)cloud.dropped_oldest,
+                 (unsigned)cloud.discarded, (unsigned)cloud.rejected_frames,
+                 (unsigned)cloud.generation, (unsigned)cloud.chat_users,
+                 cloud.retiring, (unsigned)cloud.sender_stack_free);
+#undef AUDIO_DELTA
+#undef CLOUD_DELTA
+        previous_audio = audio;
+        previous_cloud = cloud;
+        if (++health_tick % 2 != 0) continue; /* Preserve the existing 10 s health log. */
 
         xiaozhi_manager_state_t xiaozhi_state = xiaozhi_manager_get_state();
         ESP_LOGI(TAG, "Heap: %lu bytes | WiFi: %s | Xiaozhi: %d",

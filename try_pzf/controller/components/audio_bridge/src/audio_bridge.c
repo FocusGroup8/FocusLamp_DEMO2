@@ -26,6 +26,7 @@
 #include <limits.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "riscv/rv_utils.h"
 #include "soc/soc_caps.h"
@@ -37,6 +38,17 @@
 #endif
 
 static const char *TAG = "AUDIO_BRIDGE";
+
+static portMUX_TYPE s_mic_diag_lock = portMUX_INITIALIZER_UNLOCKED;
+static audio_bridge_mic_diagnostics_t s_mic_diag;
+
+void audio_bridge_get_mic_diagnostics(audio_bridge_mic_diagnostics_t *out) {
+  if (!out) return;
+  portENTER_CRITICAL(&s_mic_diag_lock);
+  *out = s_mic_diag;
+  s_mic_diag.peak = 0;
+  portEXIT_CRITICAL(&s_mic_diag_lock);
+}
 
 #if (AUDIO_BRIDGE_ENABLE == 1)
 
@@ -71,6 +83,12 @@ static const char *TAG = "AUDIO_BRIDGE";
 static i2s_chan_handle_t s_tx_handle = NULL;
 static i2s_chan_handle_t s_rx_handle = NULL;
 static bool s_initialized = false;
+static StaticSemaphore_t s_tx_mutex_storage;
+static SemaphoreHandle_t s_tx_mutex;
+static atomic_int s_local_playing; /* P4 lock-free word atomic, not byte CAS. */
+static atomic_uint s_tx_epoch;
+#define TX_DMA_DESC_COUNT 16
+#define TX_DMA_SAMPLES 960
 static int s_volume = CONFIG_AUDIO_BRIDGE_DEFAULT_VOLUME;
 static audio_bridge_config_t s_config;
 
@@ -342,7 +360,7 @@ static esp_err_t write_pcm_to_i2s(const int16_t *pcm_data,
   for (size_t i = 0; i < sample_count; i++) {
     int32_t sample = (int32_t)pcm_data[i];
     sample = sample * vol_scale / 0x7FFF;
-    s_pcm32_buf[i] = sample << 16;
+    s_pcm32_buf[i] = sample * 65536;
   }
 
   size_t bytes_written = 0;
@@ -352,7 +370,8 @@ static esp_err_t write_pcm_to_i2s(const int16_t *pcm_data,
    * wait for the oldest buffer to drain. Use 2000ms timeout (2× buffer time) to
    * avoid ESP_ERR_TIMEOUT during TTS playback. Previous 500ms was too short. */
   esp_err_t ret = i2s_channel_write(s_tx_handle, s_pcm32_buf, buf32_size,
-                                    &bytes_written, pdMS_TO_TICKS(2000));
+                                    &bytes_written, 2000);
+  if (ret == ESP_OK && bytes_written != buf32_size) ret = ESP_ERR_TIMEOUT;
 
   if (ret != ESP_OK) {
     ESP_LOGW(TAG, "I2S write failed: %s", esp_err_to_name(ret));
@@ -417,6 +436,7 @@ static void audio_decode_task(void *arg) {
   uint8_t *opus_data = NULL;
 
   while (s_decode_task_running) {
+    unsigned tx_epoch = atomic_load(&s_tx_epoch);
     /* Wait for OPUS frame data pointer from the queue */
     if (xQueueReceive(s_decode_queue, &opus_data, pdMS_TO_TICKS(1000)) !=
         pdTRUE) {
@@ -510,7 +530,10 @@ static void audio_decode_task(void *arg) {
              dec_info.channel);
 
     /* 将16-bit PCM写入I2S（扩展为32-bit + 音量控制） */
-    write_pcm_to_i2s(s_opus_out_buf, sample_count);
+    xSemaphoreTake(s_tx_mutex, portMAX_DELAY);
+    if (!atomic_load(&s_local_playing) && tx_epoch == atomic_load(&s_tx_epoch))
+      write_pcm_to_i2s(s_opus_out_buf, sample_count);
+    xSemaphoreGive(s_tx_mutex);
 
     free(opus_data);
     opus_data = NULL;
@@ -619,6 +642,8 @@ esp_err_t audio_bridge_init(const audio_bridge_config_t *config) {
   }
 
   s_config = *config;
+  if (!s_tx_mutex) s_tx_mutex = xSemaphoreCreateMutexStatic(&s_tx_mutex_storage);
+  if (!s_tx_mutex) return ESP_ERR_NO_MEM;
   s_volume = CONFIG_AUDIO_BRIDGE_DEFAULT_VOLUME;
 
   /* Register once at startup, before decode task creation. The IDF API is
@@ -640,8 +665,8 @@ esp_err_t audio_bridge_init(const audio_bridge_config_t *config) {
    * 16×3840 = 61440 bytes 总缓冲，~960ms 缓冲深度 */
   i2s_chan_config_t chan_cfg =
       I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-  chan_cfg.dma_desc_num = 16;
-  chan_cfg.dma_frame_num = 960;
+  chan_cfg.dma_desc_num = TX_DMA_DESC_COUNT;
+  chan_cfg.dma_frame_num = TX_DMA_SAMPLES;
   chan_cfg.auto_clear = true;
 
   ESP_LOGI(TAG, "Creating I2S channels: port=0, dma_desc=%d, dma_frame=%d",
@@ -798,10 +823,104 @@ esp_err_t audio_bridge_write_pcm(const void *data, size_t len,
     return ESP_ERR_INVALID_ARG;
   }
 
-  TickType_t ticks_to_wait =
-      (timeout_ms == portMAX_DELAY) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
-  return i2s_channel_write(s_tx_handle, data, len, bytes_written,
-                           ticks_to_wait);
+  TickType_t wait = timeout_ms == portMAX_DELAY ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
+  if (xSemaphoreTake(s_tx_mutex, wait) != pdTRUE)
+    return ESP_ERR_TIMEOUT;
+  esp_err_t ret = atomic_load(&s_local_playing) ? ESP_ERR_INVALID_STATE :
+      i2s_channel_write(s_tx_handle, data, len, bytes_written, timeout_ms);
+  xSemaphoreGive(s_tx_mutex);
+  return ret;
+}
+
+bool audio_bridge_local_playing(void) { return atomic_load(&s_local_playing); }
+
+esp_err_t audio_bridge_play_local_pcm16(const uint8_t *data, size_t len) {
+  return audio_bridge_play_local_pcm16_cancellable(data, len, NULL, NULL, NULL);
+}
+
+esp_err_t audio_bridge_play_local_pcm16_cancellable(
+    const uint8_t *data, size_t len, audio_bridge_cancel_cb_t should_cancel,
+    void *ctx, bool *output_started) {
+  if (output_started) *output_started = false;
+  if (!data || !len || (len & 1)) return ESP_ERR_INVALID_ARG;
+  if (!s_initialized || !s_tx_mutex || s_config.sample_rate != 16000)
+    return ESP_ERR_INVALID_STATE;
+  if (should_cancel && should_cancel(ctx)) return ESP_ERR_INVALID_STATE;
+  int expected = 0;
+  if (!atomic_compare_exchange_strong(&s_local_playing, &expected, true))
+    return ESP_ERR_INVALID_STATE;
+  /* Also invalidate a cloud frame already removed from the decode queue. */
+  atomic_fetch_add(&s_tx_epoch, 1);
+  TickType_t wait_start = xTaskGetTickCount();
+  TickType_t wait_budget = pdMS_TO_TICKS(2500);
+  TickType_t poll_ticks = pdMS_TO_TICKS(25);
+  if (!poll_ticks) poll_ticks = 1;
+  for (;;) {
+    if (should_cancel && should_cancel(ctx)) {
+      atomic_store(&s_local_playing, false);
+      return ESP_ERR_INVALID_STATE;
+    }
+    TickType_t elapsed = xTaskGetTickCount() - wait_start;
+    if (elapsed >= wait_budget) {
+      atomic_store(&s_local_playing, false);
+      return ESP_ERR_TIMEOUT;
+    }
+    TickType_t wait = wait_budget - elapsed;
+    if (should_cancel && wait > poll_ticks) wait = poll_ticks;
+    if (xSemaphoreTake(s_tx_mutex, wait) == pdTRUE) break;
+  }
+  /* Waited for any in-flight decoder write; all other TX writers use this lock.
+   * Local PCM never enters the OPUS queue, so cloud STOP cannot flush it. */
+  audio_bridge_flush_tts();
+  int16_t pcm[960];
+  esp_err_t ret = ESP_OK;
+  for (size_t offset = 0; offset < len && ret == ESP_OK;) {
+    if (should_cancel && should_cancel(ctx)) {
+      ret = ESP_ERR_INVALID_STATE;
+      break;
+    }
+    size_t count = (len - offset) / 2;
+    if (count > 960) count = 960;
+    for (size_t i = 0; i < count; ++i) {
+      uint16_t u = data[offset + 2*i] | ((uint16_t)data[offset + 2*i+1] << 8);
+      pcm[i] = (int16_t)(u < 32768 ? (int32_t)u : (int32_t)u - 65536);
+    }
+    ret = write_pcm_to_i2s(pcm, count);
+    if (ret == ESP_OK && output_started) *output_started = true;
+    offset += count * 2;
+  }
+  /* Continuous silence writes turn over more than the configured 16 DMA
+   * buffers. This is a practical drain, not an on_sent request-ID claim.
+   * The extra block covers a partially filled descriptor at the clip boundary. */
+  memset(pcm, 0, sizeof(pcm));
+  for (unsigned i = 0; i < TX_DMA_DESC_COUNT + 1 && ret == ESP_OK; ++i) {
+    if (should_cancel && should_cancel(ctx)) {
+      ret = ESP_ERR_INVALID_STATE;
+      break;
+    }
+    ret = write_pcm_to_i2s(pcm, 960);
+  }
+  if (should_cancel && should_cancel(ctx)) ret = ESP_ERR_INVALID_STATE;
+  if (ret != ESP_OK) {
+    /* A cancelled/short/failed write may leave local sound in DMA. Stop TX and replace
+     * the entire ring with silence before permitting recognition to resume. */
+    esp_err_t recovery = i2s_channel_disable(s_tx_handle);
+    if (recovery == ESP_OK) {
+      memset(s_pcm32_buf, 0, PCM32_BUF_SIZE);
+      for (unsigned i = 0; i < TX_DMA_DESC_COUNT && recovery == ESP_OK; ++i) {
+        size_t loaded = 0;
+        recovery = i2s_channel_preload_data(s_tx_handle, s_pcm32_buf, PCM32_BUF_SIZE, &loaded);
+        if (recovery == ESP_OK && loaded != PCM32_BUF_SIZE) recovery = ESP_FAIL;
+      }
+      if (recovery == ESP_OK) recovery = i2s_channel_enable(s_tx_handle);
+    }
+    if (recovery != ESP_OK)
+      ESP_LOGE(TAG, "Local output recovery failed: %s", esp_err_to_name(recovery));
+  }
+  audio_bridge_flush_tts();
+  atomic_store(&s_local_playing, false);
+  xSemaphoreGive(s_tx_mutex);
+  return ret;
 }
 
 esp_err_t audio_bridge_read_pcm(void *data, size_t len, size_t *bytes_read,
@@ -822,6 +941,7 @@ esp_err_t audio_bridge_read_pcm(void *data, size_t len, size_t *bytes_read,
 }
 
 void audio_bridge_tts_callback(const uint8_t *data, int len, void *ctx) {
+  if (atomic_load(&s_local_playing)) return;
   if (!s_initialized) {
     ESP_LOGW(TAG, "TTS callback but not initialized, discarding %d bytes", len);
     return;
@@ -1049,15 +1169,24 @@ static void mic_task(void *arg) {
      * Shorter timeouts (200ms) caused ESP_ERR_TIMEOUT after DMA queue pressure
      * forced buffer switches (partial reads). */
     size_t bytes_read = 0;
+    portENTER_CRITICAL(&s_mic_diag_lock);
+    ++s_mic_diag.read_calls;
+    portEXIT_CRITICAL(&s_mic_diag_lock);
     esp_err_t ret = i2s_channel_read(s_rx_handle, i2s_rx_buf, MIC_I2S_READ_SIZE,
                                      &bytes_read, pdMS_TO_TICKS(1000));
     if (ret != ESP_OK) {
+      portENTER_CRITICAL(&s_mic_diag_lock);
+      ++s_mic_diag.read_errors;
+      portEXIT_CRITICAL(&s_mic_diag_lock);
       ESP_LOGW(TAG, "I2S RX read failed: %s (bytes_read=%u)",
                esp_err_to_name(ret), (unsigned)bytes_read);
       continue;
     }
 
     if (bytes_read < MIC_I2S_READ_SIZE) {
+      portENTER_CRITICAL(&s_mic_diag_lock);
+      ++s_mic_diag.partial_reads;
+      portEXIT_CRITICAL(&s_mic_diag_lock);
       /* Partial read — log and skip (should be rare with dma_desc_num=16) */
       ESP_LOGW(TAG, "I2S RX partial read: %u/%u bytes", (unsigned)bytes_read,
                (unsigned)MIC_I2S_READ_SIZE);
@@ -1065,10 +1194,18 @@ static void mic_task(void *arg) {
     }
 
     /* Downsample 32-bit I2S to 16-bit PCM for OPUS encoder */
+    uint32_t frame_peak = 0;
     for (int i = 0; i < MIC_FRAME_SAMPLES; i++) {
       /* I2S data is left-shifted by 16 bits, right-shift to get 16-bit */
       pcm16_buf[i] = (int16_t)(i2s_rx_buf[i] >> 16);
+      int32_t sample = pcm16_buf[i];
+      uint32_t magnitude = (uint32_t)(sample < 0 ? -sample : sample);
+      if (magnitude > frame_peak) frame_peak = magnitude;
     }
+    portENTER_CRITICAL(&s_mic_diag_lock);
+    ++s_mic_diag.rx_frames;
+    if (frame_peak > s_mic_diag.peak) s_mic_diag.peak = frame_peak;
+    portEXIT_CRITICAL(&s_mic_diag_lock);
 
     /* Deliver raw PCM to wake word engine if registered */
     audio_bridge_pcm_callback_t pcm_cb;
@@ -1115,9 +1252,15 @@ static void mic_task(void *arg) {
         .len = MIC_OPUS_OUT_BUF_SIZE,
     };
 
+    portENTER_CRITICAL(&s_mic_diag_lock);
+    ++s_mic_diag.encode_calls;
+    portEXIT_CRITICAL(&s_mic_diag_lock);
     esp_audio_err_t enc_ret =
         esp_opus_enc_process(s_opus_encoder, &in_frame, &out_frame);
     if (enc_ret != ESP_AUDIO_ERR_OK) {
+      portENTER_CRITICAL(&s_mic_diag_lock);
+      ++s_mic_diag.encode_errors;
+      portEXIT_CRITICAL(&s_mic_diag_lock);
       ESP_LOGW(TAG, "OPUS encode failed: %d", enc_ret);
       continue;
     }
@@ -1126,8 +1269,14 @@ static void mic_task(void *arg) {
      * the input buffer size) */
     int encoded_len = (int)out_frame.encoded_bytes;
     if (encoded_len <= 0) {
+      portENTER_CRITICAL(&s_mic_diag_lock);
+      ++s_mic_diag.empty_encoded;
+      portEXIT_CRITICAL(&s_mic_diag_lock);
       continue;
     }
+    portENTER_CRITICAL(&s_mic_diag_lock);
+    ++s_mic_diag.encoded_frames;
+    portEXIT_CRITICAL(&s_mic_diag_lock);
 
     /* Deliver OPUS frame via callback */
     if (s_mic_callback != NULL) {
@@ -1347,6 +1496,18 @@ int audio_bridge_read_ref_pcm(int16_t *out_buf, int samples,
 }
 
 #else /* AUDIO_BRIDGE_ENABLE == 0 */
+
+bool audio_bridge_local_playing(void) { return false; }
+esp_err_t audio_bridge_play_local_pcm16(const uint8_t *data, size_t len) {
+  return audio_bridge_play_local_pcm16_cancellable(data, len, NULL, NULL, NULL);
+}
+esp_err_t audio_bridge_play_local_pcm16_cancellable(
+    const uint8_t *data, size_t len, audio_bridge_cancel_cb_t should_cancel,
+    void *ctx, bool *output_started) {
+  if (output_started) *output_started = false;
+  (void)data; (void)len; (void)should_cancel; (void)ctx;
+  return ESP_ERR_NOT_SUPPORTED;
+}
 
 esp_err_t audio_bridge_init(const audio_bridge_config_t *config) {
   (void)config;

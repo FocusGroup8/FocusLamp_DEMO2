@@ -68,6 +68,10 @@ esp_err_t wake_word_engine_pause(void);
  */
 esp_err_t wake_word_engine_resume(void);
 
+/* Independent owner: cloud resume must not release a local clip's pause. */
+esp_err_t wake_word_engine_pause_local_audio(void);
+esp_err_t wake_word_engine_resume_local_audio(void);
+
 /**
  * @brief Mark TTS playback active/inactive (enables barge-in VAD)
  *
@@ -180,6 +184,8 @@ static inline esp_err_t wake_word_engine_start(void) { return ESP_ERR_NOT_SUPPOR
 static inline esp_err_t wake_word_engine_stop(void) { return ESP_ERR_NOT_SUPPORTED; }
 static inline esp_err_t wake_word_engine_pause(void) { return ESP_ERR_NOT_SUPPORTED; }
 static inline esp_err_t wake_word_engine_resume(void) { return ESP_ERR_NOT_SUPPORTED; }
+static inline esp_err_t wake_word_engine_pause_local_audio(void) { return ESP_ERR_NOT_SUPPORTED; }
+static inline esp_err_t wake_word_engine_resume_local_audio(void) { return ESP_ERR_NOT_SUPPORTED; }
 static inline esp_err_t wake_word_engine_set_tts_active(bool active) { (void)active; return ESP_ERR_NOT_SUPPORTED; }
 static inline esp_err_t wake_word_engine_set_language(wake_word_lang_t lang) { (void)lang; return ESP_ERR_NOT_SUPPORTED; }
 static inline wake_word_lang_t wake_word_engine_get_language(void) { return WAKE_WORD_LANG_CN; }

@@ -1,12 +1,23 @@
 #pragma once
 
 #include "esp_err.h"
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef struct audio_bridge_s audio_bridge_t;
+
+/** Lifetime counters. peak is the absolute PCM16 maximum since last snapshot. */
+typedef struct {
+  uint32_t read_calls, rx_frames, read_errors, partial_reads;
+  uint32_t encode_calls, encoded_frames, encode_errors, empty_encoded;
+  uint32_t peak;
+} audio_bridge_mic_diagnostics_t;
+void audio_bridge_get_mic_diagnostics(audio_bridge_mic_diagnostics_t *out);
 
 /**
  * @brief Audio bridge configuration
@@ -70,6 +81,21 @@ esp_err_t audio_bridge_deinit(void);
  */
 esp_err_t audio_bridge_write_pcm(const void *data, size_t len,
                                  size_t *bytes_written, uint32_t timeout_ms);
+
+/* Blocking, exclusive 16kHz mono little-endian PCM16 playback. Call from a
+ * dedicated task. App must pause recognition while playing. ESP_OK means all
+ * data plus a DMA-ring-sized silence tail was written, not physical audibility. */
+esp_err_t audio_bridge_play_local_pcm16(const uint8_t *data, size_t len);
+/* Called synchronously by the playback task; return true to cancel. The
+ * callback must not block. Cancellation returns ESP_ERR_INVALID_STATE after
+ * clearing queued local output and releasing playback ownership.
+ * output_started, if non-NULL, reports whether a PCM chunk was written
+ * successfully, even when playback later fails or is cancelled. */
+typedef bool (*audio_bridge_cancel_cb_t)(void *ctx);
+esp_err_t audio_bridge_play_local_pcm16_cancellable(
+    const uint8_t *data, size_t len, audio_bridge_cancel_cb_t should_cancel,
+    void *ctx, bool *output_started);
+bool audio_bridge_local_playing(void);
 
 /**
  * @brief Read PCM data from I2S RX (microphone capture)

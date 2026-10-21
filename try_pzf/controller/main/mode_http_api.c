@@ -27,13 +27,15 @@ static esp_err_t mode_status_response(httpd_req_t *req)
     demo_behaviors_status_t demo;
     demo_behaviors_get_status(&demo);
     bool same = demo.started && demo.revision == state.revision;
-    char response[640];
+    char response[768];
     snprintf(response, sizeof(response),
         "{\"ok\":true,\"mode\":\"%s\",\"app_state\":%u,"
         "\"duration_sec\":%lu,\"remaining_sec\":%lu,\"voice_active\":%s,"
         "\"paused\":%s,\"completed\":%s,\"state_only\":%s,"
         "\"demo_worker\":%s,\"companion_local_ready\":%s,\"head_sync_ready\":%s,"
-        "\"radar_fresh\":%s,\"radar_present\":%s,\"sedentary_sec\":%u,\"sedentary_pending\":%s}",
+        "\"radar_fresh\":%s,\"radar_present\":%s,\"sedentary_sec\":%u,\"sedentary_pending\":%s,"
+        "\"sedentary_armed\":%s,\"sedentary_submitted\":%s,\"sedentary_text_observed\":%s,"
+        "\"sedentary_local_output_done\":%s}",
         controller_modes_name(state.mode), (unsigned)state.mode,
         (unsigned long)state.duration_sec, (unsigned long)state.remaining_sec,
         state.voice_active ? "true" : "false", state.paused ? "true" : "false",
@@ -42,7 +44,11 @@ static esp_err_t mode_status_response(httpd_req_t *req)
         demo.started ? "true" : "false", same && demo.companion_local_ready ? "true" : "false",
         same && demo.head_sync_ready ? "true" : "false", same && demo.radar_fresh ? "true" : "false",
         same && demo.radar_present ? "true" : "false", same ? (unsigned)demo.sedentary_sec : 0U,
-        same && demo.sedentary_pending ? "true" : "false");
+        same && demo.sedentary_pending ? "true" : "false",
+        same && demo.sedentary_armed ? "true" : "false",
+        same && demo.sedentary_submitted ? "true" : "false",
+        same && demo.sedentary_text_observed ? "true" : "false",
+        same && demo.sedentary_local_output_done ? "true" : "false");
     return httpd_resp_sendstr(req, response);
 }
 

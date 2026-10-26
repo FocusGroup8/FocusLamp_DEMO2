@@ -29,7 +29,7 @@ extern "C" {
 #define LED_GPIO_A GPIO_NUM_29 /*!< LED_A warm white PWM pin (PWM_A = 暖光) */
 #define LED_GPIO_B GPIO_NUM_28 /*!< LED_B cool white PWM pin (PWM_B = 冷光) */
 
-#define LED_PWM_FREQ_HZ 5000               /*!< PWM frequency 5kHz (above visible flicker) */
+#define LED_PWM_FREQ_HZ 20000              /*!< PWM frequency 20kHz */
 #define LED_PWM_DUTY_RES LEDC_TIMER_10_BIT /*!< 10-bit duty resolution (0-1023) */
 #define LED_PWM_MAX_DUTY 1023              /*!< Full-scale duty value for 10-bit resolution */
 #define LED_MAX_DUTY_PERCENT 100           /*!< Max PWM duty as percentage of full scale (100% = full on) */

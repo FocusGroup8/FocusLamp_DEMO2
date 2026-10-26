@@ -34,15 +34,15 @@ typedef struct {
 static clip_t s_reminder = { .start = clip_start, .end = clip_end };
 #define WELCOME_CLIP(n, message) { .start = welcome_##n##_start, .end = welcome_##n##_end, .text = message }
 static clip_t s_welcomes[LOCAL_WELCOME_COUNT] = {
-    WELCOME_CLIP(01, "嗨，主人，想我了吗？Focus一直都在哦！"),
-    WELCOME_CLIP(02, "哈哈，摸得我脑袋痒痒的，开心值又加一啦！"),
-    WELCOME_CLIP(03, "欢迎回来！小灯已经就位，随时陪你出发。"),
-    WELCOME_CLIP(04, "今天也辛苦啦，先坐好，让Focus陪着你。"),
+    WELCOME_CLIP(01, "嗨主人想我了吗？focus一直都在哦。"),
+    WELCOME_CLIP(02, "哈哈，摸得我脑袋痒痒的，开心值又加一啦。"),
+    WELCOME_CLIP(03, "欢迎回来，小灯已经就位随时陪你出发。"),
+    WELCOME_CLIP(04, "今天辛苦了，休息一下，我会一直陪着你。"),
     WELCOME_CLIP(05, "给你一点光，也给你一点好心情。"),
-    WELCOME_CLIP(06, "准备好了吗？我们一起专注，把事情做好。"),
-    WELCOME_CLIP(07, "收到摸摸头！今天也要元气满满哦。"),
+    WELCOME_CLIP(06, "准备好了吗？我们一起专注把事情做好。"),
+    WELCOME_CLIP(07, "收到摸摸头，今天也要元气满满哦。"),
     WELCOME_CLIP(08, "别着急，我们一件一件慢慢来。"),
-    WELCOME_CLIP(09, "有你在，我的小世界又亮起来啦！"),
+    WELCOME_CLIP(09, "有你在我的小世界又亮起来了。"),
 };
 #undef WELCOME_CLIP
 

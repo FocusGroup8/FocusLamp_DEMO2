@@ -23,6 +23,7 @@
 #include "focuslamp_bridge.h"
 #include "status_receiver.h"
 #include "tts_http_api.h"
+#include "tts_capture.h"
 #include "device_info_api.h"
 #include "focuslamp_discovery.h"
 #include "device_state.h"
@@ -231,6 +232,7 @@ static void xiaozhi_event_callback(xiaozhi_manager_event_t event, void *data, vo
          * via xiaozhi_manager_send_wake_word(). */
         break;
     case XIAOZHI_MANAGER_EVENT_DISCONNECTED:
+        tts_capture_abort();
         ESP_LOGW(TAG, "[Xiaozhi] Disconnected from server");
         chat_state_report(false); /* A disconnected dialogue must not freeze focus. */
         break;
@@ -243,17 +245,21 @@ static void xiaozhi_event_callback(xiaozhi_manager_event_t event, void *data, vo
         chat_state_report(true);
         break;
     case XIAOZHI_MANAGER_EVENT_AUDIO_CHANNEL_CLOSED:
+        tts_capture_abort();
         ESP_LOGI(TAG, "[Xiaozhi] Audio channel closed — back to idle");
         /* A closed channel ends dialogue; TTS_STOP alone still means listening. */
         chat_state_report(false);
         break;
     case XIAOZHI_MANAGER_EVENT_TTS_START:
+        tts_capture_start();
         ESP_LOGI(TAG, "[Xiaozhi] TTS started");
         break;
     case XIAOZHI_MANAGER_EVENT_TTS_STOP:
+        tts_capture_stop();
         ESP_LOGI(TAG, "[Xiaozhi] TTS stopped — continuing conversation (listening)");
         break;
     case XIAOZHI_MANAGER_EVENT_TTS_SENTENCE:
+        tts_capture_sentence(data ? (const char *)data : NULL);
         ESP_LOGI(TAG, "[Xiaozhi] TTS sentence: %s", data ? (const char *)data : "");
         demo_behaviors_note_tts_text(data ? (const char *)data : NULL);
         break;
@@ -261,9 +267,11 @@ static void xiaozhi_event_callback(xiaozhi_manager_event_t event, void *data, vo
         ESP_LOGI(TAG, "[Xiaozhi] STT text: %s", data ? (const char *)data : "");
         break;
     case XIAOZHI_MANAGER_EVENT_SERVER_GOODBYE:
+        tts_capture_abort();
         ESP_LOGI(TAG, "[Xiaozhi] Server goodbye — conversation ended, waiting for wake word");
         break;
     case XIAOZHI_MANAGER_EVENT_ERROR:
+        tts_capture_abort();
         ESP_LOGE(TAG, "[Xiaozhi] Error occurred");
         break;
     }
@@ -324,6 +332,7 @@ static void chat_state_report(bool active)
  *-------------------------------------------------------------*/
 static void xiaozhi_audio_callback(const uint8_t *data, int len, void *ctx)
 {
+    if (len > 0) tts_capture_packet(data, (size_t)len);
     audio_bridge_tts_callback(data, len, ctx);
 }
 
@@ -375,6 +384,8 @@ static void init_local_motion(void)
     else {
         ESP_LOGI(TAG,"Local arm ready: self.arm.* and self.focuslamp.arm/servo.*");
         motion_log_positions();
+        ret=motion_controller_start_position_sampling();
+        if (ret!=ESP_OK) ESP_LOGW(TAG,"Read-only arm sampling unavailable: %s (existing motion continues)",esp_err_to_name(ret));
     }
 }
 static void init_local_light(void)

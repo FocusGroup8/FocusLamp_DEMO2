@@ -1,5 +1,30 @@
 # 拍头九条本地欢迎语
 
+## 当前录音：小智云端音色离线资源（2026-10-22）
+
+- 已将用户采集的九条欢迎语和一条久坐提醒 WAV 安装到 `main/audio`，不是微软慧慧音色。
+- 声音来自该设备当时的普通小智云端对话；具体服务商/音色 ID 未知，不据此猜测型号。
+- 仍是固定本地播放，不新增每次触发的云端请求。普通对话、轮播、合并待播、长按取消、
+  雷达在位计时与播放互斥逻辑不变。只需要编译/烧录 controller，head 不动。
+- 第四句现在是“今天辛苦了，休息一下，我会一直陪着你。”；第九句实际读的是“亮起来了”。
+  所有实际云端字幕已同步到 `welcome_messages.json` 和播放日志文案。
+- `main/audio/cloud_voice_assets.json` 记录全部十段的采集来源、实际字幕、SHA256、时长及采样数。
+  采集目录仅用于溯源，不是编译依赖；构建只需要工程内的 WAV。
+- 十段总计 1,147,020 字节，均为 16kHz、单声道、16bit PCM；直接使用采集文件，未再合成或重编码。
+- 替换前资源、相关文案与旧 controller.bin 在
+  `../version_snapshots/2026-10-22_before_cloud_voice_assets/`，可回退旧音色。
+- 新资源尚未烧录，上板后检查欢迎语 1→9→1、长按取消、播后唤醒和久坐提醒。
+
+### 本次电脑端验证（2026-10-22）
+
+- 84 项 Python 测试通过；ESP-IDF 5.5.4 controller 构建成功。
+- app 大小 `0x3d3fb0`，6 MiB app 分区剩余 `0x22c050`（约 36%）。
+- 从新 ELF 中提取十段嵌入资源，SHA256 全部与采集 WAV 一致。
+- 与替换前快照逐字节比较，播放函数实现、sdkconfig 和 dependencies.lock 未变；本批只更新录音与对应文案、来源清单、测试和说明。
+- controller.bin SHA256：`18D14A1E713947D055C0AA01889EB37F4D222B4CC42B48D2D9CB8A0BE0AF0ED0`。
+- controller.elf SHA256：`4AFC67D46E0096DC917EDBCE7CDFD4D0A16A9F86C48185DD1677BF83A5027E14`。
+- 尚未烧录、未做扬声器试听；电脑端验证不替代上板检查。
+
 ## 本次行为
 
 - 灯头原来的单击请求保留，基座将那三条固定欢迎文字识别为触发信号；实际播放基座内置的九条录音。
@@ -34,11 +59,13 @@ idf.py -p COM6 flash monitor
 ## 资产与复现
 
 - 九条文字、文件名与格式记录在 `main/audio/welcome_messages.json`。
-- 本机语音合成脚本为 `tools/generate_welcome_audio.ps1`，重新生成后需重新编译。使用本地中文合成声音，不使用小智云端音色。
+- 当前资源来自云端对话采集，流程见 `docs/tts_capture_usage.md`；换成新录音后需重新编译。
+  `tools/generate_welcome_audio.ps1` 是早期 Windows SAPI 生成工具，不适用于当前云端音色。
+  当前清单中的 voice 是来源说明，不是可传给 Windows `SelectVoice` 的本地音色名。
 - 修改前留存：`../version_snapshots/2026-10-20_controller_before_local_welcome9`（相对于工程根目录）。
 - 未改动 head、光感/摄像头/机械臂逻辑、sdkconfig、dependencies.lock、SDK 发送超时和心跳。
 
-## 本轮电脑端验证（2026-10-20）
+## 历史电脑端验证（2026-10-20，以下哈希/大小是替换前慧慧版）
 
 - ESP-IDF 5.5.4 controller 完整构建成功，app 大小 `0x442540`（4,465,984 字节），6 MiB app 分区剩余 `0x1bdac0`，约 29%。九条录音合计 1,431,294 字节，直接嵌入 flash，不为九条录音新建任务或整段 RAM 缓冲。
 - `python -m unittest discover -s controller/tests -v`：56 项通过（源码约束、独立 Python 策略模型、实际 WAV 文件检查）；不是 C/FreeRTOS 实机运行测试。

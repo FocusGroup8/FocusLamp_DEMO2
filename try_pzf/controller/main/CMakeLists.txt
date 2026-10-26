@@ -1,4 +1,4 @@
-idf_component_register(SRCS "hello_world_main.c" "tts_http_api.c" "device_info_api.c" "peripheral_inputs.c" "mode_http_api.c" "lcd_status_ui.c" "demo_behaviors.c" "local_reminder.c"
+idf_component_register(SRCS "tts_capture.c" "hello_world_main.c" "tts_http_api.c" "device_info_api.c" "peripheral_inputs.c" "mode_http_api.c" "lcd_status_ui.c" "demo_behaviors.c" "local_reminder.c"
                        EMBED_FILES "audio/sedentary_reminder.wav"
                                    "audio/welcome_01.wav" "audio/welcome_02.wav" "audio/welcome_03.wav"
                                    "audio/welcome_04.wav" "audio/welcome_05.wav" "audio/welcome_06.wav"

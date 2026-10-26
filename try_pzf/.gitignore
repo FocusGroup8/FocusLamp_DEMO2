@@ -9,3 +9,8 @@
 **/.vscode/
 **/.git/
 **/.env
+**/build_*/
+**/.trae/
+**/arm_readonly_capture/
+**/audio_captures/
+**/.tts_capture_deps/

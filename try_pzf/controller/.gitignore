@@ -78,3 +78,7 @@ Desktop.ini
 *.sln.docstates # Visual Studio
 tmp_log.txt
 example/
+
+# Optional cloud TTS recordings and private conversion tools
+/audio_captures/
+/tools/.tts_capture_deps/

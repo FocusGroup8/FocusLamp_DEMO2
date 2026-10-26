@@ -210,7 +210,7 @@
  * @name LED PWM Parameters
  * @{
  */
-#define BOARD_LED_PWM_FREQ_HZ 5000               /*!< PWM frequency 5kHz (above visible flicker) */
+#define BOARD_LED_PWM_FREQ_HZ 20000              /*!< PWM frequency 20kHz */
 #define BOARD_LED_PWM_TIMER LEDC_TIMER_1         /*!< LEDC timer for LED PWM (TIMER_1 to avoid backlight TIMER_0) */
 #define BOARD_LED_PWM_DUTY_RES LEDC_TIMER_10_BIT /*!< 10-bit duty (0-1023) */
 #define BOARD_LED_PWM_CHANNEL_A LEDC_CHANNEL_0   /*!< LEDC channel for LED_A */

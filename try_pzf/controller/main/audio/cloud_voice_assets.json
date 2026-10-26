@@ -1,0 +1,102 @@
+{
+  "source": "cloud_tts_capture",
+  "voice": "Xiaozhi cloud conversation voice (captured)",
+  "provider_id_known": false,
+  "captured_at": "2026-10-22",
+  "sample_rate_hz": 16000,
+  "bits_per_sample": 16,
+  "channels": 1,
+  "note": "Captured from the device's configured Xiaozhi cloud voice, then installed as offline playback assets. Source capture folders are provenance only, not build dependencies. Actual cloud subtitles are preserved; no local speech synthesis or re-encoding was performed.",
+  "clips": [
+    {
+      "file": "welcome_01.wav",
+      "text": "嗨主人想我了吗？focus一直都在哦。",
+      "source_file": "audio_captures/20261022_121845_121521/welcome_01.wav",
+      "sha256": "2a2ad0dd78884417649f8d46a42ea58975199096707e3463c63bee60977acbd8",
+      "duration_seconds": 4.38,
+      "sample_count": 70080,
+      "wav_bytes": 140238
+    },
+    {
+      "file": "welcome_02.wav",
+      "text": "哈哈，摸得我脑袋痒痒的，开心值又加一啦。",
+      "source_file": "audio_captures/20261022_131924_448791/welcome_02.wav",
+      "sha256": "935877e7a9f4b286c43e45fe0677bb9adeeccedfedd0ed2949c6b87f99660f92",
+      "duration_seconds": 4.62,
+      "sample_count": 73920,
+      "wav_bytes": 147918
+    },
+    {
+      "file": "welcome_03.wav",
+      "text": "欢迎回来，小灯已经就位随时陪你出发。",
+      "source_file": "audio_captures/20261022_131924_448791/welcome_03.wav",
+      "sha256": "cb13c8ac7ecebf0883a09b367c5d34dcebd930ee48a67a866a3113d7f89894d4",
+      "duration_seconds": 3.84,
+      "sample_count": 61440,
+      "wav_bytes": 122958
+    },
+    {
+      "file": "welcome_04.wav",
+      "text": "今天辛苦了，休息一下，我会一直陪着你。",
+      "source_file": "audio_captures/20261022_133124_115507/welcome_04.wav",
+      "sha256": "d41602304ed9558313b01d5c6e5fe13c2f1b0160eca96524b5e8b01acf69c8f4",
+      "duration_seconds": 3.48,
+      "sample_count": 55680,
+      "wav_bytes": 111438
+    },
+    {
+      "file": "welcome_05.wav",
+      "text": "给你一点光，也给你一点好心情。",
+      "source_file": "audio_captures/20261022_133124_115507/welcome_05.wav",
+      "sha256": "ad7c7ea3385bc2274767316c6bbdafc80abd6f8ad35ee881d15fa1614d9b8685",
+      "duration_seconds": 3,
+      "sample_count": 48000,
+      "wav_bytes": 96078
+    },
+    {
+      "file": "welcome_06.wav",
+      "text": "准备好了吗？我们一起专注把事情做好。",
+      "source_file": "audio_captures/20261022_133124_115507/welcome_06.wav",
+      "sha256": "b8fe65ecacdad2fa93f904ee35a447d82990a134cd166abcc81eb04a8a6a4c3b",
+      "duration_seconds": 3.84,
+      "sample_count": 61440,
+      "wav_bytes": 122958
+    },
+    {
+      "file": "welcome_07.wav",
+      "text": "收到摸摸头，今天也要元气满满哦。",
+      "source_file": "audio_captures/20261022_133124_115507/welcome_07.wav",
+      "sha256": "6c5ac57d3b54f41bbfea2ffaf5316c82a5ae6304419430e5147ebb04513efb86",
+      "duration_seconds": 3.54,
+      "sample_count": 56640,
+      "wav_bytes": 113358
+    },
+    {
+      "file": "welcome_08.wav",
+      "text": "别着急，我们一件一件慢慢来。",
+      "source_file": "audio_captures/20261022_133124_115507/welcome_08.wav",
+      "sha256": "82d7e40e24a06eba34aaccc4d3fd234a6e01db2c7df4e59fb1fdee7966df88b8",
+      "duration_seconds": 2.76,
+      "sample_count": 44160,
+      "wav_bytes": 88398
+    },
+    {
+      "file": "welcome_09.wav",
+      "text": "有你在我的小世界又亮起来了。",
+      "source_file": "audio_captures/20261022_133124_115507/welcome_09.wav",
+      "sha256": "56bcab17fd0dfb511f9502f3cb93dd3a1ca50ff0d5c10414007a3da02b41878d",
+      "duration_seconds": 2.82,
+      "sample_count": 45120,
+      "wav_bytes": 90318
+    },
+    {
+      "file": "sedentary_reminder.wav",
+      "text": "你已经坐了很久，请站起来活动活动吧。",
+      "source_file": "audio_captures/20261022_133124_115507/sedentary_reminder.wav",
+      "sha256": "3b16bfcc05192efbcd3be31dca13c119c34198a94f7c0a77bdadf64dce5e1261",
+      "duration_seconds": 3.54,
+      "sample_count": 56640,
+      "wav_bytes": 113358
+    }
+  ]
+}

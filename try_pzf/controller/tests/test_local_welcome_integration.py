@@ -1,6 +1,7 @@
 """Static integration/asset checks, not board/RTOS or audible-playback tests."""
 
 import json
+import hashlib
 from pathlib import Path
 import struct
 import unittest
@@ -80,12 +81,41 @@ class LocalWelcomeIntegrationTests(unittest.TestCase):
             self.assertNotIn("chat_close_channel(", body)
             self.assertNotIn("s_mic_paused_for_tts =", body)
 
-    def test_legacy_radar_api_and_clip_remain(self):
+    def test_radar_trigger_and_local_playback_api_remain(self):
         reminder = function_body(self.local, "play_reminder")
         self.assertIn("req->allowed(req->cookie)", reminder)
         self.assertIn("req->result(req->cookie, ret)", reminder)
         self.assertIn("audio_bridge_play_local_pcm16(s_reminder.pcm, s_reminder.pcm_size)", reminder)
         self.assertIn("audio_bridge_play_local_pcm16_cancellable", self.audio)
+
+    def test_cloud_voice_assets_match_installed_hashes_and_sample_counts(self):
+        audio_dir = CONTROLLER / "main/audio"
+        provenance = json.loads((audio_dir / "cloud_voice_assets.json").read_text(encoding="utf-8"))
+        self.assertEqual(provenance["source"], "cloud_tts_capture")
+        self.assertFalse(provenance["provider_id_known"])
+        clips = provenance["clips"]
+        self.assertEqual([clip["file"] for clip in clips],
+                         [f"welcome_{index:02d}.wav" for index in range(1, 10)] + ["sedentary_reminder.wav"])
+        for clip in clips:
+            with self.subTest(file=clip["file"]):
+                path = audio_dir / clip["file"]
+                self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), clip["sha256"])
+                self.assertEqual(path.stat().st_size, clip["wav_bytes"])
+                with wave.open(str(path), "rb") as wav:
+                    self.assertEqual((wav.getnchannels(), wav.getsampwidth(), wav.getframerate(), wav.getcomptype()),
+                                     (1, 2, 16000, "NONE"))
+                    self.assertEqual(wav.getnframes(), clip["sample_count"])
+                    self.assertAlmostEqual(wav.getnframes() / 16000, clip["duration_seconds"])
+
+    def test_current_manifest_uses_actual_cloud_subtitles_not_local_sapi_voice(self):
+        audio_dir = CONTROLLER / "main/audio"
+        manifest = json.loads((audio_dir / "welcome_messages.json").read_text(encoding="utf-8-sig"))
+        provenance = json.loads((audio_dir / "cloud_voice_assets.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["source"], "cloud_tts_capture")
+        self.assertEqual(manifest["voice"], provenance["voice"])
+        self.assertNotIn("Huihui", manifest["voice"])
+        self.assertEqual([message["text"] for message in manifest["messages"]],
+                         [clip["text"] for clip in provenance["clips"][:9]])
 
     def test_embedded_wavs_and_spoken_texts_match_manifest(self):
         audio_dir = CONTROLLER / "main/audio"

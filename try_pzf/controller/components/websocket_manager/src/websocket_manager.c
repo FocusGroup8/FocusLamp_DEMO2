@@ -437,8 +437,10 @@ esp_err_t ws_manager_server_start(void)
      * HTTP server. To allow more, raise CONFIG_LWIP_MAX_SOCKETS via menuconfig. */
     config.max_open_sockets = WS_MANAGER_SERVER_MAX_CONN + 3;
     config.close_fn = ws_session_close_cb;
-    /* L5.0: six existing URIs plus three migrated base endpoints. */
-    config.max_uri_handlers = 12;
+    /* Existing REST/WS routes plus GET/POST /api/tts/capture. */
+    /* 15 existing routes (including capture GET/POST and mode GET/POST),
+     * plus manual arm limits GET and single-servo POST. */
+    config.max_uri_handlers = 20;
 
     ESP_LOGI(TAG, "Starting WebSocket server on port %d", config.server_port);
 

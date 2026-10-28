@@ -1,0 +1,98 @@
+From: FocusLamp local maintenance patch
+Subject: [LOCAL C6] Voice vision over the validated delayed MCP worker
+
+Requires prior C5 and updated mcp_delayed_probe application component.
+---
+diff --git a/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_mcp.c b/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_mcp.c
+--- a/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_mcp.c
++++ b/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_mcp.c
+@@ -14,6 +14,7 @@
+ #include "esp_xiaozhi_transport.h"
+ #include "esp_xiaozhi_mcp.h"
+ #include "mcp_delayed_probe.h"
++#include "mcp_vision_client.h"
+ #include <math.h>
+ 
+ /**
+@@ -60,7 +61,7 @@
+ }
+ 
+ /* Build a normal CallToolResult, not a second response or MCP task notification. */
+-static char *probe_response(const cJSON *id, const char *session, const char *text, int error)
++static char *probe_response(const cJSON *id, const char *session, const char *text, int error, bool tool_failed)
+ {
+     cJSON *root=cJSON_CreateObject();
+     if (!root) return NULL;
+@@ -78,10 +79,20 @@
+         cJSON *entry=content ? cJSON_CreateObject() : NULL;
+         if (entry && !cJSON_AddItemToArray(content,entry)) { cJSON_Delete(entry); entry=NULL; }
+         ok=entry && cJSON_AddStringToObject(entry,"type","text") && cJSON_AddStringToObject(entry,"text",text) &&
+-           cJSON_AddBoolToObject(result,"isError",false);
++           cJSON_AddBoolToObject(result,"isError",tool_failed);
+     }
+     char *wire=ok ? cJSON_PrintUnformatted(root) : NULL;
+     cJSON_Delete(root);
++    return wire;
++}
++static char *vision_work(const char *id_json,const char *session,const char *question,
++                          mcp_probe_guard_t current,void *context)
++{
++    bool failed=true;
++    char *answer=mcp_vision_answer(question,current,context,&failed);
++    cJSON *id=cJSON_Parse(id_json);
++    char *wire=id ? probe_response(id,session,answer ? answer : "识图内存不足。",0,failed) : NULL;
++    cJSON_Delete(id);free(answer);
+     return wire;
+ }
+ static esp_err_t probe_try_handle(esp_xiaozhi_mcp_item_t *item, const char *payload,
+@@ -92,36 +103,42 @@
+     if (!root) return ESP_OK;
+     const cJSON *method=cJSON_GetObjectItem(root,"method"), *params=cJSON_GetObjectItem(root,"params");
+     const cJSON *name=cJSON_GetObjectItem(params,"name");
+-    if (!cJSON_IsString(method) || strcmp(method->valuestring,"tools/call") ||
+-        !cJSON_IsString(name) || strcmp(name->valuestring,MCP_PROBE_TOOL_NAME)) {
++    if (!cJSON_IsString(method) || strcmp(method->valuestring,"tools/call") || !cJSON_IsString(name) ||
++        (strcmp(name->valuestring,MCP_PROBE_TOOL_NAME) && strcmp(name->valuestring,MCP_VISION_TOOL_NAME))) {
+         cJSON_Delete(root); return ESP_OK;
+     }
+     *handled=true;
++    bool vision=!strcmp(name->valuestring,MCP_VISION_TOOL_NAME);
+     const cJSON *id=cJSON_GetObjectItem(root,"id");
+     if (!cJSON_IsString(id) && !(cJSON_IsNumber(id) && isfinite(id->valuedouble))) {
+         cJSON_Delete(root); return ESP_ERR_INVALID_ARG;
+     }
+     const cJSON *args=cJSON_GetObjectItem(params,"arguments");
+     const cJSON *delay=cJSON_GetObjectItem(args,"delay_ms"), *text=cJSON_GetObjectItem(args,"text");
++    const cJSON *question=cJSON_GetObjectItem(args,"question");
++    const char *question_text=question && cJSON_IsString(question) ? question->valuestring : "请描述当前摄像头画面中的物体。";
+     int error=0;
+     const char *message=text && cJSON_IsString(text) ? text->valuestring : "延迟验证完成，校验码7301。";
+     int delay_ms=delay && cJSON_IsNumber(delay) ? delay->valueint : 3000;
+     if (!session || !*session || strlen(session)>256 || cJSON_GetObjectItem(params,"task") ||
+         (args && !cJSON_IsObject(args)) ||
+-        (delay && (!cJSON_IsNumber(delay) || (delay->valuedouble!=0 && delay->valuedouble!=3000))) ||
+-        (text && (!cJSON_IsString(text) || !*text->valuestring || strlen(text->valuestring)>160))) {
+-        error=-32602; message="Diagnostic requires delay_ms 0/3000, text <=160 UTF-8 bytes and current session; no task mode";
++        (!vision && delay && (!cJSON_IsNumber(delay) || (delay->valuedouble!=0 && delay->valuedouble!=3000))) ||
++        (!vision && text && (!cJSON_IsString(text) || !*text->valuestring || strlen(text->valuestring)>160)) ||
++        (vision && question && (!cJSON_IsString(question) || !*question->valuestring || strlen(question->valuestring)>1000))) {
++        error=-32602; message="Invalid tool arguments/current session; no task mode; question <=1000 UTF-8 bytes";
+     }
+     char *id_json=cJSON_PrintUnformatted(id);
+     if (!id_json || strlen(id_json)>128) { cJSON_free(id_json); cJSON_Delete(root); return ESP_ERR_INVALID_ARG; }
+-    char *wire=probe_response(id,session ? session : "",message,error);
++    char *wire=probe_response(id,session ? session : "",message,error,false);
+     esp_err_t ret=wire ? ESP_OK : ESP_ERR_NO_MEM;
+-    if (wire && !error) ret=mcp_delayed_probe_submit(item->probe,wire,id_json,session,(uint32_t)delay_ms);
++    if (wire && !error) ret=vision ?
++        mcp_delayed_probe_submit_work(item->probe,id_json,session,question_text,vision_work) :
++        mcp_delayed_probe_submit(item->probe,wire,id_json,session,(uint32_t)delay_ms);
+     if (ret==MCP_PROBE_DUPLICATE) ret=ESP_OK;
+     else if (wire && (error || ret!=ESP_OK)) {
+         if (!error) {
+             cJSON_free(wire);
+-            wire=probe_response(id,session,"Diagnostic busy/unavailable; request not queued",-32000);
++            wire=probe_response(id,session,"Tool busy/unavailable; request not queued",-32000,false);
+         }
+         ret=wire ? esp_xiaozhi_transport_send_text(item->transport_handle,wire) : ESP_ERR_NO_MEM;
+     }

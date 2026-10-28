@@ -679,7 +679,8 @@ static esp_err_t esp_websocket_client_create_transport(esp_websocket_client_hand
     return ESP_OK;
 }
 
-static int esp_websocket_client_send_with_exact_opcode(esp_websocket_client_handle_t client, ws_transport_opcodes_t opcode, const uint8_t *data, int len, TickType_t timeout)
+static int esp_websocket_client_send_with_exact_opcode_guarded(esp_websocket_client_handle_t client, ws_transport_opcodes_t opcode, const uint8_t *data, int len, TickType_t timeout,
+                                                              bool (*guard)(void *), void *context)
 {
     int ret = -1;
     int need_write = len;
@@ -712,6 +713,11 @@ static int esp_websocket_client_send_with_exact_opcode(esp_websocket_client_hand
         return -1;
     }
 #endif
+
+    if (guard && (!esp_websocket_client_is_connected(client) || !guard(context))) {
+        ret = -2;
+        goto unlock_and_return;
+    }
 
     if (esp_websocket_new_buf(client, true) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to setup tx buffer");
@@ -771,6 +777,25 @@ unlock_and_return:
     xSemaphoreGiveRecursive(client->lock);
 #endif
     return ret;
+}
+
+static int esp_websocket_client_send_with_exact_opcode(esp_websocket_client_handle_t client, ws_transport_opcodes_t opcode,
+                                                       const uint8_t *data, int len, TickType_t timeout)
+{
+    return esp_websocket_client_send_with_exact_opcode_guarded(client,opcode,data,len,timeout,NULL,NULL);
+}
+
+int esp_websocket_client_send_text_guarded(esp_websocket_client_handle_t client, const char *data, int len,
+                                          TickType_t timeout, bool (*guard)(void *), void *context)
+{
+#ifdef CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK
+    /* TX-only locking cannot serialize the ownership check with reconnect. */
+    return -2;
+#else
+    if (!guard) return -2;
+    return esp_websocket_client_send_with_exact_opcode_guarded(client,
+        WS_TRANSPORT_OPCODES_TEXT|WS_TRANSPORT_OPCODES_FIN,(const uint8_t *)data,len,timeout,guard,context);
+#endif
 }
 
 esp_websocket_client_handle_t esp_websocket_client_init(const esp_websocket_client_config_t *config)

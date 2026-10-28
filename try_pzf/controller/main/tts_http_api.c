@@ -40,6 +40,7 @@
 #include "ambient_service.h"
 #include "local_reminder.h"
 #include "tts_capture.h"
+#include "mcp_vision_client.h"
 
 static const char *TAG = "TTS_API";
 
@@ -852,6 +853,38 @@ static const httpd_uri_t arm_stop_uri={
     .uri="/api/arm/stop", .method=HTTP_POST, .handler=arm_stop_handler,
 };
 
+static esp_err_t vision_service_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req,"application/json");
+    if (req->content_len<=0 || req->content_len>256) {
+        httpd_resp_set_status(req,"400 Bad Request");
+        return httpd_resp_sendstr(req,"{\"ok\":false,\"error\":\"invalid service URL body\"}");
+    }
+    char body[257];int received=0;
+    while (received<req->content_len) {
+        int n=httpd_req_recv(req,body+received,req->content_len-received);
+        if (n<=0) {
+            httpd_resp_set_status(req,"400 Bad Request");
+            return httpd_resp_sendstr(req,"{\"ok\":false,\"error\":\"body incomplete\"}");
+        }
+        received+=n;
+    }
+    body[received]=0;
+    cJSON *json=cJSON_Parse(body),*url=cJSON_GetObjectItemCaseSensitive(json,"url");
+    esp_err_t ret=cJSON_IsString(url) ? mcp_vision_set_url(url->valuestring) : ESP_ERR_INVALID_ARG;
+    cJSON_Delete(json);
+    if (ret!=ESP_OK) {
+        httpd_resp_set_status(req,"400 Bad Request");
+        return httpd_resp_sendstr(req,"{\"ok\":false,\"error\":\"expected private LAN IPv4 HTTP origin\"}");
+    }
+    char registered[128],response[180];mcp_vision_get_url(registered,sizeof(registered));
+    snprintf(response,sizeof(response),"{\"ok\":true,\"url\":\"%s\"}",registered);
+    return httpd_resp_sendstr(req,response);
+}
+static const httpd_uri_t vision_service_uri={
+    .uri="/api/vision/service",.method=HTTP_POST,.handler=vision_service_handler,
+};
+
 esp_err_t tts_http_api_init(void)
 {
     if (!ws_manager_server_is_running()) {
@@ -919,6 +952,9 @@ esp_err_t tts_http_api_init(void)
     if (ret != ESP_OK) return ret;
     ret = ws_manager_server_register_uri(&arm_jog_uri);
     if (ret != ESP_OK) return ret;
+
+    ret=ws_manager_server_register_uri(&vision_service_uri);
+    if (ret!=ESP_OK) return ret;
 
     ESP_LOGI(TAG, "TTS API endpoints registered: POST /api/tts/speak, POST /api/chat/end");
     ESP_LOGI(TAG, "Local endpoints registered: POST /api/detect/phone, GET /api/ambient, POST /api/arm/gesture, POST /api/arm/stop, GET /api/arm/pose, GET /api/arm/limits, POST /api/arm/servo");

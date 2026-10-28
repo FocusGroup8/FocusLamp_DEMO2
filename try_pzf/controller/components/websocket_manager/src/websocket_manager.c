@@ -440,7 +440,7 @@ esp_err_t ws_manager_server_start(void)
     /* Existing REST/WS routes plus GET/POST /api/tts/capture. */
     /* 15 existing routes (including capture GET/POST and mode GET/POST),
      * plus manual arm limits GET and single-servo POST. */
-    config.max_uri_handlers = 20;
+    config.max_uri_handlers = 24; /* Includes PC vision-service registration. */
 
     ESP_LOGI(TAG, "Starting WebSocket server on port %d", config.server_port);
 

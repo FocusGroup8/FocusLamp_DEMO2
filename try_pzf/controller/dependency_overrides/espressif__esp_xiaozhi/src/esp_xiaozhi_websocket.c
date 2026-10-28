@@ -315,6 +315,20 @@ esp_err_t esp_xiaozhi_websocket_send_text(esp_xiaozhi_websocket_handle_t handle,
     return ESP_OK;
 }
 
+esp_err_t esp_xiaozhi_websocket_send_text_guarded(esp_xiaozhi_websocket_handle_t handle,
+                                                const char *text, bool (*guard)(void *), void *context)
+{
+    if (!handle || !text || !guard) return ESP_ERR_INVALID_ARG;
+    esp_xiaozhi_websocket_t *websocket = (esp_xiaozhi_websocket_t *)handle;
+    if (!websocket->websocket_client || !websocket->websocket_connected) return ESP_ERR_INVALID_STATE;
+    int len = strlen(text);
+    int sent = esp_websocket_client_send_text_guarded(websocket->websocket_client,text,len,
+                                                     pdMS_TO_TICKS(1500),guard,context);
+    if (sent == -2) return ESP_ERR_INVALID_STATE;
+    /* No zero/partial write is reported as accepted. SDK owns abort on error. */
+    return sent == len ? ESP_OK : ESP_FAIL;
+}
+
 esp_err_t esp_xiaozhi_websocket_send_binary(esp_xiaozhi_websocket_handle_t handle, const uint8_t *data, size_t data_len)
 {
     ESP_RETURN_ON_FALSE(handle, ESP_ERR_INVALID_ARG, TAG, "Invalid handle");

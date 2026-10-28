@@ -5,6 +5,14 @@ $specifications = if ($Project -eq 'head') {
     @(@{ Component='espressif__esp_wifi_remote'; Version='1.6.2'; File='esp_wifi_remote_net2.c' })
 } else {
     @(
+        @{ Component='espressif__esp_xiaozhi'; Version='0.1.1'; File='CMakeLists.txt' },
+        @{ Component='espressif__esp_xiaozhi'; Version='0.1.1'; File='src/esp_xiaozhi_mcp.c' },
+        @{ Component='espressif__esp_xiaozhi'; Version='0.1.1'; File='src/esp_xiaozhi_chat.c' },
+        @{ Component='espressif__esp_xiaozhi'; Version='0.1.1'; File='src/esp_xiaozhi_transport.c' },
+        @{ Component='espressif__esp_xiaozhi'; Version='0.1.1'; File='src/priv_include/esp_xiaozhi_mcp.h' },
+        @{ Component='espressif__esp_xiaozhi'; Version='0.1.1'; File='src/priv_include/esp_xiaozhi_transport.h' },
+        @{ Component='espressif__esp_xiaozhi'; Version='0.1.1'; File='src/priv_include/esp_xiaozhi_websocket.h' },
+        @{ Component='espressif__esp_websocket_client'; Version='1.7.0'; File='include/esp_websocket_client.h' },
         @{ Component='espressif__esp_xiaozhi'; Version='0.1.1'; File='src/esp_xiaozhi_websocket.c' },
         @{ Component='espressif__esp_websocket_client'; Version='1.7.0'; File='esp_websocket_client.c' }
     )

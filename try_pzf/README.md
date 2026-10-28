@@ -5,7 +5,21 @@
 仓库根目录构建这两个工程。本地 controller 没有 Git 历史，因此这里交付
 可构建源码快照，而不将每个文件都宣称为本次新写的代码。
 
-## 2026-10-26 更新
+## 2026-10-28 更新
+
+- 同步当前 controller/head；新增后台 MCP 延迟结果验证与语音识图客户端，
+  相关应用组件、HTTP 接口、C5/C6 补丁、测试及验收说明一并保留。
+- 扩展依赖源码覆盖清单与恢复脚本，包含 MCP/chat/transport 及 WebSocket
+  配套头文件；恢复覆盖后不要再次应用 C5/C6 补丁，避免重复修改。
+- 语音识图还依赖另行部署的电脑端服务；本次仍不包含 Docker 和网页工程，
+  不代表仅下载此固件目录即可完成整套识图部署。
+- 本批只上传源码，不烧录、不执行机械臂动作、不触发收费识图请求。
+- 本次上传副本的 controller Python 回归运行 137 项，2 项失败、3 项跳过：
+  两条失败均为旧机械臂测试写死接口数量/容量 20，与新增视觉接口后的现状不符。
+  没有为上传修改这些测试或运行逻辑，不宣称全量回归通过。
+  两组需要本地 Zig 工具链的原生 C 测试未在上传副本运行；历史验证见对应验收文档。
+
+## 2026-10-26 历史更新
 
 本批在同一分支更新当前 controller/head 源码，不覆盖仓库原有根工程。
 
@@ -87,8 +101,8 @@ controller 同理，将目录和脚本参数改成 controller。不要使用 era
 | 工程 | 依赖及版本 | 文件 |
 |---|---|---|
 | head | esp_wifi_remote 1.6.2 | esp_wifi_remote_net2.c |
-| controller | esp_xiaozhi 0.1.1 | src/esp_xiaozhi_websocket.c |
-| controller | esp_websocket_client 1.7.0 | esp_websocket_client.c |
+| controller | esp_xiaozhi 0.1.1 | CMakeLists.txt；src 下 MCP/chat/transport/websocket 源码与三个配套私有头文件 |
+| controller | esp_websocket_client 1.7.0 | esp_websocket_client.c、include/esp_websocket_client.h |
 
 恢复脚本先检查所有版本，再复制，保存原文件到被忽略的 dependency_backups。
 版本不匹配时停止，不默默覆盖新版本。`patches/` 中已有 C0/C2/C3/C4 历史补丁仅供

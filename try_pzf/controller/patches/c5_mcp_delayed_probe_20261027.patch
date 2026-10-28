@@ -1,0 +1,364 @@
+From: FocusLamp local maintenance patch
+Subject: [LOCAL C5] Ordinary MCP delayed-result diagnostic, 0/3000 ms only
+
+Requires components/mcp_delayed_probe and manager registration.
+Base: existing local dependency tree before 2026-10-27 probe changes, not clean upstream.
+---
+diff --git a/managed_components/espressif__esp_xiaozhi/CMakeLists.txt b/managed_components/espressif__esp_xiaozhi/CMakeLists.txt
+--- a/managed_components/espressif__esp_xiaozhi/CMakeLists.txt
++++ b/managed_components/espressif__esp_xiaozhi/CMakeLists.txt
+@@ -17,5 +17,5 @@
+     SRCS "${srcs}"
+     INCLUDE_DIRS "include"
+     PRIV_INCLUDE_DIRS "src/priv_include"
+-    PRIV_REQUIRES  esp_common nvs_flash app_update spi_flash cjson mbedtls mqtt esp_http_client mcp-c-sdk esp_websocket_client esp_timer
++    PRIV_REQUIRES  esp_common nvs_flash app_update spi_flash cjson mbedtls mqtt esp_http_client mcp-c-sdk esp_websocket_client esp_timer mcp_delayed_probe
+ )
+diff --git a/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_mcp.c b/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_mcp.c
+--- a/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_mcp.c
++++ b/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_mcp.c
+@@ -13,6 +13,8 @@
+ #include "esp_mcp_mgr.h"
+ #include "esp_xiaozhi_transport.h"
+ #include "esp_xiaozhi_mcp.h"
++#include "mcp_delayed_probe.h"
++#include <math.h>
+ 
+ /**
+  * @brief MCP transport item structure; uses esp_xiaozhi_transport for MCP.
+@@ -24,6 +26,7 @@
+     char *request_session_id;              /*!< Owned, untruncated server session ID */
+     char request_scope[32];                /*!< Bounded MCP engine session key */
+     uint32_t request_scope_sequence;
++    mcp_delayed_probe_t *probe;
+ } esp_xiaozhi_mcp_item_t;
+ 
+ static const char *TAG = "ESP_XIAOZHI_MCP";
+@@ -38,6 +41,92 @@
+     }
+ 
+     return NULL;
++}
++
++void esp_xiaozhi_mcp_probe_connection(esp_mcp_mgr_handle_t handle, bool online)
++{
++    esp_xiaozhi_mcp_item_t *item=esp_xiaozhi_mcp_get_item_by_mgr_handle(handle);
++    if (item) mcp_delayed_probe_connection(item->probe,online);
++}
++void esp_xiaozhi_mcp_probe_session_closed(esp_mcp_mgr_handle_t handle)
++{
++    esp_xiaozhi_mcp_item_t *item=esp_xiaozhi_mcp_get_item_by_mgr_handle(handle);
++    if (item) mcp_delayed_probe_session_changed(item->probe);
++}
++static esp_err_t probe_send(void *context, const char *wire, mcp_probe_guard_t guard, void *guard_context)
++{
++    esp_xiaozhi_mcp_item_t *item=context;
++    return esp_xiaozhi_transport_send_text_guarded(item->transport_handle,wire,guard,guard_context);
++}
++
++/* Build a normal CallToolResult, not a second response or MCP task notification. */
++static char *probe_response(const cJSON *id, const char *session, const char *text, int error)
++{
++    cJSON *root=cJSON_CreateObject();
++    if (!root) return NULL;
++    cJSON *payload=cJSON_AddObjectToObject(root,"payload");
++    cJSON *copy=cJSON_Duplicate(id,true);
++    if (!payload || !copy) { cJSON_Delete(copy); cJSON_Delete(root); return NULL; }
++    if (!cJSON_AddItemToObjectCS(payload,"id",copy)) { cJSON_Delete(copy); cJSON_Delete(root); return NULL; }
++    bool ok=cJSON_AddStringToObject(root,"session_id",session) &&
++            cJSON_AddStringToObject(root,"type","mcp") && cJSON_AddStringToObject(payload,"jsonrpc","2.0");
++    cJSON *result=ok ? cJSON_AddObjectToObject(payload,error ? "error" : "result") : NULL;
++    if (error) {
++        ok=result && cJSON_AddNumberToObject(result,"code",error) && cJSON_AddStringToObject(result,"message",text);
++    } else {
++        cJSON *content=result ? cJSON_AddArrayToObject(result,"content") : NULL;
++        cJSON *entry=content ? cJSON_CreateObject() : NULL;
++        if (entry && !cJSON_AddItemToArray(content,entry)) { cJSON_Delete(entry); entry=NULL; }
++        ok=entry && cJSON_AddStringToObject(entry,"type","text") && cJSON_AddStringToObject(entry,"text",text) &&
++           cJSON_AddBoolToObject(result,"isError",false);
++    }
++    char *wire=ok ? cJSON_PrintUnformatted(root) : NULL;
++    cJSON_Delete(root);
++    return wire;
++}
++static esp_err_t probe_try_handle(esp_xiaozhi_mcp_item_t *item, const char *payload,
++                                  const char *session, bool *handled)
++{
++    *handled=false;
++    cJSON *root=cJSON_Parse(payload);
++    if (!root) return ESP_OK;
++    const cJSON *method=cJSON_GetObjectItem(root,"method"), *params=cJSON_GetObjectItem(root,"params");
++    const cJSON *name=cJSON_GetObjectItem(params,"name");
++    if (!cJSON_IsString(method) || strcmp(method->valuestring,"tools/call") ||
++        !cJSON_IsString(name) || strcmp(name->valuestring,MCP_PROBE_TOOL_NAME)) {
++        cJSON_Delete(root); return ESP_OK;
++    }
++    *handled=true;
++    const cJSON *id=cJSON_GetObjectItem(root,"id");
++    if (!cJSON_IsString(id) && !(cJSON_IsNumber(id) && isfinite(id->valuedouble))) {
++        cJSON_Delete(root); return ESP_ERR_INVALID_ARG;
++    }
++    const cJSON *args=cJSON_GetObjectItem(params,"arguments");
++    const cJSON *delay=cJSON_GetObjectItem(args,"delay_ms"), *text=cJSON_GetObjectItem(args,"text");
++    int error=0;
++    const char *message=text && cJSON_IsString(text) ? text->valuestring : "延迟验证完成，校验码7301。";
++    int delay_ms=delay && cJSON_IsNumber(delay) ? delay->valueint : 3000;
++    if (!session || !*session || strlen(session)>256 || cJSON_GetObjectItem(params,"task") ||
++        (args && !cJSON_IsObject(args)) ||
++        (delay && (!cJSON_IsNumber(delay) || (delay->valuedouble!=0 && delay->valuedouble!=3000))) ||
++        (text && (!cJSON_IsString(text) || !*text->valuestring || strlen(text->valuestring)>160))) {
++        error=-32602; message="Diagnostic requires delay_ms 0/3000, text <=160 UTF-8 bytes and current session; no task mode";
++    }
++    char *id_json=cJSON_PrintUnformatted(id);
++    if (!id_json || strlen(id_json)>128) { cJSON_free(id_json); cJSON_Delete(root); return ESP_ERR_INVALID_ARG; }
++    char *wire=probe_response(id,session ? session : "",message,error);
++    esp_err_t ret=wire ? ESP_OK : ESP_ERR_NO_MEM;
++    if (wire && !error) ret=mcp_delayed_probe_submit(item->probe,wire,id_json,session,(uint32_t)delay_ms);
++    if (ret==MCP_PROBE_DUPLICATE) ret=ESP_OK;
++    else if (wire && (error || ret!=ESP_OK)) {
++        if (!error) {
++            cJSON_free(wire);
++            wire=probe_response(id,session,"Diagnostic busy/unavailable; request not queued",-32000);
++        }
++        ret=wire ? esp_xiaozhi_transport_send_text(item->transport_handle,wire) : ESP_ERR_NO_MEM;
++    }
++    cJSON_free(wire); cJSON_free(id_json); cJSON_Delete(root);
++    return ret;
+ }
+ 
+ esp_err_t esp_xiaozhi_mcp_handle_message(esp_mcp_mgr_handle_t mgr_handle,
+@@ -68,6 +157,7 @@
+             }
+         }
+         ++mcp_item->request_scope_sequence;
++        mcp_delayed_probe_session_changed(mcp_item->probe);
+         snprintf(mcp_item->request_scope, sizeof(mcp_item->request_scope),
+                  "xiaozhi-%lu", (unsigned long)mcp_item->request_scope_sequence);
+         free(mcp_item->request_session_id);
+@@ -78,6 +168,10 @@
+      * Outgoing responses below still carry the original server session ID. */
+     ret = esp_mcp_mgr_set_request_context(mgr_handle, mcp_item->request_scope, NULL, true);
+     ESP_RETURN_ON_ERROR(ret, TAG, "Failed to set MCP request session context");
++
++    bool probe_handled=false;
++    ret=probe_try_handle(mcp_item,payload,session_id,&probe_handled);
++    if (probe_handled) return ret;
+ 
+     uint8_t *outbuf = NULL;
+     uint16_t outlen = 0;
+@@ -136,6 +230,12 @@
+         return ret;
+     }
+ 
++    mcp_item->probe=mcp_delayed_probe_create(probe_send,mcp_item);
++    if (!mcp_item->probe) {
++        esp_xiaozhi_transport_deinit(mcp_item->transport_handle);
++        free(mcp_item);
++        return ESP_ERR_NO_MEM;
++    }
+     *transport_handle = (esp_mcp_transport_handle_t)mcp_item;
+     s_xiaozhi_mcp = mcp_item;
+ 
+@@ -147,7 +247,10 @@
+     esp_xiaozhi_mcp_item_t *mcp_item = (esp_xiaozhi_mcp_item_t *)handle;
+     ESP_RETURN_ON_FALSE(mcp_item, ESP_ERR_INVALID_ARG, TAG, "Invalid handle");
+ 
++    /* Join sends first, then stop receive callbacks before freeing their probe. */
++    mcp_delayed_probe_drain(mcp_item->probe);
+     esp_xiaozhi_transport_deinit(mcp_item->transport_handle);
++    mcp_delayed_probe_destroy(mcp_item->probe);
+     mcp_item->handle = 0;
+     mcp_item->config = NULL;
+     if (s_xiaozhi_mcp == mcp_item) {
+@@ -205,6 +308,7 @@
+     esp_xiaozhi_mcp_config_t *new_config = (esp_xiaozhi_mcp_config_t *)config;
+ 
+     mcp_item->config = new_config;
++    mcp_delayed_probe_resume(mcp_item->probe);
+ 
+     esp_err_t ret = esp_xiaozhi_transport_start(mcp_item->transport_handle, new_config->use_mqtt, &new_config->callbacks);
+     ESP_RETURN_ON_ERROR(ret, TAG, "Failed to start transport: %s", esp_err_to_name(ret));
+@@ -220,6 +324,7 @@
+ 
+     esp_xiaozhi_mcp_item_t *mcp_item = (esp_xiaozhi_mcp_item_t *)handle;
+ 
++    mcp_delayed_probe_drain(mcp_item->probe);
+     esp_xiaozhi_transport_stop(mcp_item->transport_handle);
+     mcp_item->config = NULL;
+ 
+diff --git a/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_chat.c b/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_chat.c
+--- a/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_chat.c
++++ b/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_chat.c
+@@ -695,6 +695,7 @@
+     ESP_RETURN_ON_FALSE(xiaozhi_chat, ESP_ERR_INVALID_ARG, TAG, "Invalid handle");
+ 
+     xiaozhi_chat->chat_connected = true;
++    esp_xiaozhi_mcp_probe_connection(xiaozhi_chat->mcp_mgr_handle, true);
+ 
+     esp_event_post(ESP_XIAOZHI_CHAT_EVENTS, ESP_XIAOZHI_CHAT_EVENT_CONNECTED, NULL, 0, portMAX_DELAY);
+ 
+@@ -707,6 +708,7 @@
+     ESP_RETURN_ON_FALSE(xiaozhi_chat, ESP_ERR_INVALID_ARG, TAG, "Invalid handle");
+ 
+     xiaozhi_chat->chat_connected = false;
++    esp_xiaozhi_mcp_probe_connection(xiaozhi_chat->mcp_mgr_handle, false);
+ 
+     esp_event_post(ESP_XIAOZHI_CHAT_EVENTS, ESP_XIAOZHI_CHAT_EVENT_DISCONNECTED, NULL, 0, portMAX_DELAY);
+ 
+@@ -1526,6 +1528,7 @@
+     ESP_RETURN_ON_FALSE(chat_hd, ESP_ERR_INVALID_ARG, TAG, "Invalid handle");
+ 
+     esp_xiaozhi_chat_t *xiaozhi_chat = (esp_xiaozhi_chat_t *)chat_hd;
++    esp_xiaozhi_mcp_probe_session_closed(xiaozhi_chat->mcp_mgr_handle);
+     if (strlen(xiaozhi_chat->session_id) > 0) {
+         cJSON *root = cJSON_CreateObject();
+         if (root) {
+diff --git a/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_transport.c b/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_transport.c
+--- a/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_transport.c
++++ b/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_transport.c
+@@ -134,6 +134,16 @@
+     }
+ }
+ 
++esp_err_t esp_xiaozhi_transport_send_text_guarded(esp_xiaozhi_transport_handle_t handle,
++                                                const char *text, bool (*guard)(void *), void *context)
++{
++    if (!handle || !text || !guard) return ESP_ERR_INVALID_ARG;
++    esp_xiaozhi_transport_ctx_t *ctx = (esp_xiaozhi_transport_ctx_t *)handle;
++    if (!ctx->started) return ESP_ERR_INVALID_STATE;
++    if (ctx->use_mqtt) return ESP_ERR_NOT_SUPPORTED;
++    return esp_xiaozhi_websocket_send_text_guarded(ctx->websocket_handle,text,guard,context);
++}
++
+ esp_err_t esp_xiaozhi_transport_send_binary(esp_xiaozhi_transport_handle_t handle, const uint8_t *data, size_t data_len)
+ {
+     ESP_RETURN_ON_FALSE(handle, ESP_ERR_INVALID_ARG, TAG, "Invalid handle");
+diff --git a/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_websocket.c b/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_websocket.c
+--- a/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_websocket.c
++++ b/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_websocket.c
+@@ -315,6 +315,20 @@
+     return ESP_OK;
+ }
+ 
++esp_err_t esp_xiaozhi_websocket_send_text_guarded(esp_xiaozhi_websocket_handle_t handle,
++                                                const char *text, bool (*guard)(void *), void *context)
++{
++    if (!handle || !text || !guard) return ESP_ERR_INVALID_ARG;
++    esp_xiaozhi_websocket_t *websocket = (esp_xiaozhi_websocket_t *)handle;
++    if (!websocket->websocket_client || !websocket->websocket_connected) return ESP_ERR_INVALID_STATE;
++    int len = strlen(text);
++    int sent = esp_websocket_client_send_text_guarded(websocket->websocket_client,text,len,
++                                                     pdMS_TO_TICKS(1500),guard,context);
++    if (sent == -2) return ESP_ERR_INVALID_STATE;
++    /* No zero/partial write is reported as accepted. SDK owns abort on error. */
++    return sent == len ? ESP_OK : ESP_FAIL;
++}
++
+ esp_err_t esp_xiaozhi_websocket_send_binary(esp_xiaozhi_websocket_handle_t handle, const uint8_t *data, size_t data_len)
+ {
+     ESP_RETURN_ON_FALSE(handle, ESP_ERR_INVALID_ARG, TAG, "Invalid handle");
+diff --git a/managed_components/espressif__esp_xiaozhi/src/priv_include/esp_xiaozhi_mcp.h b/managed_components/espressif__esp_xiaozhi/src/priv_include/esp_xiaozhi_mcp.h
+--- a/managed_components/espressif__esp_xiaozhi/src/priv_include/esp_xiaozhi_mcp.h
++++ b/managed_components/espressif__esp_xiaozhi/src/priv_include/esp_xiaozhi_mcp.h
+@@ -67,6 +67,9 @@
+  *       - ESP_ERR_INVALID_STATE   MCP transport not initialized
+  */
+ esp_err_t esp_xiaozhi_mcp_get_handle(esp_mcp_mgr_handle_t mgr_handle, esp_xiaozhi_transport_handle_t *transport_handle);
++/* Diagnostic ownership invalidation only. These never wait in WS callbacks. */
++void esp_xiaozhi_mcp_probe_connection(esp_mcp_mgr_handle_t mgr_handle, bool online);
++void esp_xiaozhi_mcp_probe_session_closed(esp_mcp_mgr_handle_t mgr_handle);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/managed_components/espressif__esp_xiaozhi/src/priv_include/esp_xiaozhi_transport.h b/managed_components/espressif__esp_xiaozhi/src/priv_include/esp_xiaozhi_transport.h
+--- a/managed_components/espressif__esp_xiaozhi/src/priv_include/esp_xiaozhi_transport.h
++++ b/managed_components/espressif__esp_xiaozhi/src/priv_include/esp_xiaozhi_transport.h
+@@ -93,6 +93,8 @@
+  *       - Other                 Error from underlying MQTT or WebSocket send
+  */
+ esp_err_t esp_xiaozhi_transport_send_text(esp_xiaozhi_transport_handle_t handle, const char *text);
++esp_err_t esp_xiaozhi_transport_send_text_guarded(esp_xiaozhi_transport_handle_t handle,
++    const char *text, bool (*guard)(void *), void *context);
+ 
+ /**
+  * @brief  Send binary data. Supported only when transport is WebSocket; returns ESP_ERR_NOT_SUPPORTED for MQTT.
+diff --git a/managed_components/espressif__esp_xiaozhi/src/priv_include/esp_xiaozhi_websocket.h b/managed_components/espressif__esp_xiaozhi/src/priv_include/esp_xiaozhi_websocket.h
+--- a/managed_components/espressif__esp_xiaozhi/src/priv_include/esp_xiaozhi_websocket.h
++++ b/managed_components/espressif__esp_xiaozhi/src/priv_include/esp_xiaozhi_websocket.h
+@@ -84,6 +84,8 @@
+  *       - ESP_FAIL   Send failed (e.g. connection lost)
+  */
+ esp_err_t esp_xiaozhi_websocket_send_text(esp_xiaozhi_websocket_handle_t handle, const char *text);
++esp_err_t esp_xiaozhi_websocket_send_text_guarded(esp_xiaozhi_websocket_handle_t handle,
++    const char *text, bool (*guard)(void *), void *context);
+ 
+ /**
+  * @brief  Send binary data to the websocket application
+diff --git a/managed_components/espressif__esp_websocket_client/esp_websocket_client.c b/managed_components/espressif__esp_websocket_client/esp_websocket_client.c
+--- a/managed_components/espressif__esp_websocket_client/esp_websocket_client.c
++++ b/managed_components/espressif__esp_websocket_client/esp_websocket_client.c
+@@ -679,7 +679,8 @@
+     return ESP_OK;
+ }
+ 
+-static int esp_websocket_client_send_with_exact_opcode(esp_websocket_client_handle_t client, ws_transport_opcodes_t opcode, const uint8_t *data, int len, TickType_t timeout)
++static int esp_websocket_client_send_with_exact_opcode_guarded(esp_websocket_client_handle_t client, ws_transport_opcodes_t opcode, const uint8_t *data, int len, TickType_t timeout,
++                                                              bool (*guard)(void *), void *context)
+ {
+     int ret = -1;
+     int need_write = len;
+@@ -712,6 +713,11 @@
+         return -1;
+     }
+ #endif
++
++    if (guard && (!esp_websocket_client_is_connected(client) || !guard(context))) {
++        ret = -2;
++        goto unlock_and_return;
++    }
+ 
+     if (esp_websocket_new_buf(client, true) != ESP_OK) {
+         ESP_LOGE(TAG, "Failed to setup tx buffer");
+@@ -771,6 +777,25 @@
+     xSemaphoreGiveRecursive(client->lock);
+ #endif
+     return ret;
++}
++
++static int esp_websocket_client_send_with_exact_opcode(esp_websocket_client_handle_t client, ws_transport_opcodes_t opcode,
++                                                       const uint8_t *data, int len, TickType_t timeout)
++{
++    return esp_websocket_client_send_with_exact_opcode_guarded(client,opcode,data,len,timeout,NULL,NULL);
++}
++
++int esp_websocket_client_send_text_guarded(esp_websocket_client_handle_t client, const char *data, int len,
++                                          TickType_t timeout, bool (*guard)(void *), void *context)
++{
++#ifdef CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK
++    /* TX-only locking cannot serialize the ownership check with reconnect. */
++    return -2;
++#else
++    if (!guard) return -2;
++    return esp_websocket_client_send_with_exact_opcode_guarded(client,
++        WS_TRANSPORT_OPCODES_TEXT|WS_TRANSPORT_OPCODES_FIN,(const uint8_t *)data,len,timeout,guard,context);
++#endif
+ }
+ 
+ esp_websocket_client_handle_t esp_websocket_client_init(const esp_websocket_client_config_t *config)
+diff --git a/managed_components/espressif__esp_websocket_client/include/esp_websocket_client.h b/managed_components/espressif__esp_websocket_client/include/esp_websocket_client.h
+--- a/managed_components/espressif__esp_websocket_client/include/esp_websocket_client.h
++++ b/managed_components/espressif__esp_websocket_client/include/esp_websocket_client.h
+@@ -305,6 +305,13 @@
+  */
+ int esp_websocket_client_send_text(esp_websocket_client_handle_t client, const char *data, int len, TickType_t timeout);
+ 
++/** Local extension: recheck connection/session ownership AFTER acquiring the
++ * shared send/state lock. Guard must not block. Returns -2 when superseded.
++ * Only used by the diagnostic delayed MCP response; normal sends are unchanged.
++ * This extension requires the shared lock (SEPARATE_TX_LOCK disabled). */
++int esp_websocket_client_send_text_guarded(esp_websocket_client_handle_t client,
++    const char *data, int len, TickType_t timeout, bool (*guard)(void *), void *context);
++
+ /**
+  * @brief      Write textual data to the WebSocket connection and sends it without setting the FIN flag(data send with WS OPCODE=01, i.e. text)
+  *

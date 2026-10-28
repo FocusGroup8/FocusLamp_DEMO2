@@ -38,6 +38,7 @@
 #include "wake_word_engine.h"
 #include "uplink_buffer.h"
 #include "speak_cycle.h"
+#include "mcp_probe_tool.h"
 
 static const char *TAG = "XIAOZHI_MGR";
 
@@ -1697,6 +1698,8 @@ mcp_tool_test_echo(const esp_mcp_property_list_t *properties) {
  *-------------------------------------------------------------*/
 static esp_err_t register_mcp_tools(void) {
   esp_err_t ret = ESP_OK;
+  ret = mcp_probe_register_tool(s_mcp_engine);
+  if (ret != ESP_OK) return ret;
 
   /* notification.speak - proactive TTS injection */
   esp_mcp_tool_t *speak_tool = esp_mcp_tool_create(

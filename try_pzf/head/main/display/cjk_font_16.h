@@ -20,6 +20,9 @@ int cjk_font_16_measure(const char *utf8);
 
 void cjk_font_16_draw(uint8_t *rgb565, int width, int height, int stride,
                       int x, int y, const char *utf8, uint16_t color);
+/* Nearest-neighbor 24px rendering of the same flash-resident glyphs. */
+void cjk_font_16_draw_24(uint8_t *rgb565, int width, int height, int stride,
+                       int x, int y, const char *utf8, uint16_t color);
 /* Wraps on character boundaries; returns height occupied, up to max_lines.
  * Long content is clipped to max_lines. Explicit newlines are respected. */
 int cjk_font_16_draw_wrapped(uint8_t *rgb565, int width, int height, int stride,

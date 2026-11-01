@@ -59,7 +59,7 @@ void changed(int64_t now) {
     }
 }
 void centered(uint8_t *bytes,int w,int h,int stride,int y,const char *text,uint16_t color) {
-    cjk_font_16_draw(bytes,w,h,stride,(w-cjk_font_16_measure(text))/2,y,text,color);
+    cjk_font_16_draw_24(bytes,w,h,stride,(w-cjk_font_16_measure(text)*3/2)/2,y,text,color);
 }
 
 }
@@ -169,8 +169,18 @@ bool task_guide_draw(uint8_t *bytes,int width,int height,int stride,int64_t now_
     } else if(view.state==task_guide::State::Preview) {
         centered(bytes,width,height,stride,64,"三步任务",accent);
         for(int i=0;i<3;i++) {
-            char line[80];std::snprintf(line,sizeof(line),"%d. %s",i+1,view.steps[i]);
-            centered(bytes,width,height,stride,142+i*64,line,text);
+            // Reserve space for the number and keep long tasks inside the round screen.
+            const char *input=view.steps[i];
+            char parts[2][TG_STEP_BYTES]={{0},{0}};
+            unsigned part=0,count=0;size_t n=0;
+            for(const unsigned char *p=reinterpret_cast<const unsigned char *>(input);*p;) {
+                if(count==12){part=1;count=0;n=0;}
+                unsigned length=*p<0x80?1:(*p<0xE0?2:(*p<0xF0?3:4));
+                std::memcpy(parts[part]+n,p,length);n+=length;p+=length;count++;
+            }
+            char line[80];std::snprintf(line,sizeof(line),"%d. %s",i+1,parts[0]);
+            centered(bytes,width,height,stride,128+i*80,line,text);
+            if(parts[1][0])centered(bytes,width,height,stride,156+i*80,parts[1],text);
         }
     } else if(view.state==task_guide::State::Done) {
         centered(bytes,width,height,stride,224,"本轮引导结束",accent);

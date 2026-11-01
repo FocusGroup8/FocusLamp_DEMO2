@@ -519,11 +519,16 @@ static void camera_stream_task(void *arg)
     ESP_LOGI(TAG, "Camera profile: conservative-5fps-v1, cap<=2 -> fixed Q15, adaptive Q ceilings=15/16/18");
 
     int64_t last_stats_log = esp_timer_get_time();
+    int64_t diag_last_loop_us = 0, diag_loop_gap_us = 0;
+    int64_t diag_capture_us = 0, diag_encode_us = 0, diag_send_call_us = 0;
     bool was_throttled     = false; /* Track throttle state for logging */
 
     while (s_state.running) {
         int64_t now           = esp_timer_get_time();
         TickType_t tick_start = xTaskGetTickCount();
+        int64_t diag_loop_now_us = esp_timer_get_time();
+        if (diag_last_loop_us) diag_loop_gap_us = MAX(diag_loop_gap_us, diag_loop_now_us - diag_last_loop_us);
+        diag_last_loop_us = diag_loop_now_us;
         int fps_limit = atomic_load(&s_state.fps_limit);
         bool cap_changed = fps_limit != applied_fps_limit;
 
@@ -615,7 +620,9 @@ static void camera_stream_task(void *arg)
         TickType_t frame_period = pdMS_TO_TICKS(1000 / effective_fps);
 
         /* Capture frame */
+        int64_t diag_stage_start_us = esp_timer_get_time();
         esp_err_t ret = camera_capture_frame(s_state.config.camera);
+        diag_capture_us = MAX(diag_capture_us, esp_timer_get_time() - diag_stage_start_us);
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "Frame capture failed: %s", esp_err_to_name(ret));
             s_state.frames_failed++;
@@ -654,7 +661,9 @@ static void camera_stream_task(void *arg)
         int frame_quality = frame_fixed_low ? 15 : atomic_load(&s_state.current_quality);
         effective_fps = MIN(effective_fps, frame_fps_limit);
         frame_period = pdMS_TO_TICKS(1000 / effective_fps);
+        diag_stage_start_us = esp_timer_get_time();
         ret = camera_encode_jpeg(s_state.config.camera, frame_quality, &jpeg_size);
+        diag_encode_us = MAX(diag_encode_us, esp_timer_get_time() - diag_stage_start_us);
         if (ret != ESP_OK || jpeg_size == 0) {
             ESP_LOGW(TAG, "JPEG encode failed: %s", esp_err_to_name(ret));
             s_state.frames_failed++;
@@ -701,6 +710,8 @@ static void camera_stream_task(void *arg)
                  (unsigned)jpeg_size, (long long)((esp_timer_get_time() - send_call_start_us) / 1000),
                  esp_err_to_name(ret));
 
+        diag_send_call_us = MAX(diag_send_call_us, esp_timer_get_time() - send_call_start_us);
+
         /* Send failures are tracked by ws_manager's send stats which BBA reads.
          * ESP_ERR_NOT_FOUND (no /camera client) is not counted as a failure. */
         if (ret == ESP_OK) {
@@ -732,7 +743,8 @@ static void camera_stream_task(void *arg)
                      "[ws: sent=%u failed=%u avg_dur=%lldms last=%lldms] "
                      "[camera: connected=%d session=%u budget_total=%u] "
                      "[PI: actual=%lu target=%lu B/s integral=%.2f] "
-                     "[motion: %s SAD=%.4f static_cnt=%d]",
+                     "[motion: %s SAD=%.4f static_cnt=%d] "
+                     "[stage_max_ms: loop_gap=%lld capture=%lld encode=%lld send_call=%lld]",
                      (unsigned)s_state.frames_sent, (unsigned)s_state.frames_failed, (unsigned)avg_size, effective_fps,
                      frame_quality, frame_fixed_low ? "fixed-low" : "adaptive", bba.current_level,
                      (unsigned)bba.accum_sent, (unsigned)bba.accum_failed,
@@ -740,7 +752,10 @@ static void camera_stream_task(void *arg)
                      camera_log.connected, (unsigned)camera_log.session_id,
                      (unsigned)ws_stats_log.camera_budget_timeouts, (unsigned long)pi.actual_bitrate_bps,
                      (unsigned long)pi.target_bitrate_bps, pi.integral, motion.is_static ? "STATIC" : "ACTIVE",
-                     motion.last_sad, motion.static_count);
+                     motion.last_sad, motion.static_count,
+                     (long long)(diag_loop_gap_us / 1000), (long long)(diag_capture_us / 1000),
+                     (long long)(diag_encode_us / 1000), (long long)(diag_send_call_us / 1000));
+            diag_loop_gap_us = diag_capture_us = diag_encode_us = diag_send_call_us = 0;
             last_stats_log = now;
         }
 

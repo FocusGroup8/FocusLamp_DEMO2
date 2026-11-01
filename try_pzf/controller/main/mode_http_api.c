@@ -89,6 +89,14 @@ static esp_err_t mode_status_response(httpd_req_t *req)
     /* Stream the extension without doubling the HTTP task's stack footprint. */
     size_t length=strlen(response);
     esp_err_t sent=httpd_resp_send_chunk(req,response,length-1);
+    char accounting[384];
+    snprintf(accounting,sizeof(accounting),
+        ",\"timing_totals\":{\"full_ms\":%lu,\"half_ms\":%lu,\"held_ms\":%lu,"
+        "\"waiting_ms\":%lu,\"distracted_ms\":%lu,\"invalid_ms\":%lu,\"data_stale_ms\":%lu,\"voice_ms\":%lu}",
+        (unsigned long)state.full_ms,(unsigned long)state.half_ms,(unsigned long)state.held_ms,
+        (unsigned long)state.held_waiting_ms,(unsigned long)state.held_distracted_ms,
+        (unsigned long)state.held_invalid_ms,(unsigned long)state.held_stale_ms,(unsigned long)state.held_voice_ms);
+    if(sent==ESP_OK)sent=httpd_resp_sendstr_chunk(req,accounting);
     if(sent==ESP_OK)sent=httpd_resp_sendstr_chunk(req,",\"task_guide\":");
     if(sent==ESP_OK)sent=httpd_resp_sendstr_chunk(req,guide_json);
     free(guide_json);

@@ -14,10 +14,33 @@ typedef struct {
     uint32_t session, seq, sample_seq, inference_seq;
     int rate_half, candidate_half, reason;
     bool active, completed, voice, has_sample;
+    int64_t full_us, half_us, held_us[FOCUS_DONE];
 } focus_clock_t;
+
+/* Wall-time residence, not effective debit. Completed/idle time is excluded. */
+static inline void focus_clock_account(focus_clock_t *c, int64_t now)
+{
+    if (!c->active || c->completed || now <= c->last_us) return;
+    int64_t elapsed = now - c->last_us;
+    if (c->voice) { c->held_us[FOCUS_VOICE] += elapsed; return; }
+    int64_t end = now < c->expires_us ? now : c->expires_us;
+    int64_t fresh = end > c->last_us ? end - c->last_us : 0;
+    if (c->rate_half > 0) {
+        int64_t until_done = (c->remaining_us * 2 + c->rate_half - 1) / c->rate_half;
+        if (fresh > until_done) fresh = until_done;
+        if (c->rate_half == 2) c->full_us += fresh;
+        else c->half_us += fresh;
+        if (fresh == until_done) return;
+    } else {
+        unsigned reason = c->reason < FOCUS_DONE ? (unsigned)c->reason : FOCUS_WAIT;
+        c->held_us[reason] += fresh;
+    }
+    if (elapsed > fresh) c->held_us[c->has_sample ? FOCUS_STALE : FOCUS_WAIT] += elapsed - fresh;
+}
 
 static inline void focus_clock_settle(focus_clock_t *c, int64_t now)
 {
+    focus_clock_account(c, now);
     int64_t end = now < c->expires_us ? now : c->expires_us;
     int64_t dt = end > c->last_us ? end - c->last_us : 0;
     if (c->active && !c->completed && !c->voice) {

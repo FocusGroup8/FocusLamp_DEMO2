@@ -78,10 +78,10 @@ static bool valid_surface(uint8_t *bytes, int width, int height, int stride)
     return bytes && width > 0 && height > 0 && width <= INT_MAX / 2 && stride >= width * 2;
 }
 
-static void draw_glyph(uint8_t *bytes, int width, int height, int stride,
-                       int x, int y, uint32_t cp, uint16_t color)
+static void draw_glyph_sized(uint8_t *bytes, int width, int height, int stride,
+                       int x, int y, uint32_t cp, uint16_t color, int size)
 {
-    if (x >= width || y >= height || x <= -16 || y <= -16) return;
+    if (x >= width || y >= height || x <= -size || y <= -size) return;
     const uint16_t *rows = cjk_font_16_glyph(cp);
 #ifdef ESP_PLATFORM
     /* At most 16 diagnostics per boot, with consecutive repeats suppressed. */
@@ -93,12 +93,13 @@ static void draw_glyph(uint8_t *bytes, int width, int height, int stride,
         ++missing_logs;
     }
 #endif
-    int glyph_width = cjk_font_16_advance(cp);
-    for (int row = 0; row < 16; ++row) {
+    int glyph_width = cjk_font_16_advance(cp) * size / 16;
+    for (int row = 0; row < size; ++row) {
         int dy = y + row;
         if (dy < 0 || dy >= height) continue;
-        uint16_t bits = rows ? rows[row] :
-            (row == 1 || row == 14 ? 0x7FFE : (row > 1 && row < 14 ? 0x4002 : 0));
+        int source_row = row * 16 / size;
+        uint16_t bits = rows ? rows[source_row] :
+            (source_row == 1 || source_row == 14 ? 0x7FFE : (source_row > 1 && source_row < 14 ? 0x4002 : 0));
         int left = x < 0 ? -x : 0;
         int right = glyph_width;
         if (right > width - x) right = width - x;
@@ -106,11 +107,25 @@ static void draw_glyph(uint8_t *bytes, int width, int height, int stride,
          * draw calls, intermediate framebuffer or heap allocation. */
         uint8_t *out = bytes + (size_t)dy * (size_t)stride + (size_t)(x + left) * 2;
         for (int col = left; col < right; ++col, out += 2) {
-            if ((bits & (0x8000u >> col)) != 0) {
+            if ((bits & (0x8000u >> (col * 16 / size))) != 0) {
                 out[0] = (uint8_t)color;
                 out[1] = (uint8_t)(color >> 8);
             }
         }
+    }
+}
+
+void cjk_font_16_draw_24(uint8_t *bytes, int width, int height, int stride,
+                       int x, int y, const char *utf8, uint16_t color)
+{
+    if (!utf8 || !valid_surface(bytes, width, height, stride)) return;
+    int64_t dx=x, dy=y;
+    while (*utf8) {
+        uint32_t cp=next_codepoint(&utf8);
+        if (cp=='\n') {dx=x;dy+=24;continue;}
+        if (dx>=INT_MIN && dx<=INT_MAX && dy>=INT_MIN && dy<=INT_MAX)
+            draw_glyph_sized(bytes,width,height,stride,(int)dx,(int)dy,cp,color,24);
+        dx+=cjk_font_16_advance(cp)*3/2;
     }
 }
 
@@ -126,7 +141,7 @@ void cjk_font_16_draw(uint8_t *rgb565, int width, int height, int stride,
          * even if a caller passes a pathological off-screen origin. */
         int64_t dx = (int64_t)x + offset, dy = (int64_t)y + line;
         if (dx >= INT_MIN && dx <= INT_MAX && dy >= INT_MIN && dy <= INT_MAX)
-            draw_glyph(rgb565, width, height, stride, (int)dx, (int)dy, cp, color);
+            draw_glyph_sized(rgb565, width, height, stride, (int)dx, (int)dy, cp, color,16);
         if (offset > INT_MAX - 16) return;
         offset += cjk_font_16_advance(cp);
     }
@@ -150,7 +165,7 @@ int cjk_font_16_draw_wrapped(uint8_t *rgb565, int width, int height, int stride,
         }
         int64_t dx = (int64_t)x + offset, dy = (int64_t)y + (int64_t)line * line_height;
         if (dx >= INT_MIN && dx <= INT_MAX && dy >= INT_MIN && dy <= INT_MAX)
-            draw_glyph(rgb565, width, height, stride, (int)dx, (int)dy, cp, color);
+            draw_glyph_sized(rgb565, width, height, stride, (int)dx, (int)dy, cp, color,16);
         offset += advance;
     }
     return (line + 1) * line_height;

@@ -79,7 +79,17 @@ static void snapshot_locked(controller_modes_status_t *out)
         .pause_reason = s_completed ? FOCUS_DONE : s_voice_active ? FOCUS_VOICE : s_focus.reason,
         .completed = s_completed,
         .revision = s_revision,
+        .full_ms = (uint32_t)(s_focus.full_us / 1000),
+        .half_ms = (uint32_t)(s_focus.half_us / 1000),
+        .held_waiting_ms = (uint32_t)(s_focus.held_us[FOCUS_WAIT] / 1000),
+        .held_distracted_ms = (uint32_t)(s_focus.held_us[FOCUS_DISTRACTED] / 1000),
+        .held_invalid_ms = (uint32_t)(s_focus.held_us[FOCUS_INVALID] / 1000),
+        .held_stale_ms = (uint32_t)(s_focus.held_us[FOCUS_STALE] / 1000),
+        .held_voice_ms = (uint32_t)(s_focus.held_us[FOCUS_VOICE] / 1000),
     };
+    int64_t held = 0;
+    for (unsigned i = 0; i < FOCUS_DONE; ++i) held += s_focus.held_us[i];
+    out->held_ms = (uint32_t)(held / 1000);
 }
 
 static void log_completed(bool completed, uint32_t duration_sec)

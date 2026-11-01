@@ -176,6 +176,11 @@ int main(void)
     r=call(HTTP_GET,"/api/mode",NULL);assert(status(&r)==200);full_size=r.response_size;
     j=json(&r);authority(j);
     assert(u32(j,"http_stack_free_bytes")==6144);
+    cJSON *totals=cJSON_GetObjectItemCaseSensitive(j,"timing_totals");
+    assert(cJSON_IsObject(totals));
+    assert(cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(totals,"full_ms")));
+    assert(u32(totals,"held_ms")==u32(totals,"waiting_ms")+u32(totals,"distracted_ms")+
+        u32(totals,"invalid_ms")+u32(totals,"data_stale_ms")+u32(totals,"voice_ms"));
     assert(cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(j,"radar_present")));
     assert(cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(j,"demo_worker")));
     cJSON *guide=cJSON_GetObjectItemCaseSensitive(j,"task_guide");

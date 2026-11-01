@@ -57,6 +57,33 @@ static void true_sample_gap_and_invalid_reset(void) {
     assert(c.candidate_half==-1 && c.rate_half==0 && c.reason==FOCUS_STALE);
 }
 int main(void) {
+    /* Residence is partitioned at expiry; delayed polling cannot debit stale time. */
+    focus_clock_t totals={0};
+    ready(&totals,2);ten_seconds(&totals,2);
+    assert(totals.full_us==S(10) && totals.held_us[FOCUS_WAIT]==S(2));
+    ready(&totals,1);ten_seconds(&totals,1);
+    assert(totals.half_us==S(10) && totals.remaining_us==S(115));
+    ready(&totals,0);ten_seconds(&totals,0);
+    assert(totals.held_us[FOCUS_DISTRACTED]==S(10));
+    ready(&totals,2);
+    focus_clock_sample(&totals,3,3,0,0,true,1,S(3));
+    focus_clock_sample(&totals,4,4,0,0,true,1,S(4));
+    focus_clock_sample(&totals,5,5,0,0,true,1,S(5));
+    assert(totals.full_us==S(2) && totals.half_us==S(1));
+    assert(totals.remaining_us==S(120)-S(2)-S(1)/2);
+    focus_clock_sample(&totals,6,6,0,0,false,-1,S(6));
+    focus_clock_settle(&totals,S(8));
+    assert(totals.held_us[FOCUS_INVALID]==S(2));
+    ready(&totals,2);focus_clock_settle(&totals,S(10));
+    assert(totals.full_us==S(3) && totals.held_us[FOCUS_STALE]==S(5));
+    focus_clock_settle(&totals,S(10));assert(totals.held_us[FOCUS_STALE]==S(5));
+    ready(&totals,2);focus_clock_voice(&totals,true,S(3));
+    focus_clock_settle(&totals,S(10));
+    assert(totals.full_us==S(1) && totals.held_us[FOCUS_VOICE]==S(7));
+    totals.voice=false;ready(&totals,2);totals.remaining_us=S(1);focus_clock_settle(&totals,S(10));
+    assert(totals.completed && totals.full_us==S(1));
+    focus_clock_settle(&totals,S(20));assert(totals.full_us==S(1));
+    focus_clock_start(&totals,120,S(21));assert(!totals.full_us && !totals.half_us && !totals.held_us[FOCUS_VOICE]);
     slow_classification_cadence(15);
     slow_classification_cadence(20);
     true_sample_gap_and_invalid_reset();

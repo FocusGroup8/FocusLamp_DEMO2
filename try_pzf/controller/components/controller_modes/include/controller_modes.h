@@ -23,6 +23,8 @@ typedef struct {
     int rate_half;
     unsigned pause_reason;
     uint32_t revision; /* Changes on mode/session transitions, not voice pauses. */
+    uint32_t full_ms, half_ms, held_ms;
+    uint32_t held_waiting_ms, held_distracted_ms, held_invalid_ms, held_stale_ms, held_voice_ms;
 } controller_modes_status_t;
 
 esp_err_t controller_modes_init(void);

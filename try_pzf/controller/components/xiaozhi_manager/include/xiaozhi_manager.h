@@ -8,6 +8,7 @@
 
 #include "esp_err.h"
 #include <stdint.h>
+#include <stdbool.h>
 #include "esp_xiaozhi_chat.h"
 
 #ifdef __cplusplus
@@ -231,6 +232,25 @@ esp_mcp_t *xiaozhi_manager_get_mcp_engine(void);
  * @return ESP_OK if the request was enqueued, error code otherwise
  */
 esp_err_t xiaozhi_manager_speak(const char *text, int priority);
+
+/* Tracked Studio broadcasts: one outstanding request, no automatic resend. */
+typedef struct {
+    uint32_t id;
+    bool busy;
+    bool cancel_requested;
+    char phase[20];
+} xiaozhi_speak_status_t;
+esp_err_t xiaozhi_manager_speak_tracked(const char *text, int priority, uint32_t *id);
+/* Head tap: use the next short phrase; refuse busy sessions without queuing. */
+esp_err_t xiaozhi_manager_speak_welcome(uint32_t *id);
+typedef bool (*xiaozhi_speak_allowed_t)(uint32_t cookie);
+typedef void (*xiaozhi_speak_result_t)(uint32_t cookie, esp_err_t result);
+esp_err_t xiaozhi_manager_speak_reminder(uint32_t cookie, xiaozhi_speak_allowed_t allowed,
+                                      xiaozhi_speak_result_t result, uint32_t *id);
+/* Cancel only the matching request, never a newer welcome or dialogue. */
+void xiaozhi_manager_cancel_speak(uint32_t id);
+void xiaozhi_manager_speak_status(xiaozhi_speak_status_t *out);
+void xiaozhi_manager_speak_cancel_tracked(void);
 
 /* Paired by the single local PCM worker. No network operation or cloud-ready
  * requirement. Suppresses mic upload/cloud speaker admission until end(),

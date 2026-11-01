@@ -315,13 +315,16 @@ mcp_mode_result(esp_err_t ret) {
   controller_modes_status_t status = {0};
   esp_err_t status_ret = controller_modes_get_status(&status);
   if (ret == ESP_OK && status_ret != ESP_OK) ret = status_ret;
-  char response[384];
+  char response[768];
   snprintf(response, sizeof(response),
       "{\"ok\":%s,\"effects_async\":true,\"mode\":\"%s\","
-      "\"remaining_sec\":%lu,\"paused\":%s,\"error\":\"%s\","
+      "\"remaining_sec\":%lu,\"remaining_ms\":%lu,\"session_id\":%lu,\"revision\":%lu,"
+      "\"completed\":%s,\"pause_reason\":\"%s\",\"paused\":%s,\"error\":\"%s\","
       "\"message\":\"模式状态已返回；陪伴联动由后台异步执行，完成状态请以设备实际响应为准。\"}",
       ret == ESP_OK ? "true" : "false", controller_modes_name(status.mode),
-      (unsigned long)status.remaining_sec, status.paused ? "true" : "false",
+      (unsigned long)status.remaining_sec, (unsigned long)status.remaining_ms,
+      (unsigned long)status.session_id, (unsigned long)status.revision, status.completed ? "true":"false",
+      controller_modes_pause_name(status.pause_reason), status.paused ? "true" : "false",
       ret == ESP_OK ? "" : esp_err_to_name(ret));
   return esp_mcp_value_create_string(response);
 }

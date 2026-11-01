@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -38,6 +39,7 @@
 #include "lcd_driver.h"
 #include "lcd_status_ui.h"
 #include "demo_behaviors.h"
+#include "task_guide.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "MAIN";
@@ -264,6 +266,7 @@ static void xiaozhi_event_callback(xiaozhi_manager_event_t event, void *data, vo
         demo_behaviors_note_tts_text(data ? (const char *)data : NULL);
         break;
     case XIAOZHI_MANAGER_EVENT_STT_TEXT:
+        task_guide_note_user_text(data ? (const char *)data : NULL);
         ESP_LOGI(TAG, "[Xiaozhi] STT text: %s", data ? (const char *)data : "");
         break;
     case XIAOZHI_MANAGER_EVENT_SERVER_GOODBYE:
@@ -398,6 +401,7 @@ static void init_local_light(void)
 void app_main(void)
 {
     ESP_LOGI(TAG, "=== Smart Voice Assistant for WT01P4C5-S1 ===");
+    ESP_LOGI(TAG, "[RESET_DIAG] reset_reason=%d", (int)esp_reset_reason());
 
     /* [FIX DIAG] Temporarily restore MCP logs to INFO to diagnose MCP
      * session initialization handshake (was WARN due to TTS stutter).

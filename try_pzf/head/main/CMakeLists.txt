@@ -9,7 +9,7 @@ set(COMP_SRCS "main.c"
 list(APPEND COMP_SRCS "mcp/mcp_tools.c")
 
 # Algorithm result manager sources (always compiled)
-list(APPEND COMP_SRCS "algo/algo_result_manager.c")
+list(APPEND COMP_SRCS "algo/algo_result_manager.c" "algo/focus_sync.c")
 
 # Network integration sources (always compiled)
 list(APPEND COMP_SRCS "network/network_manager.c")
@@ -26,7 +26,9 @@ if (CONFIG_EXAMPLE_ENABLE_DISPLAY)
                            "display/touch_game.c"
                            "display/display_system.c"
                            "display/lvgl_display.c"
-                           "display/expressive_eyes_display.cpp")
+                           "display/expressive_eyes_display.cpp"
+                           "display/task_guide.cpp"
+                           "display/cjk_font_16.c")
 endif()
 
 # Audio sources (conditional on EXAMPLE_ENABLE_AUDIO)

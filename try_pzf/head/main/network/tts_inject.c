@@ -75,6 +75,17 @@ static bool tts_inject_response_accepted(const tts_inject_response_t *response)
     return accepted;
 }
 
+static bool tts_inject_response_skipped(const tts_inject_response_t *response)
+{
+    if (response->overflow || !response->length || strlen(response->body) != response->length) return false;
+    cJSON *root = cJSON_Parse(response->body);
+    bool skipped = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "ok")) &&
+        cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "skipped")) &&
+        cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(root, "accepted"));
+    cJSON_Delete(root);
+    return skipped;
+}
+
 esp_err_t tts_inject_speak(const char *text)
 {
     if (!text || strlen(text) == 0) {
@@ -98,7 +109,8 @@ esp_err_t tts_inject_speak(const char *text)
     }
 
     esp_err_t err = ESP_FAIL;
-    for (int attempt = 1; attempt <= TTS_INJECT_RETRY_COUNT; attempt++) {
+    const int attempts = strcmp(text, "欢迎播报") == 0 ? 1 : TTS_INJECT_RETRY_COUNT;
+    for (int attempt = 1; attempt <= attempts; attempt++) {
         if (attempt > 1) {
             vTaskDelay(pdMS_TO_TICKS(TTS_INJECT_RETRY_DELAY_MS));
         }
@@ -139,7 +151,9 @@ esp_err_t tts_inject_speak(const char *text)
         if (err == ESP_OK) {
             int status = esp_http_client_get_status_code(client);
             if (status == 200) {
-                if (tts_inject_response_accepted(&response)) {
+                if (tts_inject_response_skipped(&response)) {
+                    ESP_LOGI(TAG, "Welcome skipped by controller: busy/unavailable; no retry");
+                } else if (tts_inject_response_accepted(&response)) {
                     ESP_LOGI(TAG, "TTS request accepted (queued, not playback confirmation; attempt %d)", attempt);
                 } else {
                     ESP_LOGW(TAG, "TTS request not accepted: invalid/rejected response (bytes=%u overflow=%d)",

@@ -1,0 +1,31 @@
+云端播报单请求验证（2026-10-31）
+
+范围：仅网页文字播报 voice.say 增加请求跟踪。普通对话、雷达本地提醒、拍头九条本地录音不改。
+需要：重新编译并烧录 controller（基座 COM6）；head 不需要烧录。重启网页后台并强制刷新页面。
+旧 controller 没有 GET /api/tts/status 时，网页拒绝新文字播报，避免退回无状态排队。
+
+协议：
+POST /api/tts/speak 原有 text / priority 仍支持；新增 single_flight:true，强制走云端并返回 request_id。
+同一时间只受理一条 tracked 请求，其他调用者的旧协议保持原行为；不自动重发文字。
+GET /api/tts/status 返回 request_id / phase / busy / cancel_requested。仅保留最近一条 tracked 请求。
+phase：idle / queued / opening / submitting / waiting / playing / cleaning /
+       completed / timeout / cancelled / error / rejected。
+queued 可能在等待普通对话结束，不代表已提交到云端。
+submitting 是本地发送调用进行中；waiting 表示调用返回后仍等待 TTS START，不是云端 ACK。
+playing / completed 来自云端 TTS 起止与原有收尾流程，不保证扬声器听感或逐字正确。
+请求编号改变、状态读取失败或 POST 回执丢失时，网页显示未知并保持禁用，不自动重发。
+结束会话会标记 tracked 请求取消；等实际 worker 收尾后才释放单请求占位。
+不改变原有30秒首响应预算、网络超时、云端配置或声音素材。
+
+上板检查：
+1. GET /api/tts/status 应返回合法 phase，初始 idle/busy=false。
+2. 网页发送“请只朗读：你好，我是溜溜。”；提交后按钮禁用，再次点击不新增队列项。
+3. 状态应能反映排队、打开通道、等待云端、播放、收尾和结束；短阶段可能被轮询跳过。
+4. 超时后显示 timeout，不显示完成，不自动重发。
+5. 普通对话期间提交显示 queued；点击结束会话应取消该待播请求，避免它稍后突然播放。
+6. 播放中结束会话，等设备返回 cancelled 且 busy=false 再允许下一条。
+7. 切角色后结束旧会话，用同一句新请求听辨实际音色。不能用自我介绍的角色名判断音色。
+8. 拍头与雷达仍为原来的本地录音，不随云端音色改变。
+
+回退：恢复本批改动前的三个 controller 源文件和旧固件，并恢复网页的文字播报管理代码。
+分区表、head、音频文件、SDK、sdkconfig 没有因本功能改变。

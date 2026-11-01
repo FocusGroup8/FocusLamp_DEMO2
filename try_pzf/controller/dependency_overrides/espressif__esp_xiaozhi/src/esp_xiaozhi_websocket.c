@@ -16,6 +16,7 @@
 #include "esp_xiaozhi_board.h"
 #include "esp_xiaozhi_websocket.h"
 #include "esp_xiaozhi_payload.h"
+#include "esp_xiaozhi_connection_diag.h"
 
 typedef struct esp_xiaozhi_websocket_s {
     char url[ESP_XIAOZHI_WEBSOCKET_MAX_STRING_SIZE];
@@ -73,6 +74,7 @@ static void esp_xiaozhi_websocket_build_headers(esp_xiaozhi_websocket_t *websock
              "Protocol-Version: %s\r\n", websocket->protocol_version);
 
     if (board_info.initialized) {
+        ESP_LOGI(TAG, "[XZ_LINK] WS Device-Id=%s Client-Id=%s", board_info.mac_address, board_info.uuid);
         snprintf(websocket->headers + strlen(websocket->headers),
                  sizeof(websocket->headers) - strlen(websocket->headers),
                  "Device-Id: %s\r\nClient-Id: %s\r\n",
@@ -244,6 +246,7 @@ esp_err_t esp_xiaozhi_websocket_start(esp_xiaozhi_websocket_handle_t handle)
 
     snprintf(websocket->protocol_version, sizeof(websocket->protocol_version), "%d", protocol_version);
     esp_xiaozhi_websocket_build_headers(websocket);
+    xiaozhi_diag_endpoint(TAG, "WS start config_source=keystore", websocket->url);
 
     esp_websocket_client_config_t websocket_cfg = {
         .uri = websocket->url,

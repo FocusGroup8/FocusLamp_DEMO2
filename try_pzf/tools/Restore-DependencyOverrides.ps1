@@ -6,6 +6,9 @@ $specifications = if ($Project -eq 'head') {
 } else {
     @(
         @{ Component='espressif__esp_xiaozhi'; Version='0.1.1'; File='CMakeLists.txt' },
+        @{ Component='espressif__esp_xiaozhi'; Version='0.1.1'; File='src/esp_xiaozhi_board.c' },
+        @{ Component='espressif__esp_xiaozhi'; Version='0.1.1'; File='src/esp_xiaozhi_info.c' },
+        @{ Component='espressif__esp_xiaozhi'; Version='0.1.1'; File='src/esp_xiaozhi_connection_diag.h'; NewFile=$true },
         @{ Component='espressif__esp_xiaozhi'; Version='0.1.1'; File='src/esp_xiaozhi_mcp.c' },
         @{ Component='espressif__esp_xiaozhi'; Version='0.1.1'; File='src/esp_xiaozhi_chat.c' },
         @{ Component='espressif__esp_xiaozhi'; Version='0.1.1'; File='src/esp_xiaozhi_transport.c' },
@@ -26,18 +29,19 @@ foreach ($spec in $specifications) {
     $versionLine = Get-Content -LiteralPath $manifest | Where-Object { $_ -match '^version:' } | Select-Object -First 1
     $version = ($versionLine -replace '^version:\s*','').Trim().Trim('"', "'")
     if ($version -ne $spec.Version) { throw "Version mismatch: $($spec.Component) expected $($spec.Version), got $version. No overlays applied." }
-    if (!(Test-Path -LiteralPath (Join-Path $componentRoot $spec.File))) { throw "Missing target source: $($spec.File)" }
+    if (!(Test-Path -LiteralPath (Join-Path $componentRoot $spec.File)) -and !$spec.NewFile) { throw "Missing target source: $($spec.File)" }
     if (!(Test-Path -LiteralPath (Join-Path $projectRoot "dependency_overrides/$($spec.Component)/$($spec.File)"))) { throw "Missing overlay: $($spec.File)" }
 }
 foreach ($spec in $specifications) {
     $destination = Join-Path $projectRoot "managed_components/$($spec.Component)/$($spec.File)"
     $source = Join-Path $projectRoot "dependency_overrides/$($spec.Component)/$($spec.File)"
-    if ((Get-FileHash -LiteralPath $source).Hash -eq (Get-FileHash -LiteralPath $destination).Hash) {
+    if ((Test-Path -LiteralPath $destination) -and
+        (Get-FileHash -LiteralPath $source).Hash -eq (Get-FileHash -LiteralPath $destination).Hash) {
         Write-Output "Already applied: $($spec.Component)/$($spec.File)"
         continue
     }
     $backup = Join-Path $projectRoot "dependency_backups/$($spec.Component)/$($spec.File)"
-    if (!(Test-Path -LiteralPath $backup)) {
+    if ((Test-Path -LiteralPath $destination) -and !(Test-Path -LiteralPath $backup)) {
         New-Item -ItemType Directory -Path (Split-Path $backup) -Force | Out-Null
         Copy-Item -LiteralPath $destination -Destination $backup
     }

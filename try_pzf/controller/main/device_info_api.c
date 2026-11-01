@@ -3,6 +3,8 @@
 #include "cJSON.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_system.h"
+#include "esp_timer.h"
 #include "sdkconfig.h"
 #include "websocket_manager.h"
 
@@ -15,7 +17,9 @@ static esp_err_t device_info_handler(httpd_req_t *req)
         !cJSON_AddStringToObject(root, "protocol", "FOCUSLAMP/1") ||
         !cJSON_AddStringToObject(root, "role", "controller") ||
         !cJSON_AddStringToObject(root, "kit_id", CONFIG_FOCUSLAMP_KIT_ID) ||
-        !cJSON_AddNumberToObject(root, "http_port", CONFIG_WS_MANAGER_SERVER_PORT)) {
+        !cJSON_AddNumberToObject(root, "http_port", CONFIG_WS_MANAGER_SERVER_PORT) ||
+        !cJSON_AddNumberToObject(root, "reset_reason", esp_reset_reason()) ||
+        !cJSON_AddNumberToObject(root, "uptime_ms", esp_timer_get_time()/1000)) {
         cJSON_Delete(root);
         httpd_resp_send_500(req);
         return ESP_ERR_NO_MEM;

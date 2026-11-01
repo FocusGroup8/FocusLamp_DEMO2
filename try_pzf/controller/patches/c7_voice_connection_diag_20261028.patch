@@ -1,0 +1,122 @@
+From: FocusLamp local maintenance patch
+Subject: [LOCAL C7] Read-only identity and endpoint diagnostics; no credentials
+
+diff --git a/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_info.c b/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_info.c
+--- a/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_info.c
++++ b/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_info.c
+@@ -24,6 +24,7 @@
+ #include "esp_xiaozhi_keystore.h"
+ #include "esp_xiaozhi_board.h"
+ #include "esp_xiaozhi_info.h"
++#include "esp_xiaozhi_connection_diag.h"
+ 
+ static const char *TAG = "ESP_XIAOZHI_INFO";
+ 
+@@ -327,6 +328,7 @@
+         cJSON *websocket = cJSON_GetObjectItem(root, "websocket");
+         if (cJSON_IsObject(websocket)) {
+             ret = esp_xiaozhi_chat_store_json_config("websocket", websocket);
++            ESP_LOGI(TAG, "[XZ_LINK] OTA websocket_section=present store_result=%s", esp_err_to_name(ret));
+             if (ret != ESP_OK) {
+                 ESP_LOGE(TAG, "Failed to persist WebSocket config: %s", esp_err_to_name(ret));
+                 break;
+@@ -334,6 +336,7 @@
+             info->has_websocket_config = true;
+         } else {
+             ESP_LOGW(TAG, "No websocket section found");
++            ESP_LOGI(TAG, "[XZ_LINK] OTA websocket_section=absent store_attempted=0");
+         }
+ 
+         cJSON *server_time = cJSON_GetObjectItem(root, "server_time");
+@@ -501,6 +504,8 @@
+             break;
+         }
+ 
++        xiaozhi_diag_endpoint(TAG, "OTA request", CONFIG_XIAOZHI_OTA_URL);
++        ESP_LOGI(TAG, "[XZ_LINK] OTA Device-Id=%s Client-Id=%s", board_info.mac_address, board_info.uuid);
+         esp_http_client_set_header(http_client, "Client-Id", board_info.uuid);
+         esp_http_client_set_header(http_client, "Device-Id", board_info.mac_address);
+         esp_http_client_set_header(http_client, "User-Agent", CONFIG_IDF_TARGET);
+@@ -513,6 +518,15 @@
+                 break;
+             }
+         }
++        char effective_url[512];
++        if (esp_http_client_get_url(http_client, effective_url, sizeof(effective_url)) == ESP_OK) {
++            xiaozhi_diag_endpoint(TAG, "OTA effective", effective_url);
++        } else {
++            ESP_LOGI(TAG, "[XZ_LINK] OTA effective endpoint=unavailable");
++        }
++        ESP_LOGI(TAG, "[XZ_LINK] OTA HTTP status=%d transport_result=%s response_result=%s has_ws=%d",
++                 esp_http_client_get_status_code(http_client), esp_err_to_name(ret),
++                 esp_err_to_name(http_ctx.result), info->has_websocket_config);
+         if (ret != ESP_OK) {
+             ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(ret));
+             break;
+diff --git a/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_websocket.c b/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_websocket.c
+--- a/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_websocket.c
++++ b/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_websocket.c
+@@ -16,6 +16,7 @@
+ #include "esp_xiaozhi_board.h"
+ #include "esp_xiaozhi_websocket.h"
+ #include "esp_xiaozhi_payload.h"
++#include "esp_xiaozhi_connection_diag.h"
+ 
+ typedef struct esp_xiaozhi_websocket_s {
+     char url[ESP_XIAOZHI_WEBSOCKET_MAX_STRING_SIZE];
+@@ -73,6 +74,7 @@
+              "Protocol-Version: %s\r\n", websocket->protocol_version);
+ 
+     if (board_info.initialized) {
++        ESP_LOGI(TAG, "[XZ_LINK] WS Device-Id=%s Client-Id=%s", board_info.mac_address, board_info.uuid);
+         snprintf(websocket->headers + strlen(websocket->headers),
+                  sizeof(websocket->headers) - strlen(websocket->headers),
+                  "Device-Id: %s\r\nClient-Id: %s\r\n",
+@@ -244,6 +246,7 @@
+ 
+     snprintf(websocket->protocol_version, sizeof(websocket->protocol_version), "%d", protocol_version);
+     esp_xiaozhi_websocket_build_headers(websocket);
++    xiaozhi_diag_endpoint(TAG, "WS start config_source=keystore", websocket->url);
+ 
+     esp_websocket_client_config_t websocket_cfg = {
+         .uri = websocket->url,
+diff --git a/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_connection_diag.h b/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_connection_diag.h
+--- /dev/null
++++ b/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_connection_diag.h
+@@ -0,0 +1,36 @@
++#pragma once
++
++#include <string.h>
++#include "esp_log.h"
++
++/* Never log the raw URL: userinfo, query and fragment may contain credentials. */
++static inline void xiaozhi_diag_endpoint(const char *tag, const char *label, const char *url)
++{
++    const char *authority = url ? strstr(url, "://") : NULL;
++    if (!authority) {
++        ESP_LOGI(tag, "[XZ_LINK] %s endpoint=unavailable", label);
++        return;
++    }
++    authority += 3;
++    const char *end = authority + strcspn(authority, "/?#");
++    const char *host = authority;
++    for (const char *p = authority; p < end; ++p) {
++        if (*p == '@') host = p + 1;
++    }
++    const char *path = *end == '/' ? end : "/";
++    size_t host_len = (size_t)(end - host);
++    size_t path_len = strcspn(path, "?#");
++    if (!host_len || host_len > 255 || path_len > 255) {
++        ESP_LOGI(tag, "[XZ_LINK] %s endpoint=invalid_or_too_long", label);
++        return;
++    }
++    for (size_t i = 0; i < host_len + path_len; ++i) {
++        unsigned char c = (unsigned char)(i < host_len ? host[i] : path[i - host_len]);
++        if (c < 33 || c > 126) {
++            ESP_LOGI(tag, "[XZ_LINK] %s endpoint=invalid_characters", label);
++            return;
++        }
++    }
++    ESP_LOGI(tag, "[XZ_LINK] %s host=%.*s path=%.*s", label,
++             (int)host_len, host, (int)path_len, path);
++}

@@ -1,3 +1,5 @@
+#include "cloud_welcome_phrases.h"
+#include "esp_random.h"
 /*
  * SPDX-FileCopyrightText: 2026 Espressif Systems (Shanghai) CO LTD
  *
@@ -25,6 +27,8 @@
 
 #include "esp_mcp_data.h"
 #include "esp_mcp_engine.h"
+#include "task_guide.h"
+#include "task_guide_gate.h"
 #include "esp_mcp_property.h"
 #include "esp_mcp_tool.h"
 #include "esp_xiaozhi_chat.h"
@@ -403,10 +407,43 @@ static esp_err_t uplink_runtime_init(void) {
 typedef struct {
   char text[SPEAK_TEXT_MAX_LEN];
   int priority;
+  uint32_t tracked_id;
+  bool drop_if_busy;
+  uint32_t cookie;
+  xiaozhi_speak_allowed_t allowed;
+  xiaozhi_speak_result_t result;
 } speak_request_t;
 
 static QueueHandle_t s_speak_queue = NULL;
 static TaskHandle_t s_speak_task = NULL;
+static xiaozhi_speak_status_t s_tracked = {.phase = "idle"};
+static uint32_t s_tracked_executing;
+static size_t s_cloud_welcome_next;
+
+/* All status access shares the existing short uplink critical section. */
+static void tracked_phase_locked(const char *phase) {
+  if (s_tracked_executing && s_tracked.id == s_tracked_executing)
+    snprintf(s_tracked.phase, sizeof(s_tracked.phase), "%s", phase);
+}
+void xiaozhi_manager_speak_status(xiaozhi_speak_status_t *out) {
+  if (!out) return;
+  portENTER_CRITICAL(&s_uplink_lock); *out = s_tracked; portEXIT_CRITICAL(&s_uplink_lock);
+}
+void xiaozhi_manager_cancel_speak(uint32_t id) {
+  portENTER_CRITICAL(&s_uplink_lock);
+  if (id && s_tracked.busy && s_tracked.id == id) {
+    s_tracked.cancel_requested = true;
+    if (s_tracked_executing == id)
+      speak_cycle_finish(&s_speak_cycle, s_speak_cycle.generation, SPEAK_OUTCOME_CANCELLED);
+  }
+  portEXIT_CRITICAL(&s_uplink_lock);
+  if (s_speak_task) xTaskNotifyGive(s_speak_task);
+}
+void xiaozhi_manager_speak_cancel_tracked(void) {
+  portENTER_CRITICAL(&s_uplink_lock);
+  if (s_tracked.busy) s_tracked.cancel_requested = true;
+  portEXIT_CRITICAL(&s_uplink_lock);
+}
 
 static void speak_notify(void) {
   if (s_speak_task) xTaskNotifyGive(s_speak_task);
@@ -695,6 +732,12 @@ static void chat_rebuild_runtime(bool preserve_speak_queue) {
     if (pending > 0) {
       ESP_LOGW(TAG, "Reconnect: dropping %u queued speak request(s)", (unsigned)pending);
       xQueueReset(s_speak_queue);
+      portENTER_CRITICAL(&s_uplink_lock);
+      if (s_tracked.busy && s_tracked_executing != s_tracked.id) {
+        s_tracked.busy = false;
+        snprintf(s_tracked.phase, sizeof(s_tracked.phase), "cancelled");
+      }
+      portEXIT_CRITICAL(&s_uplink_lock);
     }
   }
 
@@ -1263,6 +1306,7 @@ static void xiaozhi_event_process(esp_xiaozhi_chat_event_t event,
           speak_cycle_expire(&s_speak_cycle, generation,
                              esp_timer_get_time(), SPEAK_FIRST_TTS_WAIT_US);
           allowed = allowed && speak_cycle_start(&s_speak_cycle, generation);
+          if (allowed) tracked_phase_locked("playing");
           if (!allowed) speak_cycle_finish(&s_speak_cycle, generation, SPEAK_OUTCOME_ERROR);
         } else {
           allowed = allowed && s_normal_dialogue_active &&
@@ -1698,6 +1742,8 @@ mcp_tool_test_echo(const esp_mcp_property_list_t *properties) {
  *-------------------------------------------------------------*/
 static esp_err_t register_mcp_tools(void) {
   esp_err_t ret = ESP_OK;
+  ret = task_guide_register_mcp_tools(s_mcp_engine);
+  if (ret != ESP_OK) return ret;
   ret = mcp_probe_register_tool(s_mcp_engine);
   if (ret != ESP_OK) return ret;
 
@@ -1901,6 +1947,18 @@ esp_err_t xiaozhi_manager_init(const xiaozhi_manager_config_t *config) {
     ESP_LOGI(TAG, "Device info retrieved: version=%s has_mqtt=%d has_ws=%d",
              info.current_version ? info.current_version : "N/A",
              info.has_mqtt_config, info.has_websocket_config);
+    ESP_LOGI(TAG, "[XZ_LINK] activation code_present=%d challenge_present=%d",
+             info.has_activation_code, info.has_activation_challenge);
+    if (info.has_activation_code && info.activation_code &&
+        strlen(info.activation_code) == 6 &&
+        strspn(info.activation_code, "0123456789") == 6) {
+      ESP_LOGW(TAG, "[XZ_BIND] Control-console binding code: %s (enter in FOCUS -> Devices -> Bind new device)",
+               info.activation_code);
+    } else if (info.has_activation_code) {
+      ESP_LOGW(TAG, "[XZ_BIND] Activation code is empty or not six digits; value not logged");
+    } else {
+      ESP_LOGI(TAG, "[XZ_BIND] No binding code returned by this OTA response");
+    }
   } else {
     ESP_LOGW(TAG, "Failed to get device info: %s (continuing anyway)",
              esp_err_to_name(ret));
@@ -2454,22 +2512,25 @@ static esp_err_t speak_process_request(const speak_request_t *req) {
   uint32_t generation = 0;
   bool fresh = false, logged_deferred = false;
   for (;;) {
+    if (req->allowed && !req->allowed(req->cookie)) return ESP_ERR_INVALID_STATE;
     bool local_playing = audio_bridge_local_playing();
     portENTER_CRITICAL(&s_uplink_lock);
+    bool tracked_cancelled = req->tracked_id && s_tracked.cancel_requested;
     bool stopped = s_state == XIAOZHI_MANAGER_STATE_IDLE ||
         (s_state == XIAOZHI_MANAGER_STATE_INITIALIZED && s_reconnect_canceled);
     bool ready = s_chat_handle && !s_chat_retiring && !s_chat_rebuilding &&
         s_state == XIAOZHI_MANAGER_STATE_CONNECTED && !s_normal_dialogue_active &&
         !s_normal_tts_active && s_chat_users == 0 && !local_playing &&
         !s_local_audio_active;
-    bool reserved = ready && speak_cycle_begin(&s_speak_cycle, &generation);
+    bool reserved = !tracked_cancelled && ready && speak_cycle_begin(&s_speak_cycle, &generation);
     if (reserved) {
+      tracked_phase_locked("opening");
       fresh = s_transport_fresh;
       s_uplink_accepting = false;
       uplink_clear_locked();
     }
     portEXIT_CRITICAL(&s_uplink_lock);
-    if (stopped) return ESP_ERR_INVALID_STATE;
+    if (stopped || tracked_cancelled || (req->drop_if_busy && !reserved)) return ESP_ERR_INVALID_STATE;
     if (reserved) break;
     if (!logged_deferred) {
       ESP_LOGI(TAG, "Speak request remains queued/deferred until normal dialogue and recovery are idle");
@@ -2508,6 +2569,7 @@ static esp_err_t speak_process_request(const speak_request_t *req) {
       portENTER_CRITICAL(&s_uplink_lock);
       bool registered = s_state == XIAOZHI_MANAGER_STATE_LISTENING &&
           speak_cycle_wait(&s_speak_cycle, generation, esp_timer_get_time());
+      if (registered) tracked_phase_locked("submitting");
       bool current = s_speak_cycle.generation == generation &&
           s_speak_cycle.phase == SPEAK_OPENING;
       portEXIT_CRITICAL(&s_uplink_lock);
@@ -2519,8 +2581,34 @@ static esp_err_t speak_process_request(const speak_request_t *req) {
       ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
     }
   }
-  if (ret == ESP_OK) ret = speak_send(generation, req->text);
+  /* A task sent by the Studio text box is not ordinary TTS. Arm it only
+   * when the FIFO item can really be submitted, then send the explicit MCP
+   * instruction with its request identity. Keep the existing short FIFO
+   * items; the larger prompt is temporary PSRAM, never silently truncated. */
+  char *guide_prompt = NULL;
+  bool guide_prepared = false;
+  const char *cloud_text = req->text;
+  if (ret == ESP_OK && tg_request_intent(req->text)) {
+    guide_prompt = heap_caps_malloc(TASK_GUIDE_REQUEST_PROMPT_BYTES,
+                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!guide_prompt) ret = ESP_ERR_NO_MEM;
+    else {
+      ret = task_guide_prepare_request(req->text, guide_prompt,
+                                      TASK_GUIDE_REQUEST_PROMPT_BYTES);
+      if (ret == ESP_OK) {cloud_text = guide_prompt;guide_prepared = true;}
+      else ESP_LOGW(TAG,"Task guide request was not submitted: %s",esp_err_to_name(ret));
+    }
+  }
+  if (ret == ESP_OK && req->allowed && !req->allowed(req->cookie)) ret = ESP_ERR_INVALID_STATE;
+  if (ret == ESP_OK) ret = speak_send(generation, cloud_text);
   if (ret == ESP_OK) ret = speak_send(generation, NULL);
+  portENTER_CRITICAL(&s_uplink_lock);
+  if (s_speak_cycle.phase == SPEAK_WAITING) tracked_phase_locked("waiting");
+  portEXIT_CRITICAL(&s_uplink_lock);
+  if (guide_prompt) {
+    if (guide_prepared && ret != ESP_OK) task_guide_cancel_prepared_request(guide_prompt);
+    free(guide_prompt);
+  }
   if (ret != ESP_OK) speak_cancel(SPEAK_OUTCOME_ERROR);
   else ESP_LOGI(TAG, "Speak cycle=%u submitted; waiting for cloud TTS (not playback confirmed)",
                 (unsigned)generation);
@@ -2544,6 +2632,7 @@ static esp_err_t speak_process_request(const speak_request_t *req) {
 
   /* Includes partial submission and timeout: detach from the old WS before
    * admitting any new normal speech or a later FIFO item. No text re-send. */
+  portENTER_CRITICAL(&s_uplink_lock); tracked_phase_locked("cleaning"); portEXIT_CRITICAL(&s_uplink_lock);
   if (attempted_open) {
     esp_err_t cleanup = speak_transport_reset(generation);
     if (cleanup != ESP_OK) return cleanup;
@@ -2567,7 +2656,20 @@ static void speak_task_func(void *arg) {
     if (xQueueReceive(s_speak_queue, &req, portMAX_DELAY) != pdTRUE) {
       continue;
     }
+    portENTER_CRITICAL(&s_uplink_lock);
+    s_tracked_executing = req.tracked_id;
+    portEXIT_CRITICAL(&s_uplink_lock);
     esp_err_t err = speak_process_request(&req);
+    portENTER_CRITICAL(&s_uplink_lock);
+    if (req.tracked_id && s_tracked.id == req.tracked_id) {
+      tracked_phase_locked(s_tracked.cancel_requested ? "cancelled" :
+          err == ESP_OK ? "completed" : err == ESP_ERR_TIMEOUT ? "timeout" :
+          req.drop_if_busy && strcmp(s_tracked.phase, "queued") == 0 ? "skipped" : "error");
+      s_tracked.busy = false;
+    }
+    s_tracked_executing = 0;
+    portEXIT_CRITICAL(&s_uplink_lock);
+    if (req.result) req.result(req.cookie, err);
     if (err != ESP_OK) {
       ESP_LOGW(TAG, "Speak \"%s\" NOT broadcast: %s (state=%d)", req.text,
                esp_err_to_name(err), (int)s_state);
@@ -2576,8 +2678,64 @@ static void speak_task_func(void *arg) {
   vTaskDelete(NULL);
 }
 
+static esp_err_t speak_tracked_enqueue(const char *text, int priority, uint32_t *id, bool drop_if_busy, uint32_t cookie, xiaozhi_speak_allowed_t allowed, xiaozhi_speak_result_t result) {
+  if (!text || !*text || !id || strlen(text) >= SPEAK_TEXT_MAX_LEN) return ESP_ERR_INVALID_ARG;
+  if (!s_speak_queue || !s_chat_handle) return ESP_ERR_INVALID_STATE;
+  speak_request_t req = {.priority = priority, .drop_if_busy = drop_if_busy, .cookie = cookie, .allowed = allowed, .result = result};
+  snprintf(req.text, sizeof(req.text), "%s", text);
+  bool local_playing = audio_bridge_local_playing();
+  portENTER_CRITICAL(&s_uplink_lock);
+  bool welcome_busy = drop_if_busy && (s_state != XIAOZHI_MANAGER_STATE_CONNECTED ||
+      s_chat_retiring || s_chat_rebuilding || s_normal_dialogue_active ||
+      s_normal_tts_active || s_local_audio_active || local_playing || s_chat_users != 0 ||
+      speak_cycle_busy(&s_speak_cycle) || uxQueueMessagesWaiting(s_speak_queue) != 0);
+  if (s_tracked.busy || welcome_busy) { portEXIT_CRITICAL(&s_uplink_lock); return ESP_ERR_INVALID_STATE; }
+  /* A per-request random identity prevents a reboot from restarting at id=1. */
+  do { req.tracked_id = esp_random(); } while (!req.tracked_id || req.tracked_id == s_tracked.id);
+  s_tracked = (xiaozhi_speak_status_t){.id = req.tracked_id, .busy = true, .phase = "queued"};
+  portEXIT_CRITICAL(&s_uplink_lock);
+  *id = req.tracked_id;
+  if (xQueueSend(s_speak_queue, &req, 0) != pdTRUE) {
+    portENTER_CRITICAL(&s_uplink_lock);
+    s_tracked.busy = false;
+    snprintf(s_tracked.phase, sizeof(s_tracked.phase), "rejected");
+    portEXIT_CRITICAL(&s_uplink_lock);
+    return ESP_ERR_INVALID_STATE;
+  }
+  return ESP_OK;
+}
+
+esp_err_t xiaozhi_manager_speak_tracked(const char *text, int priority, uint32_t *id) {
+  return speak_tracked_enqueue(text, priority, id, false, 0, NULL, NULL);
+}
+
+esp_err_t xiaozhi_manager_speak_welcome(uint32_t *id) {
+  portENTER_CRITICAL(&s_uplink_lock);
+  size_t index = s_cloud_welcome_next;
+  portEXIT_CRITICAL(&s_uplink_lock);
+  esp_err_t ret = speak_tracked_enqueue(cloud_welcome_phrases[index], 1, id, true, 0, NULL, NULL);
+  if (ret == ESP_OK) {
+    portENTER_CRITICAL(&s_uplink_lock);
+    s_cloud_welcome_next = (index + 1) % CLOUD_WELCOME_COUNT;
+    portEXIT_CRITICAL(&s_uplink_lock);
+    ESP_LOGI(TAG, "Cloud welcome %u/9 accepted: request=%lu; no retry/fallback",
+             (unsigned)(index + 1), (unsigned long)*id);
+  } else {
+    ESP_LOGI(TAG, "Cloud welcome skipped: dialogue, broadcast or recovery busy/unavailable");
+  }
+  return ret;
+}
+
+esp_err_t xiaozhi_manager_speak_reminder(uint32_t cookie, xiaozhi_speak_allowed_t allowed,
+                                      xiaozhi_speak_result_t result, uint32_t *id) {
+  if (!allowed || !result || !allowed(cookie)) return ESP_ERR_INVALID_STATE;
+  return speak_tracked_enqueue("请只朗读：起来活动一下吧", 1, id, true, cookie, allowed, result);
+}
+
 esp_err_t xiaozhi_manager_speak(const char *text, int priority) {
   ESP_RETURN_ON_FALSE(text, ESP_ERR_INVALID_ARG, TAG, "Invalid text");
+  ESP_RETURN_ON_FALSE(*text && strlen(text) < SPEAK_TEXT_MAX_LEN,
+                      ESP_ERR_INVALID_SIZE, TAG, "Text exceeds speak queue capacity");
   ESP_RETURN_ON_FALSE(s_chat_handle, ESP_ERR_INVALID_STATE, TAG,
                       "Not initialized");
   ESP_RETURN_ON_FALSE(s_speak_queue, ESP_ERR_INVALID_STATE, TAG,
@@ -2660,6 +2818,19 @@ esp_err_t xiaozhi_manager_send_audio(const char *data, size_t data_len) {
   return ESP_ERR_NOT_SUPPORTED;
 }
 esp_mcp_t *xiaozhi_manager_get_mcp_engine(void) { return NULL; }
+esp_err_t xiaozhi_manager_speak_tracked(const char *text, int priority, uint32_t *id) {
+  (void)text; (void)priority; (void)id; return ESP_ERR_NOT_SUPPORTED;
+}
+void xiaozhi_manager_speak_status(xiaozhi_speak_status_t *out) {
+  if (out) *out = (xiaozhi_speak_status_t){.phase = "unsupported"};
+}
+void xiaozhi_manager_speak_cancel_tracked(void) {}
+void xiaozhi_manager_cancel_speak(uint32_t id) { (void)id; }
+esp_err_t xiaozhi_manager_speak_reminder(uint32_t cookie, xiaozhi_speak_allowed_t allowed,
+                                      xiaozhi_speak_result_t result, uint32_t *id) {
+  (void)cookie; (void)allowed; (void)result; (void)id; return ESP_ERR_NOT_SUPPORTED;
+}
+esp_err_t xiaozhi_manager_speak_welcome(uint32_t *id) { (void)id; return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t xiaozhi_manager_speak(const char *text, int priority) {
   (void)text;
   (void)priority;

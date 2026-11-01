@@ -38,9 +38,10 @@
 #include "xiaozhi_manager.h"
 #include "motion_controller.h"
 #include "ambient_service.h"
-#include "local_reminder.h"
+#include "cloud_welcome_alias.h"
 #include "tts_capture.h"
 #include "mcp_vision_client.h"
+#include "task_guide_gate.h"
 
 static const char *TAG = "TTS_API";
 
@@ -107,31 +108,56 @@ static esp_err_t tts_speak_handler(httpd_req_t *req)
     ESP_LOGI(TAG, "TTS speak: \"%s\" (priority=%d)", text, priority);
 
     /* Preserve the HTTP contract: ok means accepted, never already played.
-     * Exact legacy welcome aliases bypass cloud text injection entirely. */
-    bool local_welcome = local_welcome_matches(text);
-    esp_err_t ret = local_welcome ? local_welcome_submit() :
-                                  xiaozhi_manager_speak(text, priority);
+     * Legacy head welcome aliases select the next short cloud welcome. */
+    bool tracked = cJSON_IsTrue(cJSON_GetObjectItem(root, "single_flight"));
+    bool cloud_welcome = !tracked && cloud_welcome_matches(text);
+    bool task_request = !cloud_welcome && tg_request_intent(text);
+    uint32_t request_id = 0;
+    esp_err_t ret = cloud_welcome ? xiaozhi_manager_speak_welcome(&request_id) : tracked ?
+        xiaozhi_manager_speak_tracked(text, priority, &request_id) :
+        xiaozhi_manager_speak(text, priority);
 
     cJSON_Delete(root);
     free(body);
 
+    if (cloud_welcome && ret != ESP_OK) {
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":true,\"accepted\":false,\"skipped\":true,\"reason\":\"busy_or_unavailable\"}");
+    }
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "%s request rejected: %s", local_welcome ? "Local welcome" : "Cloud speak",
+        ESP_LOGW(TAG, "%s request rejected: %s", cloud_welcome ? "Cloud welcome" : "Cloud speak",
                  esp_err_to_name(ret));
         httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, local_welcome ?
+        httpd_resp_sendstr(req, cloud_welcome ?
             "{\"ok\":false,\"error\":\"local welcome unavailable\"}" :
             "{\"ok\":false,\"error\":\"xiaozhi speak failed\"}");
         return ESP_OK; /* Don't fail the HTTP request */
     }
 
-    ESP_LOGI(TAG, "%s request accepted", local_welcome ? "Local welcome" : "Cloud speak");
+    ESP_LOGI(TAG, "%s request queued (not screen/playback confirmed)",
+             cloud_welcome ? "Cloud welcome" : task_request ? "Task guide" : "Cloud speak");
     httpd_resp_set_type(req, "application/json");
-    const char *resp = "{\"ok\":true}";
+    const char *resp = task_request ? "{\"ok\":true,\"queued\":true,\"task_guide\":true}" : "{\"ok\":true}";
+    char tracked_resp[128];
+    if (tracked || cloud_welcome) {
+        snprintf(tracked_resp, sizeof(tracked_resp), "{\"ok\":true,\"request_id\":%lu,\"phase\":\"queued\"}", (unsigned long)request_id);
+        resp = tracked_resp;
+    }
     httpd_resp_send(req, resp, strlen(resp));
 
     return ESP_OK;
 }
+
+static esp_err_t tts_status_handler(httpd_req_t *req) {
+    xiaozhi_speak_status_t status;
+    xiaozhi_manager_speak_status(&status);
+    char body[192];
+    snprintf(body, sizeof(body), "{\"ok\":true,\"request_id\":%lu,\"busy\":%s,\"phase\":\"%s\",\"cancel_requested\":%s}",
+        (unsigned long)status.id, status.busy ? "true" : "false", status.phase, status.cancel_requested ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, body);
+}
+static const httpd_uri_t tts_status_uri = {.uri = "/api/tts/status", .method = HTTP_GET, .handler = tts_status_handler};
 
 static const httpd_uri_t tts_speak_uri = {
     .uri      = "/api/tts/speak",
@@ -170,8 +196,8 @@ static esp_err_t chat_end_handler(httpd_req_t *req)
 
     ESP_LOGI(TAG, "Chat end requested");
 
-    /* Cancel local output before any potentially waiting cloud close call. */
-    local_welcome_cancel();
+    /* Cancel a pending cloud request before closing the cloud channel. */
+    xiaozhi_manager_speak_cancel_tracked();
     esp_err_t ret = xiaozhi_manager_close_audio_channel();
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
         ESP_LOGW(TAG, "xiaozhi_manager_close_audio_channel failed: %s", esp_err_to_name(ret));
@@ -892,7 +918,9 @@ esp_err_t tts_http_api_init(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    esp_err_t ret = ws_manager_server_register_uri(&tts_speak_uri);
+    esp_err_t ret = ws_manager_server_register_uri(&tts_status_uri);
+    if (ret != ESP_OK) return ret;
+    ret = ws_manager_server_register_uri(&tts_speak_uri);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register /api/tts/speak: %s", esp_err_to_name(ret));
         return ret;
@@ -964,3 +992,4 @@ esp_err_t tts_http_api_init(void)
     }
     return ESP_OK;
 }
+

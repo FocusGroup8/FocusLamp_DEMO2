@@ -1,3 +1,4 @@
+#include "../components/xiaozhi_manager/src/cloud_welcome_phrases.h"
 /* This fixture exercises the actual policy header used by xiaozhi_manager. */
 #include "../components/xiaozhi_manager/src/speak_cycle.h"
 #include <stddef.h>
@@ -28,6 +29,15 @@ void *memcpy(void *destination, const void *source, size_t len)
 
 int speak_cycle_test(void)
 {
+    CHECK(CLOUD_WELCOME_COUNT == 9);
+    for (size_t i = 0; i < CLOUD_WELCOME_COUNT; ++i) {
+        const unsigned char *text = (const unsigned char *)cloud_welcome_phrases[i];
+        size_t chars = 0;
+        for (size_t j = 0; text[j]; ++j) if ((text[j] & 0xc0) != 0x80) ++chars;
+        CHECK(chars > 5 && chars < 15);
+        const unsigned char *prefix = (const unsigned char *)"请只朗读：";
+        for (size_t j = 0; prefix[j]; ++j) CHECK(text[j] == prefix[j]);
+    }
     speak_cycle_t cycle = {0};
     uint32_t first = 0;
     uint32_t second = 0;

@@ -421,6 +421,8 @@ esp_err_t ws_manager_server_start(void)
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    /* Mode/engagement JSON plus HTTPD parsing and logging share this task. */
+    config.stack_size = 8192;
     config.server_port = WS_MANAGER_SERVER_PORT;
     /* [FIX 2026-08-10] recv_wait_timeout raised 5s->300s (aligned with the
      * head board): HTTP/WS clients that only send requests (TTS inject,

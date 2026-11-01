@@ -324,6 +324,7 @@ esp_err_t ws_manager_client_get_info(ws_manager_conn_info_t *info)
 #if (WS_MANAGER_SERVER_ENABLE == 1)
 
 #include "esp_http_server.h"
+#include "ws_camera_lease.h"
 
 static httpd_handle_t s_server = NULL;
 static bool s_server_running   = false;
@@ -349,16 +350,24 @@ static SemaphoreHandle_t s_server_mutex = NULL;
 static int s_camera_client_fd = -1;
 static portMUX_TYPE s_camera_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static ws_camera_client_state_t s_camera_state;
+/* Mutated only under s_server_mutex (or while the server is stopped). */
+static ws_camera_lease_t s_camera_lease;
+static int64_t s_camera_last_pong_us = -1; /* Protected by s_camera_state_lock. */
 
 /* Keep observation state consistent without holding a spinlock during I/O.
  * Existing socket ownership/close handling stays with HTTPD. */
 static void camera_client_set_fd(int fd)
 {
+    int64_t now_us = esp_timer_get_time();
     portENTER_CRITICAL(&s_camera_state_lock);
     s_camera_client_fd = fd;
     s_camera_state.connected = fd >= 0;
     if (fd >= 0) ++s_camera_state.session_id;
+    s_camera_state.heartbeat_pending = false;
+    s_camera_last_pong_us = -1;
+    uint32_t session_id = s_camera_state.session_id;
     portEXIT_CRITICAL(&s_camera_state_lock);
+    ws_camera_lease_start(&s_camera_lease, session_id, now_us);
 }
 /* The DEMO2 deployment has one result producer. Reconnect replaces it rather
  * than consuming another slot until TCP detects the previous connection. */
@@ -562,6 +571,9 @@ static esp_err_t ws_session_open_cb(httpd_handle_t hd, int sockfd)
 
 static esp_err_t ws_send_ws_frame(int client_fd, uint8_t opcode, const uint8_t *data,
                                  size_t len, int64_t send_start_us, ws_send_progress_t *group);
+/* Called with s_server_mutex held. Pings use the exact JPEG/Pong/Close send
+ * path, so no control frame can be inserted inside another frame's payload. */
+static bool camera_heartbeat_service_locked(int64_t now_us);
 
 /* URI matching in HTTPD ignores the query string. Keep endpoint ownership
  * consistent with that routing decision, e.g. /camera?client=demo. */
@@ -602,6 +614,15 @@ static esp_err_t ws_server_handler(httpd_req_t *req)
          * healthy client; replace the client when the slot is held by a dead
          * one (send-failure threshold reached) so reconnects never stall. */
         if (is_camera) {
+            xSemaphoreTake(s_server_mutex, portMAX_DELAY);
+            int previous_camera_fd = s_camera_client_fd;
+            bool camera_alive = camera_heartbeat_service_locked(esp_timer_get_time());
+            xSemaphoreGive(s_server_mutex);
+            /* The expired socket was shut down, not closed, so it cannot be
+             * reused during this HTTPD callback. Free its tracking slot now
+             * even if all WS slots were occupied; final close stays with
+             * HTTPD. This helper dispatches callbacks only after unlocking. */
+            if (previous_camera_fd >= 0 && !camera_alive) track_client_remove(previous_camera_fd);
             if (s_camera_client_fd >= 0 && s_camera_fail_count < WS_CAMERA_FAIL_KICK_THRESHOLD) {
                 ESP_LOGW(TAG, "Server: rejecting /camera client fd=%d (already occupied by fd=%d)", fd,
                          s_camera_client_fd);
@@ -664,8 +685,20 @@ static esp_err_t ws_server_handler(httpd_req_t *req)
                 return ws_pkt.type == HTTPD_WS_TYPE_CLOSE ? ws_finish_close(req) : ret;
             }
         }
-        if (ws_pkt.type == HTTPD_WS_TYPE_PONG) return ESP_OK;
         int fd = httpd_req_to_sockfd(req);
+        if (ws_pkt.type == HTTPD_WS_TYPE_PONG) {
+            xSemaphoreTake(s_server_mutex, portMAX_DELAY);
+            int64_t now_us = esp_timer_get_time();
+            if (fd == s_camera_client_fd &&
+                ws_camera_lease_pong(&s_camera_lease, payload, ws_pkt.len, now_us)) {
+                portENTER_CRITICAL(&s_camera_state_lock);
+                s_camera_state.heartbeat_pending = false;
+                s_camera_last_pong_us = now_us;
+                portEXIT_CRITICAL(&s_camera_state_lock);
+            }
+            xSemaphoreGive(s_server_mutex);
+            return ESP_OK;
+        }
         xSemaphoreTake(s_server_mutex, portMAX_DELAY);
         ret = fd == s_camera_client_fd
             ? ws_send_ws_frame(fd, ws_pkt.type == HTTPD_WS_TYPE_PING
@@ -857,7 +890,7 @@ esp_err_t ws_manager_server_start(void)
     ESP_LOGI(TAG, "WebSocket server started");
     ESP_LOGI(TAG, "WS limits: tracked=%d httpd_sessions=%d lru=1 algo_producers=1 recv_timeout=300s",
              WS_MANAGER_SERVER_MAX_CONN, config.max_open_sockets);
-    ESP_LOGI(TAG, "Camera WS: serialized JPEG/Pong/Close, partial-send failure closes session");
+    ESP_LOGI(TAG, "Camera WS: serialized JPEG/Ping/Pong/Close, heartbeat=5s timeout=15s, partial-send failure closes session");
     return ESP_OK;
 }
 
@@ -1006,6 +1039,39 @@ static esp_err_t ws_send_ws_frame(int client_fd, uint8_t opcode, const uint8_t *
         return ESP_FAIL;
     }
     return ESP_OK;
+}
+
+static bool camera_heartbeat_service_locked(int64_t now_us)
+{
+    int fd = s_camera_client_fd;
+    if (fd < 0) return false;
+    if (ws_camera_lease_expired(&s_camera_lease, now_us)) {
+        ESP_LOGW(TAG, "Camera heartbeat timeout: fd=%d session=%u; releasing expired viewer",
+                 fd, (unsigned)s_camera_lease.session_id);
+        /* Close only this captured camera socket. EOF wakes HTTPD, whose
+         * normal session cleanup removes tracking; never queue another close
+         * that could run after this fd has been reused by a new connection. */
+        shutdown(fd, SHUT_RDWR);
+        camera_client_set_fd(-1);
+        portENTER_CRITICAL(&s_camera_state_lock);
+        ++s_camera_state.heartbeat_timeouts;
+        portEXIT_CRITICAL(&s_camera_state_lock);
+        return false;
+    }
+    if (ws_camera_lease_ping_due(&s_camera_lease, now_us)) {
+        uint8_t payload[WS_CAMERA_PING_BYTES];
+        ws_camera_lease_ping_started(&s_camera_lease, now_us, payload);
+        if (ws_send_ws_frame(fd, HTTPD_WS_TYPE_PING, payload, sizeof(payload), now_us, NULL) != ESP_OK) {
+            /* The shared frame sender already shut down the socket, including
+             * a partial Ping. Releasing its slot cannot affect /algo or /mcp. */
+            camera_client_set_fd(-1);
+            return false;
+        }
+        portENTER_CRITICAL(&s_camera_state_lock);
+        s_camera_state.heartbeat_pending = true;
+        portEXIT_CRITICAL(&s_camera_state_lock);
+    }
+    return true;
 }
 
 esp_err_t ws_manager_server_send_binary(int client_fd, const char *data, int len)
@@ -1176,6 +1242,7 @@ esp_err_t ws_manager_server_send_camera_pair(const char *text, int text_len, con
 
     /* Recheck after acquiring the admission/removal mutex and retain this
      * socket for the ENTIRE group, including its failure/close path. */
+    (void)camera_heartbeat_service_locked(esp_timer_get_time());
     const int client_fd = s_camera_client_fd;
     if (client_fd < 0) {
         if (s_server_mutex) xSemaphoreGive(s_server_mutex);
@@ -1262,9 +1329,13 @@ int ws_manager_server_get_client_count(void)
 ws_camera_client_state_t ws_manager_server_get_camera_state(void)
 {
     ws_camera_client_state_t state;
+    int64_t last_pong_us;
     portENTER_CRITICAL(&s_camera_state_lock);
     state = s_camera_state;
+    last_pong_us = s_camera_last_pong_us;
     portEXIT_CRITICAL(&s_camera_state_lock);
+    int64_t age_ms = last_pong_us >= 0 ? (esp_timer_get_time() - last_pong_us) / 1000 : -1;
+    state.heartbeat_pong_age_ms = age_ms < 0 || age_ms > UINT32_MAX ? UINT32_MAX : (uint32_t)age_ms;
     return state;
 }
 
@@ -1344,3 +1415,8 @@ esp_err_t ws_manager_register_handler(ws_manager_event_t event, ws_manager_cb_t 
 }
 
 #endif /* WS_MANAGER_ENABLE */
+
+bool ws_manager_server_is_algo_client(int client_fd)
+{
+    return client_fd >= 0 && client_fd == s_algo_client_fd;
+}

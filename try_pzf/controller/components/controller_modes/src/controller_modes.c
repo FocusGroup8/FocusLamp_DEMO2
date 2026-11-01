@@ -1,6 +1,9 @@
 #include "controller_modes.h"
 
 #include <stddef.h>
+#include <string.h>
+#include "esp_random.h"
+#include "focus_clock.h"
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -13,7 +16,8 @@ static bool s_initializing;
 static bool s_voice_active;
 static app_state_t s_mode = APP_STATE_IDLE;
 static uint32_t s_duration_sec;
-static int64_t s_elapsed_us;
+static focus_clock_t s_focus;
+static uint32_t s_boot_id, s_input_token;
 static int64_t s_last_us;
 static int64_t s_last_summary_us;
 static bool s_completed;
@@ -43,35 +47,36 @@ const char *controller_modes_name(app_state_t mode)
  * state. Paused intervals update last_us without consuming session time. */
 static bool advance_locked(int64_t now_us)
 {
-    int64_t delta_us = now_us - s_last_us;
     s_last_us = now_us;
-    if (!s_initialized || s_mode != APP_STATE_FOCUS || s_voice_active || delta_us <= 0) {
-        return false;
-    }
+    bool was_completed = s_focus.completed;
+    focus_clock_settle(&s_focus, now_us);
+    s_completed = s_focus.completed;
+    if (!was_completed && s_completed) ++s_revision;
+    return !was_completed && s_completed;
+}
 
-    int64_t duration_us = (int64_t)s_duration_sec * 1000000;
-    int64_t remaining_us = duration_us - s_elapsed_us;
-    if (delta_us >= remaining_us) {
-        s_elapsed_us = duration_us;
-        s_mode = APP_STATE_IDLE;
-        ++s_revision;
-        s_completed = true;
-        mirror_locked();
-        return true;
-    }
-    s_elapsed_us += delta_us;
-    return false;
+const char *controller_modes_pause_name(unsigned reason)
+{
+    static const char *names[] = {"waiting", "running", "distracted", "invalid", "data_stale", "voice", "completed"};
+    return reason < sizeof(names)/sizeof(names[0]) ? names[reason] : "invalid";
 }
 
 static void snapshot_locked(controller_modes_status_t *out)
 {
-    int64_t remaining_us = (int64_t)s_duration_sec * 1000000 - s_elapsed_us;
+    int64_t remaining_us = s_focus.remaining_us;
     *out = (controller_modes_status_t) {
         .mode = s_mode,
         .duration_sec = s_duration_sec,
         .remaining_sec = remaining_us > 0 ? (uint32_t)((remaining_us + 999999) / 1000000) : 0,
         .voice_active = s_voice_active,
-        .paused = s_mode == APP_STATE_FOCUS && s_voice_active,
+        .paused = s_mode == APP_STATE_FOCUS && !s_completed && (s_voice_active || !s_focus.rate_half),
+        .uptime_ms = (uint32_t)(esp_timer_get_time()/1000),
+        .duration_ms = s_duration_sec * 1000,
+        .remaining_ms = (uint32_t)((remaining_us + 999) / 1000),
+        .controller_boot_id = s_boot_id, .session_id = s_focus.session,
+        .seq = ++s_focus.seq, .engagement_token = s_input_token,
+        .rate_half = s_mode != APP_STATE_FOCUS || s_voice_active || s_completed ? 0 : s_focus.rate_half,
+        .pause_reason = s_completed ? FOCUS_DONE : s_voice_active ? FOCUS_VOICE : s_focus.reason,
         .completed = s_completed,
         .revision = s_revision,
     };
@@ -154,10 +159,11 @@ esp_err_t controller_modes_init(void)
     portENTER_CRITICAL(&s_lock);
     s_initializing = false;
     if (ret == ESP_OK) {
+        s_boot_id = esp_random();
         s_timer = timer; /* Retained for the lifetime of app_main. */
         s_mode = APP_STATE_IDLE;
         s_duration_sec = 0;
-        s_elapsed_us = 0;
+        s_focus.remaining_us = 0; s_focus.active = false; s_focus.completed = false;
         s_completed = false;
         s_last_us = esp_timer_get_time();
         s_last_summary_us = s_last_us;
@@ -190,13 +196,14 @@ esp_err_t controller_modes_focus_start(uint32_t minutes)
     }
     completed = advance_locked(esp_timer_get_time());
     previous_duration = s_duration_sec;
-    if (s_mode == APP_STATE_FOCUS) {
+    if (s_mode == APP_STATE_FOCUS && !s_completed) {
         ret = ESP_ERR_INVALID_STATE; /* A repeated call must not erase progress. */
     } else {
         s_mode = APP_STATE_FOCUS;
         ++s_revision;
         s_duration_sec = minutes * 60;
-        s_elapsed_us = 0;
+        focus_clock_start(&s_focus, s_duration_sec, s_last_us);
+        s_input_token = 0;
         s_completed = false;
         paused = s_voice_active;
         mirror_locked();
@@ -227,7 +234,7 @@ esp_err_t controller_modes_companion_start(void)
         s_mode = APP_STATE_COMPANION;
         ++s_revision;
         s_duration_sec = 0;
-        s_elapsed_us = 0;
+        s_focus.remaining_us = 0; s_focus.active = false; s_focus.completed = false;
         s_completed = false;
         mirror_locked();
     }
@@ -258,7 +265,7 @@ static esp_err_t stop_mode(app_state_t expected, bool any_mode)
         if (s_mode != APP_STATE_IDLE || s_completed) ++s_revision;
         s_mode = APP_STATE_IDLE;
         s_duration_sec = 0;
-        s_elapsed_us = 0;
+        s_focus.remaining_us = 0; s_focus.active = false; s_focus.completed = false;
         s_completed = false;
         mirror_locked();
     }
@@ -296,6 +303,7 @@ void controller_modes_set_voice_active(bool active)
     duration = s_duration_sec;
     pause_changed = s_initialized && s_mode == APP_STATE_FOCUS && s_voice_active != active;
     s_voice_active = active;
+    focus_clock_voice(&s_focus, active, esp_timer_get_time());
     /* The local value always survives init; an unavailable mirror is harmless. */
     if (s_initialized) {
         mirror_locked();
@@ -330,5 +338,39 @@ esp_err_t controller_modes_get_status(controller_modes_status_t *out)
     snapshot_locked(out);
     portEXIT_CRITICAL(&s_lock);
     log_completed(completed, out->duration_sec);
+    return ESP_OK;
+}
+
+static int engagement_rate(const char *level)
+{
+    if (!strcmp(level, "HighlyEngaged") || !strcmp(level, "Engaged") || !strcmp(level,"高度参与") || !strcmp(level,"参与")) return 2;
+    if (!strcmp(level, "BarelyEngaged") || !strcmp(level,"勉强参与")) return 1;
+    if (!strcmp(level, "NotEngaged") || !strcmp(level,"未参与")) return 0;
+    return -1;
+}
+esp_err_t controller_modes_engagement(uint32_t boot, uint32_t session, uint32_t token,
+    bool bind, uint32_t sample, uint32_t inference, uint32_t age_ms, uint32_t sample_age_ms,
+    bool valid, const char *level)
+{
+    int rate = engagement_rate(level ? level : "");
+    portENTER_CRITICAL(&s_lock);
+    int64_t now = esp_timer_get_time();
+    advance_locked(now);
+    if (!s_initialized || boot != s_boot_id || session != s_focus.session ||
+        s_mode != APP_STATE_FOCUS || s_completed || (!bind && (!token || token != s_input_token))) {
+        portEXIT_CRITICAL(&s_lock); return ESP_ERR_INVALID_STATE;
+    }
+    if (bind) {
+        focus_clock_bind(&s_focus, now);
+        s_input_token = esp_random(); if (!s_input_token) s_input_token = 1;
+    } else {
+        focus_clock_sample(&s_focus, sample, inference, (int64_t)age_ms*1000,
+                           (int64_t)sample_age_ms*1000, valid, rate, now);
+    }
+    controller_modes_status_t status; snapshot_locked(&status);
+    portEXIT_CRITICAL(&s_lock);
+    ESP_LOGI(TAG, "[FOCUS] session=%lu seq=%lu remaining_ms=%lu rate=%d/2 reason=%s age_ms=%lu",
+        (unsigned long)status.session_id, (unsigned long)status.seq, (unsigned long)status.remaining_ms,
+        status.rate_half, controller_modes_pause_name(status.pause_reason), (unsigned long)age_ms);
     return ESP_OK;
 }

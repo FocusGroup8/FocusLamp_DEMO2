@@ -16,7 +16,7 @@ static bool display_changed(const controller_modes_status_t *a,
                             const controller_modes_status_t *b)
 {
     return a->mode != b->mode || a->remaining_sec != b->remaining_sec ||
-           a->paused != b->paused || a->completed != b->completed;
+           a->pause_reason != b->pause_reason || a->paused != b->paused || a->completed != b->completed;
 }
 
 static void status_task(void *arg)
@@ -45,7 +45,7 @@ static void status_task(void *arg)
             const char *name = status.mode == APP_STATE_FOCUS ? "FOCUS" :
                                status.mode == APP_STATE_COMPANION ? "COMPANION" : "IDLE";
             const char *state = status.completed ? "COMPLETE" :
-                                status.mode == APP_STATE_FOCUS ? (status.paused ? "PAUSED" : "RUNNING") :
+                                status.mode == APP_STATE_FOCUS ? (status.paused ? controller_modes_pause_name(status.pause_reason) : "RUNNING") :
                                 status.mode == APP_STATE_COMPANION ? "ACTIVE" : "READY";
             char time_text[16] = "--:--";
             if (status.mode == APP_STATE_FOCUS || status.completed) {
@@ -69,7 +69,7 @@ static void status_task(void *arg)
             previous_heart = heart;
             first = false;
         }
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(1000));
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(500));
     }
     /* No logical-frame writer remains. A timed-out DMA buffer is retained. */
     esp_err_t ret = lcd_driver_deinit();

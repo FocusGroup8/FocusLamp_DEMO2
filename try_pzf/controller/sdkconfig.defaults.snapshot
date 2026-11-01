@@ -826,6 +826,12 @@ CONFIG_STATUS_RECEIVER_ENABLE=y
 # end of Status Receiver
 
 #
+# Three-step task guide
+#
+CONFIG_TASK_GUIDE_WAIT_TIMEOUT_MS=30000
+# end of Three-step task guide
+
+#
 # Task Manager
 #
 CONFIG_TASK_MANAGER_ENABLE=y

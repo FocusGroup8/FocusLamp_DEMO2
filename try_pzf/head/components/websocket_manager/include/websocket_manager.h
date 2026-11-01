@@ -183,7 +183,9 @@ esp_err_t ws_manager_server_send_camera_text(const char *data, int len);
  * @brief Send a frame_header text frame + JPEG binary frame to the /camera
  *        client as one atomic batch (single s_server_mutex critical section).
  *
- * Both frames use per-call nonblocking send() with a shared trial deadline,
+ * The camera lease is serviced before the pair: a due Ping is serialized on
+ * this same mutex; an expired Pong deadline releases only that camera slot.
+ * Both image frames use per-call nonblocking send() with a shared trial deadline,
  * under the mutex so they cannot interleave with
  * frames from other tasks on the same socket. The algorithm client pairs the
  * text frame with the following binary frame to obtain the frame sequence.
@@ -204,9 +206,13 @@ esp_err_t ws_manager_server_send_camera_pair(const char *text, int text_len, con
  * @return Number of connected clients
  */
 int ws_manager_server_get_client_count(void);
+/* Only the newest /algo handshake owns the result channel. */
+bool ws_manager_server_is_algo_client(int client_fd);
 
 /** Camera-only state snapshot. Uses a short state lock, never the send mutex.
  * session_id changes on acceptance; unrelated WS connections do not affect it.
+ * heartbeat_pong_age_ms is UINT32_MAX before a matching Pong. Heartbeat I/O
+ * is serviced by image sends and camera admission, never by this getter.
  */
 ws_camera_client_state_t ws_manager_server_get_camera_state(void);
 

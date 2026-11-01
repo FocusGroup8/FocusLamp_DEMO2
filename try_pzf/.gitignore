@@ -14,3 +14,14 @@
 **/arm_readonly_capture/
 **/audio_captures/
 **/.tts_capture_deps/
+**/.task-guide-host/
+**/.font-host/
+**/.host-build/
+**/test-deps/
+**/zig-cache*/
+**/*.exe
+**/*.lib
+**/*.pdb
+**/*.obj
+**/*.jsonl
+/controller/support/

@@ -4,7 +4,6 @@
 #include "radar_ld6002.h"
 #include "focuslamp_discovery.h"
 #include "xiaozhi_manager.h"
-#include "local_reminder.h"
 #include "audio_bridge.h"
 #include "esp_http_client.h"
 #include "esp_heap_caps.h"
@@ -24,29 +23,33 @@ static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static demo_behaviors_status_t s_status;
 static const char *WELCOME = "主人，跟Focus聊聊天吧～";
 
-/* Local playback results carry the presence cycle. All access uses s_lock. */
+/* Cloud completion carries the presence cycle. All access uses s_lock. */
 static struct {
     uint32_t cycle;
     uint32_t revision;
     bool attempted;
     bool armed;
     bool submitted;
-    bool local_output_done;
+    bool cloud_tts_done;
+    uint32_t request_id;
 } s_reminder;
 
 static void reset_reminder(void)
 {
     portENTER_CRITICAL(&s_lock);
-    bool unconfirmed = s_reminder.submitted && !s_reminder.local_output_done;
+    bool unconfirmed = s_reminder.submitted && !s_reminder.cloud_tts_done;
     uint32_t old_cycle = s_reminder.cycle;
+    uint32_t request_id = s_reminder.request_id;
     ++s_reminder.cycle;
     s_reminder.attempted = false;
     s_reminder.armed = false;
     s_reminder.submitted = false;
-    s_reminder.local_output_done = false;
+    s_reminder.cloud_tts_done = false;
+    s_reminder.request_id = 0;
     portEXIT_CRITICAL(&s_lock);
     if (unconfirmed) {
-        ESP_LOGW(TAG, "Sedentary cycle=%u ended: local output not confirmed",
+        xiaozhi_manager_cancel_speak(request_id);
+        ESP_LOGW(TAG, "Sedentary cycle=%u ended: cancelling its cloud request",
                  (unsigned)old_cycle);
     }
 }
@@ -57,7 +60,7 @@ void demo_behaviors_note_tts_text(const char *text)
     (void)text;
 }
 
-static bool local_allowed(uint32_t cycle)
+static bool cloud_reminder_allowed(uint32_t cycle)
 {
     portENTER_CRITICAL(&s_lock);
     bool current = s_reminder.cycle == cycle && s_reminder.attempted;
@@ -67,21 +70,20 @@ static bool local_allowed(uint32_t cycle)
     radar_ld6002_state_t radar = {0};
     int64_t now_ms = esp_timer_get_time() / 1000;
     return current && controller_modes_get_status(&mode) == ESP_OK &&
-        mode.revision == revision && !mode.voice_active && mode.mode != APP_STATE_COMPANION &&
-        xiaozhi_manager_get_state() != XIAOZHI_MANAGER_STATE_SPEAKING &&
+        mode.revision == revision && mode.mode != APP_STATE_COMPANION &&
         radar_ld6002_get_state(&radar) == ESP_OK && radar.has_presence &&
         radar.person_present && radar.presence_updated_ms > 0 &&
         now_ms >= radar.presence_updated_ms &&
         now_ms - radar.presence_updated_ms <= RADAR_FRESH_MS;
 }
 
-static void local_result(uint32_t cycle, esp_err_t ret)
+static void cloud_reminder_result(uint32_t cycle, esp_err_t ret)
 {
     portENTER_CRITICAL(&s_lock);
     bool current = s_reminder.cycle == cycle;
-    if (current) s_reminder.local_output_done = ret == ESP_OK;
+    if (current) s_reminder.cloud_tts_done = ret == ESP_OK;
     portEXIT_CRITICAL(&s_lock);
-    if (current) ESP_LOGI(TAG, "Sedentary cycle=%u local_output_done=%d; result=%s; no retry",
+    if (current) ESP_LOGI(TAG, "Sedentary cycle=%u cloud_tts_done=%d; result=%s; no retry",
                          (unsigned)cycle, ret == ESP_OK, esp_err_to_name(ret));
 }
 
@@ -222,25 +224,25 @@ static void behavior_task(void *arg)
                 ESP_LOGI(TAG, "Announcement queued (not playback confirmed): %s", WELCOME);
             } else ESP_LOGW(TAG, "Announcement pending: %s", esp_err_to_name(ret));
             speech_retry = now + RETRY_US;
-        } else if (welcome_done && pending && still_current(revision) &&
-                   !mode.voice_active &&
-                   xiaozhi_manager_get_state() != XIAOZHI_MANAGER_STATE_SPEAKING) {
-            /* One local attempt per presence cycle, even if enqueue fails. */
+        } else if (welcome_done && pending && still_current(revision)) {
+            /* One cloud attempt per presence cycle. Busy sessions are skipped. */
             portENTER_CRITICAL(&s_lock);
             s_reminder.attempted = true;
             s_reminder.armed = false;
             uint32_t cycle = s_reminder.cycle;
             portEXIT_CRITICAL(&s_lock);
-            esp_err_t ret = local_reminder_submit(cycle, local_allowed, local_result);
+            uint32_t request_id = 0;
+            esp_err_t ret = xiaozhi_manager_speak_reminder(cycle, cloud_reminder_allowed, cloud_reminder_result, &request_id);
             portENTER_CRITICAL(&s_lock);
             if (s_reminder.cycle == cycle) {
                 s_reminder.submitted = ret == ESP_OK;
+                s_reminder.request_id = ret == ESP_OK ? request_id : 0;
             }
             portEXIT_CRITICAL(&s_lock);
             pending = false;
             if (ret == ESP_OK) {
-                ESP_LOGI(TAG, "Sedentary cycle=%u local clip queued (not output confirmed)",
-                         (unsigned)cycle);
+                ESP_LOGI(TAG, "Sedentary cycle=%u cloud request=%lu accepted (not playback confirmed)",
+                         (unsigned)cycle, (unsigned long)request_id);
             } else {
                 ESP_LOGW(TAG, "Sedentary cycle=%u submission failed: %s; no retry this cycle",
                          (unsigned)cycle, esp_err_to_name(ret));
@@ -291,7 +293,9 @@ static void behavior_task(void *arg)
                 .sedentary_armed = s_reminder.armed,
                 .sedentary_submitted = s_reminder.submitted,
                 .sedentary_text_observed = false,
-                .sedentary_local_output_done = s_reminder.local_output_done,
+                .sedentary_local_output_done = false,
+                .sedentary_cloud_tts_done = s_reminder.cloud_tts_done,
+                .sedentary_request_id = s_reminder.request_id,
             };
             portEXIT_CRITICAL(&s_lock);
         }
@@ -299,10 +303,10 @@ static void behavior_task(void *arg)
             last_summary = now;
             demo_behaviors_status_t snapshot;
             demo_behaviors_get_status(&snapshot);
-            ESP_LOGI(TAG, "Summary: mode=%s local=%d head=%d radar_fresh=%d present=%d sedentary=%us pending=%d armed=%d submitted=%d local_output_done=%d",
+            ESP_LOGI(TAG, "Summary: mode=%s local=%d head=%d radar_fresh=%d present=%d sedentary=%us pending=%d armed=%d submitted=%d cloud_tts_done=%d",
                      controller_modes_name(mode.mode), local_ready, head_ready, fresh, present, (unsigned)elapsed,
                      snapshot.sedentary_pending, snapshot.sedentary_armed,
-                     snapshot.sedentary_submitted, snapshot.sedentary_local_output_done);
+                     snapshot.sedentary_submitted, snapshot.sedentary_cloud_tts_done);
         }
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
@@ -314,8 +318,6 @@ esp_err_t demo_behaviors_start(void)
     bool started = s_status.started;
     portEXIT_CRITICAL(&s_lock);
     if (started) return ESP_OK;
-    esp_err_t clip_ret = local_reminder_start();
-    if (clip_ret != ESP_OK) return clip_ret;
     const uint32_t caps = MALLOC_CAP_DEFAULT | MALLOC_CAP_INTERNAL;
     ESP_LOGI(TAG, "Worker memory before: free=%u largest=%u", (unsigned)heap_caps_get_free_size(caps),
              (unsigned)heap_caps_get_largest_free_block(caps));
@@ -339,6 +341,8 @@ void demo_behaviors_get_status(demo_behaviors_status_t *out)
     out->sedentary_armed = s_reminder.armed;
     out->sedentary_submitted = s_reminder.submitted;
     out->sedentary_text_observed = false;
-    out->sedentary_local_output_done = s_reminder.local_output_done;
+    out->sedentary_local_output_done = false;
+    out->sedentary_cloud_tts_done = s_reminder.cloud_tts_done;
+    out->sedentary_request_id = s_reminder.request_id;
     portEXIT_CRITICAL(&s_lock);
 }

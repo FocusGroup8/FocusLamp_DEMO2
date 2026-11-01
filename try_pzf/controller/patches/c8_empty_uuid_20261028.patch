@@ -1,0 +1,46 @@
+From: FocusLamp local maintenance patch
+Subject: [LOCAL C8] Persist UUID when missing key returns empty default
+
+diff --git a/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_board.c b/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_board.c
+--- a/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_board.c
++++ b/managed_components/espressif__esp_xiaozhi/src/esp_xiaozhi_board.c
+@@ -38,7 +38,12 @@
+     ESP_RETURN_ON_ERROR(ret, TAG, "Failed to initialize keystore: %s", esp_err_to_name(ret));
+ 
+     ret = esp_xiaozhi_chat_keystore_get_string(&xiaozhi_chat_keystore, "uuid", "", board_info->uuid, sizeof(board_info->uuid));
+-    if (ret) {
++    if (ret != ESP_OK) {
++        esp_xiaozhi_chat_keystore_deinit(&xiaozhi_chat_keystore);
++        ESP_RETURN_ON_ERROR(ret, TAG, "Failed to read board UUID: %s", esp_err_to_name(ret));
++    }
++    /* Missing keys return ESP_OK with the supplied empty default. */
++    if (board_info->uuid[0] == '\0') {
+         uint8_t uuid[16] = {0};
+ 
+         esp_fill_random(uuid, sizeof(uuid));
+@@ -51,11 +56,20 @@
+                  uuid[8], uuid[9], uuid[10], uuid[11],
+                  uuid[12], uuid[13], uuid[14], uuid[15]);
+ 
+-        esp_xiaozhi_chat_keystore_set_string(&xiaozhi_chat_keystore, "uuid", board_info->uuid);
+-    }
+-
+-    esp_xiaozhi_chat_keystore_commit(&xiaozhi_chat_keystore);
+-    esp_xiaozhi_chat_keystore_deinit(&xiaozhi_chat_keystore);
++        ret = esp_xiaozhi_chat_keystore_set_string(&xiaozhi_chat_keystore, "uuid", board_info->uuid);
++        if (ret == ESP_OK) {
++            ret = esp_xiaozhi_chat_keystore_commit(&xiaozhi_chat_keystore);
++        }
++        if (ret != ESP_OK) {
++            esp_xiaozhi_chat_keystore_deinit(&xiaozhi_chat_keystore);
++            board_info->uuid[0] = '\0';
++            ESP_RETURN_ON_ERROR(ret, TAG, "Failed to persist board UUID: %s", esp_err_to_name(ret));
++        }
++        ESP_LOGI(TAG, "[XZ_LINK] Empty Client-Id repaired; UUID generated and persisted");
++    }
++
++    ret = esp_xiaozhi_chat_keystore_deinit(&xiaozhi_chat_keystore);
++    ESP_RETURN_ON_ERROR(ret, TAG, "Failed to close board keystore: %s", esp_err_to_name(ret));
+ 
+     // Get MAC address string
+     uint8_t mac_addr[6] = {0};

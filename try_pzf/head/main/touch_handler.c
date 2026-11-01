@@ -41,16 +41,11 @@
 static const char *TAG = "TOUCH_HANDLER";
 
 /*---------------------------------------------------------------
- * Concrete welcome messages, alternated on each tap.
+ * Welcome trigger; controller owns the nine-item cloud sequence.
  * Cloud text injection is not a guaranteed verbatim TTS interface.
  *-------------------------------------------------------------*/
-static const char *s_welcome_messages[] = {
-    "请只说：欢迎回来，我是小智，今天也一起专注学习吧！",
-    "请只说：你好呀，准备好了吗？让我们开始今天的学习吧！",
-    "请只说：很高兴见到你，记得保持坐姿，也别忘了适时休息！",
-};
-#define WELCOME_MSG_COUNT 3
-static uint8_t s_welcome_idx = 0; /* Alternating index into s_welcome_messages */
+/* Only a trigger. The controller chooses the cloud phrase and current voice. */
+static const char *WELCOME_TRIGGER = "欢迎播报";
 
 /*---------------------------------------------------------------
  * Brightness levels: fixed 5-level PWM duty cycle.
@@ -206,8 +201,7 @@ static void handle_tap_action(void)
     }
 
     /* 4. Inject a welcome message via the voice board (alternating, §5.2) */
-    const char *welcome = s_welcome_messages[s_welcome_idx];
-    s_welcome_idx       = (s_welcome_idx + 1) % WELCOME_MSG_COUNT;
+    const char *welcome = WELCOME_TRIGGER;
     ESP_LOGI(TAG, "Welcome TTS inject: \"%s\"", welcome);
     esp_err_t terr = tts_inject_speak(welcome);
     if (terr != ESP_OK) {

@@ -15,6 +15,8 @@ typedef struct {
     bool sedentary_armed;
     bool sedentary_submitted; /* Queued locally, not confirmed playback. */
     bool sedentary_text_observed; /* Legacy cloud diagnostic; false for local clips. */
+    bool sedentary_cloud_tts_done; /* Cloud TTS ended + cleanup completed; not audibility. */
+    uint32_t sedentary_request_id;
     bool sedentary_local_output_done; /* PCM + silence tail written, not audibility. */
 } demo_behaviors_status_t;
 

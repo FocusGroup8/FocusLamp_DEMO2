@@ -317,7 +317,7 @@ void algo_result_set_mode(algo_mode_t mode)
 
     /* Focus mode: 30min countdown would start here (spec §3.7) */
     if (mode == ALGO_MODE_FOCUS) {
-        ESP_LOGI(TAG, "Focus mode entered, 30min countdown started");
+        ESP_LOGI(TAG, "Focus mode entered; countdown is owned by controller");
     }
 }
 

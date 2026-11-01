@@ -222,6 +222,7 @@ bool local_welcome_matches(const char *text)
 {
     /* These are triggers, not spoken content. Keep other text on cloud TTS. */
     static const char *aliases[] = {
+        "欢迎播报",
         "请只说：欢迎回来，我是小智，今天也一起专注学习吧！",
         "请只说：你好呀，准备好了吗？让我们开始今天的学习吧！",
         "请只说：很高兴见到你，记得保持坐姿，也别忘了适时休息！",

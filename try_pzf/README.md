@@ -5,7 +5,26 @@
 仓库根目录构建这两个工程。本地 controller 没有 Git 历史，因此这里交付
 可构建源码快照，而不将每个文件都宣称为本次新写的代码。
 
-## 2026-10-28 更新
+## 2026-11-01 更新
+
+- 同步当前 controller/head，并补齐两板共用的 `shared/` 协议头文件与
+  `tools/tests`、`tools/focus-ring`、`tools/task-guide`、`tools/pixel-face` 源码工具。
+  原仓库根工程、旧 base/voice、网页仓库与 Docker 运行工程不在本次覆盖范围。
+- 包含普通模式三步任务 MCP、中文字库、GT911 屏幕交互与灯头本地计时，
+  专注环及连接复用/恢复、像素角色表情、当前语音生命周期和机械臂只读/控制接口。
+- 当前欢迎语和提醒按最新源码走云端语音；旧 `local_reminder.c`、录音资源及历史
+  验收文档仍保留，但不再由当前 controller 主工程编译或嵌入，历史说明不能当作当前行为。
+- 补齐小智 board/info 与连接诊断头的依赖源码覆盖。依赖恢复脚本支持创建该新增头文件；
+  首次下载依赖后仍需恢复覆盖，避免丢失设备身份与接入诊断的本地修改。
+- 只同步源码、必要资源、脱敏构建配置和测试；不上传固件二进制、工具链、现场日志、
+  诊断采集、视频、凭据或实际 Wi-Fi 配置。测试工具默认使用本机 ESP-IDF/编译器，
+  其他电脑需要按脚本配置其工具路径，不包含下载好的 Zig/ESP 工具链。
+- 本次上传不代表全部真机验收通过：三步任务仍有未上屏/请求超时现场，
+  GT911 初始化成功不等于实际点击已验证；相机与专注链路稳定性仍按最新验收文档核查。
+
+本批上传校验结果见 `UPLOAD-20261101.md`。后续历史更新仅记录当时状态。
+
+## 2026-10-28 历史更新
 
 - 同步当前 controller/head；新增后台 MCP 延迟结果验证与语音识图客户端，
   相关应用组件、HTTP 接口、C5/C6 补丁、测试及验收说明一并保留。
@@ -102,6 +121,7 @@ controller 同理，将目录和脚本参数改成 controller。不要使用 era
 |---|---|---|
 | head | esp_wifi_remote 1.6.2 | esp_wifi_remote_net2.c |
 | controller | esp_xiaozhi 0.1.1 | CMakeLists.txt；src 下 MCP/chat/transport/websocket 源码与三个配套私有头文件 |
+| controller | esp_xiaozhi 0.1.1 | src/esp_xiaozhi_board.c、src/esp_xiaozhi_info.c、src/esp_xiaozhi_connection_diag.h |
 | controller | esp_websocket_client 1.7.0 | esp_websocket_client.c、include/esp_websocket_client.h |
 
 恢复脚本先检查所有版本，再复制，保存原文件到被忽略的 dependency_backups。

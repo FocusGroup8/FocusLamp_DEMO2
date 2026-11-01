@@ -2,16 +2,40 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "cJSON.h"
 #include "controller_modes.h"
 #include "demo_behaviors.h"
+#include "task_guide.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "websocket_manager.h"
+#include "../../shared/focus_transport_age.h"
 
 static const char *TAG = "MODE_API";
+/* HTTPD serializes these handlers. Small retained evidence, no per-frame log I/O. */
+static struct {
+    uint32_t received, accepted, malformed, clock_rejected, conflict;
+    uint32_t sample_seq, inference_seq, age_ms, sample_age_ms, transit_ms;
+    uint32_t echo_elapsed_ms, echo_hold_ms;
+    int result;
+} engagement_diag;
+static cJSON *engagement_diagnostics(void)
+{
+    cJSON *j=cJSON_CreateObject();if(!j)return NULL;
+    cJSON_AddNumberToObject(j,"version",1);
+#define ADD(field) cJSON_AddNumberToObject(j,#field,engagement_diag.field)
+    ADD(received);ADD(accepted);ADD(malformed);ADD(clock_rejected);ADD(conflict);
+    ADD(sample_seq);ADD(inference_seq);ADD(age_ms);ADD(sample_age_ms);ADD(transit_ms);ADD(result);
+    ADD(echo_elapsed_ms);ADD(echo_hold_ms);
+#undef ADD
+    return j;
+}
 
 static esp_err_t mode_status_response(httpd_req_t *req)
 {
@@ -27,15 +51,22 @@ static esp_err_t mode_status_response(httpd_req_t *req)
     demo_behaviors_status_t demo;
     demo_behaviors_get_status(&demo);
     bool same = demo.started && demo.revision == state.revision;
-    char response[768];
+    char response[1200];
     snprintf(response, sizeof(response),
-        "{\"ok\":true,\"mode\":\"%s\",\"app_state\":%u,"
+        "{\"http_stack_free_bytes\":%u,\"uptime_ms\":%lu,\"duration_ms\":%lu,\"remaining_ms\":%lu,\"controller_boot_id\":%lu,"
+        "\"session_id\":%lu,\"seq\":%lu,\"revision\":%lu,\"engagement_token\":%lu,"
+        "\"rate_half\":%d,\"pause_reason\":\"%s\","
+        "\"ok\":true,\"mode\":\"%s\",\"app_state\":%u,"
         "\"duration_sec\":%lu,\"remaining_sec\":%lu,\"voice_active\":%s,"
         "\"paused\":%s,\"completed\":%s,\"state_only\":%s,"
         "\"demo_worker\":%s,\"companion_local_ready\":%s,\"head_sync_ready\":%s,"
         "\"radar_fresh\":%s,\"radar_present\":%s,\"sedentary_sec\":%u,\"sedentary_pending\":%s,"
         "\"sedentary_armed\":%s,\"sedentary_submitted\":%s,\"sedentary_text_observed\":%s,"
-        "\"sedentary_local_output_done\":%s}",
+        "\"sedentary_local_output_done\":%s,\"sedentary_cloud_tts_done\":%s,\"sedentary_request_id\":%lu}",
+        (unsigned)uxTaskGetStackHighWaterMark(NULL), (unsigned long)state.uptime_ms, (unsigned long)state.duration_ms, (unsigned long)state.remaining_ms,
+        (unsigned long)state.controller_boot_id, (unsigned long)state.session_id,
+        (unsigned long)state.seq, (unsigned long)state.revision, (unsigned long)state.engagement_token,
+        state.rate_half, controller_modes_pause_name(state.pause_reason),
         controller_modes_name(state.mode), (unsigned)state.mode,
         (unsigned long)state.duration_sec, (unsigned long)state.remaining_sec,
         state.voice_active ? "true" : "false", state.paused ? "true" : "false",
@@ -48,8 +79,27 @@ static esp_err_t mode_status_response(httpd_req_t *req)
         same && demo.sedentary_armed ? "true" : "false",
         same && demo.sedentary_submitted ? "true" : "false",
         same && demo.sedentary_text_observed ? "true" : "false",
-        same && demo.sedentary_local_output_done ? "true" : "false");
-    return httpd_resp_sendstr(req, response);
+        same && demo.sedentary_local_output_done ? "true" : "false",
+        same && demo.sedentary_cloud_tts_done ? "true" : "false",
+        same ? (unsigned long)demo.sedentary_request_id : 0UL);
+    cJSON *guide=task_guide_snapshot();
+    char *guide_json=guide?cJSON_PrintUnformatted(guide):NULL;
+    cJSON_Delete(guide);
+    if (!guide_json) return httpd_resp_send_err(req,HTTPD_500_INTERNAL_SERVER_ERROR,"guide snapshot unavailable");
+    /* Stream the extension without doubling the HTTP task's stack footprint. */
+    size_t length=strlen(response);
+    esp_err_t sent=httpd_resp_send_chunk(req,response,length-1);
+    if(sent==ESP_OK)sent=httpd_resp_sendstr_chunk(req,",\"task_guide\":");
+    if(sent==ESP_OK)sent=httpd_resp_sendstr_chunk(req,guide_json);
+    free(guide_json);
+    cJSON *diagnostics=engagement_diagnostics();
+    char *diag_json=diagnostics?cJSON_PrintUnformatted(diagnostics):NULL;cJSON_Delete(diagnostics);
+    if(sent==ESP_OK && diag_json)sent=httpd_resp_sendstr_chunk(req,",\"engagement_diagnostics\":");
+    if(sent==ESP_OK && diag_json)sent=httpd_resp_sendstr_chunk(req,diag_json);
+    free(diag_json);
+    if(sent==ESP_OK)sent=httpd_resp_sendstr_chunk(req,"}");
+    if(sent==ESP_OK)sent=httpd_resp_send_chunk(req,NULL,0);
+    return sent;
 }
 
 static esp_err_t mode_post_handler(httpd_req_t *req)
@@ -131,6 +181,128 @@ static esp_err_t mode_post_handler(httpd_req_t *req)
     return mode_status_response(req);
 }
 
+static bool json_u32(const cJSON *root, const char *key, uint32_t *out)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(root, key);
+    if (!cJSON_IsNumber(v) || !isfinite(v->valuedouble) || v->valuedouble < 0 ||
+        v->valuedouble > UINT32_MAX || floor(v->valuedouble) != v->valuedouble) return false;
+    *out = (uint32_t)v->valuedouble; return true;
+}
+/* Compact reply: the head only consumes the authoritative clock. Avoid
+ * nesting the full diagnostics payload under the engagement request body. */
+static esp_err_t engagement_response(httpd_req_t *req)
+{
+    controller_modes_status_t s;
+    if(controller_modes_get_status(&s)!=ESP_OK) {
+        httpd_resp_set_status(req,"503 Service Unavailable");
+        return httpd_resp_sendstr(req,"{\"ok\":false,\"error\":\"modes not ready\"}");
+    }
+    char body[512];
+    int n=snprintf(body,sizeof(body),
+        "{\"ok\":true,\"mode\":\"%s\",\"uptime_ms\":%lu,\"controller_boot_id\":%lu,"
+        "\"session_id\":%lu,\"seq\":%lu,\"engagement_token\":%lu,\"duration_ms\":%lu,"
+        "\"remaining_ms\":%lu,\"rate_half\":%d,\"pause_reason\":\"%s\",\"paused\":%s,\"completed\":%s}",
+        controller_modes_name(s.mode),(unsigned long)s.uptime_ms,(unsigned long)s.controller_boot_id,
+        (unsigned long)s.session_id,(unsigned long)s.seq,(unsigned long)s.engagement_token,
+        (unsigned long)s.duration_ms,(unsigned long)s.remaining_ms,s.rate_half,
+        controller_modes_pause_name(s.pause_reason),s.paused?"true":"false",s.completed?"true":"false");
+    if(n<0 || n>=(int)sizeof(body))return httpd_resp_send_err(req,HTTPD_500_INTERNAL_SERVER_ERROR,"response overflow");
+    static int64_t report_at;
+    int64_t now=esp_timer_get_time();
+    if(now-report_at>=10000000){
+        report_at=now;
+        ESP_LOGI(TAG,"[MODE_HTTP] stack_free_bytes=%u session=%lu reason=%s",(unsigned)uxTaskGetStackHighWaterMark(NULL),
+            (unsigned long)s.session_id,controller_modes_pause_name(s.pause_reason));
+    }
+    return httpd_resp_send(req,body,n);
+}
+static esp_err_t engagement_handler(httpd_req_t *req)
+{
+    ++engagement_diag.received;engagement_diag.result=400;
+    char body[512]; size_t got = 0;
+    httpd_resp_set_type(req, "application/json");
+    if (!req->content_len || req->content_len >= sizeof(body)) goto bad;
+    while (got < req->content_len) {
+        int n = httpd_req_recv(req, body + got, req->content_len - got);
+        if (n <= 0) goto bad;
+        got += n;
+    }
+    body[got] = 0;
+    if (memchr(body, 0, got)) goto bad;
+    cJSON *root = cJSON_ParseWithOpts(body, NULL, true);
+    uint32_t boot, session, observed=0, hold=0, token=0, sample=0, inference=0, age=0, sample_age=0;
+    bool bind = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root,"bind"));
+    const cJSON *level=cJSON_GetObjectItemCaseSensitive(root,"level");
+    const cJSON *valid=cJSON_GetObjectItemCaseSensitive(root,"valid");
+    bool ok = json_u32(root,"controller_boot_id",&boot) && json_u32(root,"session_id",&session);
+    if (!bind) ok = ok && json_u32(root,"observed_ms",&observed) && json_u32(root,"engagement_token",&token) &&
+        json_u32(root,"sample_seq",&sample) && json_u32(root,"inference_seq",&inference) &&
+        json_u32(root,"age_ms",&age) && json_u32(root,"sample_age_ms",&sample_age) &&
+        cJSON_IsString(level) && cJSON_IsBool(valid);
+    if (ok && !bind) {
+        engagement_diag.sample_seq=sample;engagement_diag.inference_seq=inference;
+        uint32_t transit;
+        const cJSON *hold_item=cJSON_GetObjectItemCaseSensitive(root,"observed_hold_ms");
+        engagement_diag.echo_elapsed_ms=(uint32_t)(esp_timer_get_time()/1000)-observed;
+        engagement_diag.echo_hold_ms=0;
+        (void)json_u32(root,"observed_hold_ms",&engagement_diag.echo_hold_ms);
+        if ((hold_item && !json_u32(root,"observed_hold_ms",&hold)) ||
+            !focus_transport_age((uint32_t)(esp_timer_get_time()/1000),observed,hold,&transit)) {
+            ok=false;++engagement_diag.clock_rejected;
+        }
+        else {
+            engagement_diag.transit_ms=transit;
+            age=focus_age_add(age,transit);
+            sample_age=focus_age_add(sample_age,transit);
+        }
+        engagement_diag.age_ms=age;engagement_diag.sample_age_ms=sample_age;
+    }
+    esp_err_t ret = ok ? controller_modes_engagement(boot,session,token,bind,sample,inference,
+        age,sample_age,cJSON_IsTrue(valid),cJSON_IsString(level)?level->valuestring:"") : ESP_ERR_INVALID_ARG;
+    cJSON_Delete(root);
+    if (!ok) goto bad;
+    if (ret != ESP_OK) {
+        ++engagement_diag.conflict;engagement_diag.result=409;
+        httpd_resp_set_status(req,"409 Conflict");
+        return httpd_resp_sendstr(req,"{\"ok\":false,\"error\":\"resync_required\"}");
+    }
+    ++engagement_diag.accepted;engagement_diag.result=200;
+    return engagement_response(req);
+bad:
+    ++engagement_diag.malformed;
+    httpd_resp_set_status(req,"400 Bad Request");
+    httpd_resp_set_hdr(req,"Connection","close");
+    httpd_resp_sendstr(req,"{\"ok\":false,\"error\":\"invalid engagement\"}");
+    return ESP_FAIL;
+}
+
+static esp_err_t task_guide_handler(httpd_req_t *req)
+{
+    char body[384];size_t got=0;
+    httpd_resp_set_type(req,"application/json");
+    if(!req->content_len||req->content_len>=sizeof(body))goto bad;
+    while(got<req->content_len){
+        int n=httpd_req_recv(req,body+got,req->content_len-got);
+        if(n<=0)goto bad;
+        got+=(size_t)n;
+    }
+    body[got]=0;
+    if(memchr(body,0,got))goto bad;
+    cJSON *j=cJSON_ParseWithOpts(body,NULL,true);
+    esp_err_t ret=task_guide_report(j);cJSON_Delete(j);
+    if(ret==ESP_ERR_INVALID_ARG)goto bad;
+    if(ret!=ESP_OK){
+        httpd_resp_set_status(req,"409 Conflict");
+        return httpd_resp_sendstr(req,"{\"ok\":false,\"error\":\"stale guide report\"}");
+    }
+    return httpd_resp_sendstr(req,"{\"ok\":true}");
+bad:
+    httpd_resp_set_status(req,"400 Bad Request");
+    httpd_resp_set_hdr(req,"Connection","close");
+    httpd_resp_sendstr(req,"{\"ok\":false,\"error\":\"invalid guide report\"}");
+    return ESP_FAIL;
+}
+
 esp_err_t mode_http_api_register(void)
 {
     const httpd_uri_t get_uri = {
@@ -149,6 +321,12 @@ esp_err_t mode_http_api_register(void)
         ESP_LOGE(TAG, "Register POST /api/mode failed: %s", esp_err_to_name(ret));
         return ret;
     }
-    ESP_LOGI(TAG, "GET/POST /api/mode registered (state/countdown only)");
+    const httpd_uri_t engagement_uri = {.uri="/api/mode/engagement", .method=HTTP_POST, .handler=engagement_handler};
+    ret = ws_manager_server_register_uri(&engagement_uri);
+    if (ret != ESP_OK) return ret;
+    const httpd_uri_t guide_uri={.uri="/api/mode/task_guide",.method=HTTP_POST,.handler=task_guide_handler};
+    ret=ws_manager_server_register_uri(&guide_uri);
+    if(ret!=ESP_OK)return ret;
+    ESP_LOGI(TAG, "Mode and engagement APIs registered");
     return ESP_OK;
 }

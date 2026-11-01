@@ -22,7 +22,7 @@ class LocalWelcomeIntegrationTests(unittest.TestCase):
         cls.manager = (CONTROLLER / "components/xiaozhi_manager/src/xiaozhi_manager.c").read_text(encoding="utf-8")
         cls.audio = (CONTROLLER / "components/audio_bridge/src/audio_bridge.c").read_text(encoding="utf-8")
 
-    def test_head_aliases_remain_exact_and_other_text_stays_on_cloud(self):
+    def test_head_trigger_and_legacy_aliases_select_short_cloud_welcome(self):
         head = (ROOT / "head/main/touch_handler.c").read_text(encoding="utf-8")
         aliases = function_body(self.local, "local_welcome_matches")
         for text in (
@@ -30,12 +30,14 @@ class LocalWelcomeIntegrationTests(unittest.TestCase):
             "请只说：你好呀，准备好了吗？让我们开始今天的学习吧！",
             "请只说：很高兴见到你，记得保持坐姿，也别忘了适时休息！",
         ):
-            self.assertIn('"' + text + '"', head)
             self.assertIn('"' + text + '"', aliases)
+        self.assertIn("欢迎播报", head)
+        self.assertIn("欢迎播报", aliases)
         self.assertIn("!strcmp(text, aliases[i])", aliases)
         route = function_body(self.api, "tts_speak_handler")
         self.assertIn("local_welcome_matches(text)", route)
-        self.assertIn("local_welcome_submit()", route)
+        self.assertIn("xiaozhi_manager_speak_welcome(&request_id)", route)
+        self.assertNotIn("local_welcome_submit()", route)
         self.assertIn("xiaozhi_manager_speak(text, priority)", route)
 
     def test_long_press_cancels_before_cloud_close(self):

@@ -18,6 +18,10 @@ typedef struct {
     bool voice_active;
     bool paused;
     bool completed;
+    uint32_t uptime_ms;
+    uint32_t duration_ms, remaining_ms, controller_boot_id, session_id, seq, engagement_token;
+    int rate_half;
+    unsigned pause_reason;
     uint32_t revision; /* Changes on mode/session transitions, not voice pauses. */
 } controller_modes_status_t;
 
@@ -35,6 +39,10 @@ esp_err_t controller_modes_stop(void);
 void controller_modes_set_voice_active(bool active);
 bool controller_modes_voice_active(void);
 esp_err_t controller_modes_get_status(controller_modes_status_t *out);
+const char *controller_modes_pause_name(unsigned reason);
+esp_err_t controller_modes_engagement(uint32_t boot, uint32_t session, uint32_t token,
+    bool bind, uint32_t sample, uint32_t inference, uint32_t age_ms, uint32_t sample_age_ms,
+    bool valid, const char *level);
 const char *controller_modes_name(app_state_t mode);
 
 /* Lock order inside the component is modes -> device_state. A consumer must

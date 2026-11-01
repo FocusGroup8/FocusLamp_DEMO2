@@ -76,6 +76,9 @@ typedef void (*ws_manager_cb_t)(ws_manager_event_t event, void *data);
 typedef struct {
     bool connected;              /*!< Only the accepted /camera consumer, not /algo or /mcp */
     uint32_t session_id;          /*!< Increments on each /camera acceptance, even when fd is reused */
+    bool heartbeat_pending;      /*!< Waiting for this camera session's matching Pong */
+    uint32_t heartbeat_pong_age_ms; /*!< UINT32_MAX until the first matching Pong */
+    uint32_t heartbeat_timeouts;  /*!< Boot cumulative expired camera leases */
 } ws_camera_client_state_t;
 
 /** WebSocket send statistics: window counters plus a durable timeout total. */

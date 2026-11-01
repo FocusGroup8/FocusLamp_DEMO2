@@ -1,0 +1,6 @@
+test-deps/
+zig-cache*/
+temp/
+*.exe
+*.obj
+__pycache__/

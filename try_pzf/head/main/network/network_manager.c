@@ -7,6 +7,7 @@
 #include "network_manager.h"
 
 #include "algo_result_manager.h"
+#include "focus_sync.h"
 #include "base_bridge.h"
 #include "cJSON.h"
 #include "camera_stream.h"
@@ -83,6 +84,12 @@ static void wifi_event_handler(wifi_manager_event_t event, void *data)
  * and /algo use the same JSON-RPC protocol, and mcp_tools_handle_message
  * dispatches by the "method" field, so URI filtering is unnecessary.
  *-------------------------------------------------------------*/
+static void focus_clock_reply(int fd)
+{
+    char body[96];
+    int n=snprintf(body,sizeof(body),"{\"focus_clock_ms\":%lu}",(unsigned long)(uint32_t)(esp_timer_get_time()/1000));
+    if(fd>=0 && n>0) (void)message_queue_enqueue(fd,body,n,MSG_QUEUE_TYPE_TEXT);
+}
 static void ws_data_handler(ws_manager_event_t event, void *data)
 {
     /* Debug: log entry to confirm dispatch_event calls this handler.
@@ -135,6 +142,26 @@ static void ws_data_handler(ws_manager_event_t event, void *data)
         free(request_buf);
         return;
     }
+
+    /* Explicit source handshake binds algorithm metadata to this WS client.
+     * Ordinary /algo and HTTP results without metadata do not start countdown. */
+    cJSON *focus_rpc=cJSON_Parse(request_buf);
+    const cJSON *focus_method=cJSON_GetObjectItemCaseSensitive(focus_rpc,"method");
+    const cJSON *focus_params=cJSON_GetObjectItemCaseSensitive(focus_rpc,"params");
+    if(cJSON_IsString(focus_method) && !strcmp(focus_method->valuestring,"focus.source")) {
+        const cJSON *epoch=cJSON_GetObjectItemCaseSensitive(focus_params,"source_epoch");
+        if(ws_manager_server_is_algo_client(msg->client_fd) && cJSON_IsString(epoch)) { focus_sync_source(msg->client_fd,epoch->valuestring); focus_clock_reply(msg->client_fd); }
+        cJSON_Delete(focus_rpc);free(request_buf);return;
+    }
+    const cJSON *focus_args=cJSON_GetObjectItemCaseSensitive(focus_params,"arguments");
+    const cJSON *tool_name=cJSON_GetObjectItemCaseSensitive(focus_params,"name");
+    if(ws_manager_server_is_algo_client(msg->client_fd) && cJSON_IsString(focus_method) && (!strcmp(focus_method->valuestring,"tools/call") || !strcmp(focus_method->valuestring,"tools.call")) &&
+       cJSON_IsString(tool_name) && !strcmp(tool_name->valuestring,"algorithm.result"))
+    {
+        focus_sync_sample(msg->client_fd,cJSON_GetObjectItemCaseSensitive(focus_args,"focus"));
+        focus_clock_reply(msg->client_fd);
+    }
+    cJSON_Delete(focus_rpc);
 
     /* Check for mode.set notification (custom method, handled before mcp_tools).
      * Voice board -> head board: {"jsonrpc":"2.0","method":"mode.set","params":{"mode":"focus"}} */
@@ -433,13 +460,25 @@ static esp_err_t rest_api_display_camera_preview_handler(httpd_req_t *req)
 
 static esp_err_t rest_api_status_handler(httpd_req_t *req)
 {
-    char resp[160];
+    ws_camera_client_state_t camera = ws_manager_server_get_camera_state();
+    char resp[480];
     snprintf(resp, sizeof(resp),
-             "{\"code\":0,\"message\":\"success\",\"data\":{\"camera_streaming\":%s,\"quality\":%d,\"fps\":%d}}",
-             camera_stream_is_running() ? "true" : "false", camera_stream_get_quality(), camera_stream_get_fps());
+             "{\"code\":0,\"message\":\"success\",\"data\":{\"camera_streaming\":%s,\"quality\":%d,\"fps\":%d,"
+             "\"camera_heartbeat_version\":1,\"camera_client_connected\":%s,\"camera_session_id\":%lu,"
+             "\"heartbeat_pending\":%s,\"heartbeat_pong_age_ms\":%lu,\"heartbeat_timeouts\":%lu}}",
+             camera_stream_is_running() ? "true" : "false", camera_stream_get_quality(), camera_stream_get_fps(),
+             camera.connected ? "true" : "false", (unsigned long)camera.session_id,
+             camera.heartbeat_pending ? "true" : "false", (unsigned long)camera.heartbeat_pong_age_ms,
+             (unsigned long)camera.heartbeat_timeouts);
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, resp);
-    return ESP_OK;
+    cJSON *root=cJSON_Parse(resp);
+    cJSON *data=cJSON_GetObjectItemCaseSensitive(root,"data");
+    cJSON *diagnostics=focus_sync_diagnostics();
+    if(!root || !data || !diagnostics){cJSON_Delete(root);cJSON_Delete(diagnostics);return httpd_resp_send_500(req);}
+    cJSON_AddItemToObject(data,"focus_sync",diagnostics);
+    char *json=cJSON_PrintUnformatted(root);cJSON_Delete(root);
+    if(!json)return httpd_resp_send_500(req);
+    esp_err_t result=httpd_resp_sendstr(req,json);free(json);return result;
 }
 
 static esp_err_t rest_api_device_info_handler(httpd_req_t *req)
@@ -1046,11 +1085,30 @@ static esp_err_t rest_api_eyes_set_expression_handler(httpd_req_t *req)
         httpd_resp_sendstr(req, resp);
         return ESP_ERR_INVALID_ARG;
     }
+    cJSON *style_item = cJSON_GetObjectItem(root, "style");
+    if(style_item && (!cJSON_IsString(style_item) ||
+       (strcmp(style_item->valuestring,"original") && strcmp(style_item->valuestring,"optimized")))) {
+        cJSON_Delete(root);httpd_resp_set_type(req,"application/json");
+        httpd_resp_sendstr(req,"{\"code\":1,\"message\":\"unknown style\",\"data\":{}}");return ESP_OK;
+    }
+    cJSON *role_item = cJSON_GetObjectItem(root, "role");
+    if (role_item && (!cJSON_IsString(role_item) ||
+                     expressive_eyes_set_role(role_item->valuestring) != ESP_OK)) {
+        cJSON_Delete(root);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"code\":1,\"message\":\"unknown role\",\"data\":{}}");
+        return ESP_OK;
+    }
+    if(style_item)expressive_eyes_set_style(style_item->valuestring);
+    if((style_item||role_item)&&expressive_eyes_save_selection()!=ESP_OK){
+        cJSON_Delete(root);httpd_resp_set_type(req,"application/json");
+        httpd_resp_sendstr(req,"{\"code\":1,\"message\":\"role changed but boot persistence failed\",\"data\":{}}");return ESP_OK;
+    }
     expressive_eyes_set_expression((expressive_eyes_expression_t)expr);
     ESP_LOGI(TAG, "REST: Eyes set_expression -> %s", expr_item->valuestring);
-    char resp[96];
-    snprintf(resp, sizeof(resp), "{\"code\":0,\"message\":\"success\",\"data\":{\"expression\":\"%s\"}}",
-             expr_item->valuestring);
+    char resp[192];
+    snprintf(resp, sizeof(resp), "{\"code\":0,\"message\":\"success\",\"data\":{\"expression\":\"%s\",\"role\":\"%s\",\"style\":\"%s\"}}",
+             expr_item->valuestring, expressive_eyes_get_role(), expressive_eyes_get_style());
 #else
     char resp[96];
     snprintf(resp, sizeof(resp), "{\"code\":1,\"message\":\"expressive eyes not enabled\",\"data\":{}}");
@@ -1127,8 +1185,9 @@ static esp_err_t rest_api_eyes_get_expression_handler(httpd_req_t *req)
     const char *name = (idx >= 0 && idx < (int)(sizeof(s_expression_names) / sizeof(s_expression_names[0])))
                            ? s_expression_names[idx]
                            : "unknown";
-    char resp[96];
-    snprintf(resp, sizeof(resp), "{\"code\":0,\"message\":\"success\",\"data\":{\"expression\":\"%s\"}}", name);
+    char resp[192];
+    snprintf(resp, sizeof(resp), "{\"code\":0,\"data\":{\"expression\":\"%s\",\"role\":\"%s\",\"style\":\"%s\"}}", name,
+             expressive_eyes_get_role(),expressive_eyes_get_style());
 #else
     const char *resp = "{\"code\":1,\"message\":\"expressive eyes not enabled\",\"data\":{}}";
 #endif
@@ -1506,6 +1565,7 @@ esp_err_t network_manager_init(void)
     }
 
     /* 3b. Initialize algo result manager (sub-handlers + mode state machine) */
+    if (focus_sync_start() != ESP_OK) ESP_LOGE(TAG,"Focus sync worker unavailable");
     ret = algo_result_manager_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Algo result manager init failed: %s", esp_err_to_name(ret));

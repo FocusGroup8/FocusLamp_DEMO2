@@ -204,6 +204,7 @@ esp_err_t display_system_start(const display_handles_t *handles)
                 .blink_interval       = 4.0f,
                 .enable_auto_blink    = true,
                 .enable_pupil_physics = true,
+                .touch_available      = s_lvgl_ctx.touch_indev != NULL,
             };
             esp_err_t eyes_ret = expressive_eyes_display_init(&eyes_cfg);
             if (eyes_ret != ESP_OK) {

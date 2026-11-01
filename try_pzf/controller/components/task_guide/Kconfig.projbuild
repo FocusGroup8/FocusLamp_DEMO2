@@ -1,0 +1,9 @@
+menu "Three-step task guide"
+    config TASK_GUIDE_WAIT_TIMEOUT_MS
+        int "Wait for a complete task guide (milliseconds)"
+        range 5000 120000
+        default 30000
+        help
+            A timeout only means no complete result was received in time.
+            Head owns all three 3-minute timers after the preview is delivered.
+endmenu

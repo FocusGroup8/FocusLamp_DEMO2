@@ -51,6 +51,7 @@ typedef struct {
     float blink_interval;      /*!< Average time between blinks (default: 4.0) */
     bool enable_auto_blink;    /*!< Enable automatic random blinking */
     bool enable_pupil_physics; /*!< Enable smooth pupil movement */
+    bool touch_available;     /*!< Existing LVGL GT911 input registration succeeded */
 } expressive_eyes_cfg_t;
 
 /**
@@ -80,6 +81,15 @@ esp_err_t expressive_eyes_display_deinit(void);
  * @param expr  Expression to display
  */
 void expressive_eyes_set_expression(expressive_eyes_expression_t expr);
+
+/** Select legacy, yoyo, diggy, dilly, dash, scout, phew, chacha or tock.
+ * Prototype selection is volatile and returns to legacy after restart. */
+esp_err_t expressive_eyes_set_role(const char *role);
+const char *expressive_eyes_get_role(void);
+/** Optional visual renderer; legacy role always uses the original blue eyes. */
+esp_err_t expressive_eyes_set_style(const char *style);
+const char *expressive_eyes_get_style(void);
+esp_err_t expressive_eyes_save_selection(void);
 
 /**
  * @brief Set look direction

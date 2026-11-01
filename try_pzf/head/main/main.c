@@ -6,6 +6,7 @@
 
 #include "board_config.h"
 #include "esp_log.h"
+#include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "network_manager.h"
@@ -39,6 +40,15 @@ void app_main(void)
     ESP_LOGI(TAG, "Board type configured via Kconfig");
 
     esp_err_t ret = ESP_OK;
+
+    // Display restores face_boot before network_manager initializes WiFi.
+    // NVS must therefore be ready before system_manager_init starts the display.
+    ret = nvs_flash_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "[FACE_BOOT] NVS initialization failed: %s; storage was not erased", esp_err_to_name(ret));
+        return;
+    }
+    ESP_LOGI(TAG, "[FACE_BOOT] NVS ready before display initialization");
 
 #if CONFIG_EXAMPLE_ENABLE_LED
     // Initialize LED before starting subsystem (display start is blocking)

@@ -6,6 +6,11 @@ FocusLamp「专注灯」系统的**第二版算法端**。接收 ESP32-P4 灯头
 >
 > DEMO1（第一版算法端）见独立仓库：[FocusGroup8/FocusLamp](https://github.com/FocusGroup8/FocusLamp) 的 `FocusLamp_DEMO1_Algorithm` 分支。
 
+## 2026-11-01 21:00 更新
+
+- 摄像头已有画面后断线，会更快尝试恢复连接。
+- 简化画面旋转处理，补充视频延迟和事件循环诊断信息。
+
 ## 2026-11-01 更新
 
 - 新增本地手机使用检测，画面与手势、情绪、专注结果统一显示。

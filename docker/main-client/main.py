@@ -47,6 +47,14 @@ class AlgoName:
 FPS_STATS_WINDOW = 30  # 每 N 帧重置一次平均耗时统计
 
 
+def camera_retry_delay(retry_count: int, received_frames: int) -> float:
+    # Only an established image stream gets a fast reconnect. Empty handshakes
+    # retain exponential backoff so a rejected singleton slot is not hammered.
+    if received_frames >= 10:
+        return 0.5
+    return min(2 ** min(retry_count, 5), 30)
+
+
 class MainClient:
     def __init__(self):
         self.esp32p4_ip = os.environ.get('ESP32P4_IP', '192.168.126.143')
@@ -150,6 +158,9 @@ class MainClient:
         self.pending_frame_header = None
         self.pending_delivery_frame = None
         self.delivery_frame_ready = asyncio.Event()
+        self.rt_diag = {"raw": 0, "overwritten": 0, "raw_gap_ms": 0.0, "source_gap_ms": None, "preprocess_ms": 0.0, "delivery_age_ms": 0.0}
+        self.rt_last_raw = self.rt_last_source = None
+        self.rt_last_log = time.monotonic()
         
         self.session = None
         self.latest_frame = None
@@ -216,8 +227,7 @@ class MainClient:
             if frame is None:
                 return frame_bytes
             flipped = cv2.flip(frame, 1)
-            rotated = cv2.rotate(flipped, cv2.ROTATE_90_COUNTERCLOCKWISE)
-            rotated = cv2.rotate(rotated, cv2.ROTATE_180)
+            rotated = cv2.rotate(flipped, cv2.ROTATE_90_CLOCKWISE)
             encode_params = [cv2.IMWRITE_JPEG_QUALITY, 80]
             ok, buffer = cv2.imencode('.jpg', rotated, encode_params)
             if not ok:
@@ -913,6 +923,25 @@ class MainClient:
 
         return adapted
 
+    async def monitor_event_loop(self):
+        """Monotonic loop lag; report even when no camera frame arrives."""
+        expected = time.monotonic() + 0.1
+        window_start = time.monotonic()
+        max_lag_ms = 0.0
+        ticks = 0
+        while True:
+            await asyncio.sleep(max(0.0, expected-time.monotonic()))
+            now = time.monotonic()
+            max_lag_ms = max(max_lag_ms, max(0.0, now-expected)*1000)
+            ticks += 1
+            expected = now + 0.1
+            if now-window_start >= 5.0:
+                raw_age_ms = None if self.rt_last_raw is None else round((now-self.rt_last_raw)*1000, 1)
+                logger.info("EVENT_LOOP_DIAG window_s=%.2f ticks=%d max_lag_ms=%.1f raw_age_ms=%s", now-window_start, ticks, max_lag_ms, raw_age_ms)
+                window_start = now
+                ticks = 0
+                max_lag_ms = 0.0
+
     async def deliver_latest_frames(self):
         """Bounded latest-frame slot: browser/preprocessing never waits in recv()."""
         while True:
@@ -924,7 +953,10 @@ class MainClient:
                 continue
             data, frame_seq, frame_timestamp, received_at = item
             try:
+                prep_start = time.monotonic()
                 processed_data = await self._preprocess_frame(data)
+                self.rt_diag["preprocess_ms"] = max(self.rt_diag["preprocess_ms"], (time.monotonic()-prep_start)*1000)
+                self.rt_diag["delivery_age_ms"] = max(self.rt_diag["delivery_age_ms"], (time.monotonic()-received_at)*1000)
                 if received_at < self._camera_input_epoch_at:
                     continue
                 await self.detect_async(processed_data, frame_seq, frame_timestamp, received_at)
@@ -1104,6 +1136,7 @@ class MainClient:
                 retry_count = 0
                 logger.info("Now connecting to %s", self.ws_url)
             
+            connection_frame_count = 0
             try:
                 async with websockets.connect(
                     self.ws_url, 
@@ -1129,6 +1162,7 @@ class MainClient:
                             
                             if isinstance(data, bytes):
                                 received_at = time.monotonic()
+                                connection_frame_count += 1
                                 retry_count = 0
                                 frame_seq = self.esp32_frame_seq
                                 frame_timestamp = int(time.time() * 1000)
@@ -1152,6 +1186,17 @@ class MainClient:
                                         sender.offer_reply({'type': 'camera_status', 'stream_id': self._camera_generation,
                                                             'connected': True, 'stale': False})
 
+                                self.rt_diag["raw"] += 1
+                                if self.rt_last_raw is not None:
+                                    self.rt_diag["raw_gap_ms"] = max(self.rt_diag["raw_gap_ms"], (received_at-self.rt_last_raw)*1000)
+                                self.rt_last_raw, self.rt_last_source = received_at, frame_timestamp
+                                if self.pending_delivery_frame is not None:
+                                    self.rt_diag["overwritten"] += 1
+                                if received_at-self.rt_last_log >= 5:
+                                    logger.info("REALTIME_DIAG window_s=%.2f data=%s", received_at-self.rt_last_log, json.dumps(self.rt_diag))
+                                    self.rt_last_log = received_at
+                                    self.rt_diag = dict.fromkeys(self.rt_diag, 0)
+                                    self.rt_diag["source_gap_ms"] = None
                                 self.pending_delivery_frame = (data, frame_seq, frame_timestamp, received_at)
                                 self.delivery_frame_ready.set()
                             else:
@@ -1194,7 +1239,7 @@ class MainClient:
             # closes. The original successful-handshake path had no backoff.
             if not self.input_source_switch_requested:
                 retry_count += 1
-                wait_time = min(2 ** min(retry_count, 5), 30)
+                wait_time = camera_retry_delay(retry_count, connection_frame_count)
                 logger.info("Camera retry %s in %ss", retry_count, wait_time)
                 await asyncio.sleep(wait_time)
         
@@ -1525,10 +1570,13 @@ async def main():
     # 周期健康检查：算法容器挂掉后自动停止分发请求，恢复后自动续传
     asyncio.create_task(client.health_check_loop())
     asyncio.create_task(client.deliver_latest_frames())
+    loop_monitor = asyncio.create_task(client.monitor_event_loop())
 
     try:
         await client.run()
     finally:
+        loop_monitor.cancel()
+        await asyncio.gather(loop_monitor, return_exceptions=True)
         await client.algorithm_dispatcher.close()
         await asyncio.gather(*(client.unregister_frontend(ws)
                                for ws in tuple(client.frontend_senders)))

@@ -586,6 +586,47 @@ if (send_buf != NULL) {
 
 ---
 
+### 5.4 WebSocket 握手成功后被立即断开（板子侧问题）
+
+**问题现象：** main-client 日志出现 `Connected to ESP32P4` 后紧接着 `WebSocket connection closed: no close frame received or sent`，并进入快速重连循环；`GET /frame` 永远返回 `No frame available`。
+
+**已排除的原因（配置侧全部正常）：**
+
+| 检查项 | 结果 |
+| --- | --- |
+| `ESP32P4_IP` 配置 | 与板子实际 IP 一致（板子 IP 可能变，需从串口日志取） |
+| 宿主机与板子同网段 | 确认（如 `172.20.10.4/28` vs 板子 `172.20.10.6`） |
+| 板子在线 | ARP 表可查到乐鑫 MAC（前缀 `d0:cf:13`） |
+| 客户端竞争 / `/camera` 与 `/algo` 冲突 | 已排除 |
+| main-client 代码 | 无问题 |
+
+**定位方法（隔离测试）：** 停止 main-client，用一个独立容器只建立**单个** `/camera` 连接：
+
+```powershell
+docker stop main-client
+docker run --rm -v "<probe.py>:/tmp/ws_probe.py:ro" docker-main-client python /tmp/ws_probe.py
+```
+
+结果：`OPEN ws://<ip>:80/camera` 之后立即 `ConnectionClosedError no close frame received or sent`。单客户端、无任何竞争条件下依然复现，说明**板子固件接受 WebSocket 升级握手后立刻关闭 TCP 连接**。
+
+**根因：** 在 ESP32-P4 固件侧（`esp_http_server` 的 WS handler / 套接字管理），不是算法端配置问题。另观察到板子连通性本身间歇：同一 IP 时而 TCP 可连、时而 `did not receive a valid HTTP response`。
+
+**下一步：** 需要在**连接到达的瞬间**抓取板子串口日志（`esp_http_server` 的 WS 错误、socket 错误、WiFi 断开都会打在这里），才能定位到具体固件代码。
+
+**临时规避：** 切本地摄像头输入，先把算法链路跑通：
+
+```powershell
+# 宿主机原生启动（Windows 下 Docker 容器拿不到 USB 摄像头）
+cd docker/camera-capture; python main.py
+# 再切换 main-client 输入源
+Invoke-WebRequest -Uri http://localhost:9000/input_source -Method POST `
+  -ContentType "application/json" -Body '{"source":"camera"}'
+```
+
+> 注意：`INPUT_SOURCE` 默认是 `esp32p4`，每次重启 main-client 都要重新切一次；且切换请求要等当前 ESP32 重连退避（最长 30s）结束才生效。
+
+---
+
 ## 6. 代码架构问题
 
 ### 6.1 算法结果数据结构不一致

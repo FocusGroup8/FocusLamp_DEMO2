@@ -24,6 +24,7 @@ import cv2
 from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, request, jsonify
 from openai import OpenAI
+from qa_requests import Requests, Busy
 from _common.common import decode_image_b64, encode_b64, find_chinese_font, put_chinese_text
 
 # ============ 配置 ============
@@ -37,6 +38,8 @@ PORT = int(os.getenv("PORT", "9013"))
 # ==============================
 
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 6 * 1024 * 1024
+requests = Requests()
 
 # 视觉问答 Prompt
 VA_PROMPT = """用户正在用食指指向画面中的某个位置，该位置已被红色圆圈标记。
@@ -55,7 +58,7 @@ class VisualQAEngine:
     """视觉问答引擎：调用豆包 API"""
 
     def __init__(self):
-        self.client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
+        self.client = OpenAI(base_url=BASE_URL, api_key=API_KEY, timeout=25.0, max_retries=0) if API_KEY else None
         self.last_answer = ""
         self.last_timestamp = 0
         self.is_processing = False
@@ -63,7 +66,7 @@ class VisualQAEngine:
         self.font_medium = find_chinese_font(18)
         self.font_small = find_chinese_font(14)
 
-    def query_sync(self, frame_bgr, fingertip_norm=None):
+    def query_sync(self, frame_bgr, fingertip_norm=None, question='这是什么？'):
         """同步查询：调用 API 并返回结果（在调用方线程内执行）"""
         # 缩放
         h, w = frame_bgr.shape[:2]
@@ -90,7 +93,8 @@ class VisualQAEngine:
                 "role": "user",
                 "content": [
                     {"type": "input_image", "image_url": data_uri},
-                    {"type": "input_text", "text": VA_PROMPT},
+                    {"type": "input_text", "text": ((VA_PROMPT + '\n用户问题：') if fingertip_norm is not None else
+                     '请根据这张截图，用简洁中文回答用户问题。看不清或无法确定时直接说明，不要编造。\n用户问题：') + question},
                 ],
             }],
             extra_body={
@@ -108,48 +112,15 @@ class VisualQAEngine:
                             result_text += content_item.text
 
         if not result_text:
-            result_text = str(response)
+            raise ValueError('Cloud returned no answer text')
 
         return result_text.strip(), marked
 
-    def query_async(self, frame_bgr, fingertip_norm=None):
-        """异步查询：在后台线程中调用 API"""
-        with self.lock:
-            if self.is_processing:
-                return False
-            self.is_processing = True
-
-        thread = threading.Thread(
-            target=self._query_async_worker,
-            args=(frame_bgr.copy(), fingertip_norm),
-            daemon=True
-        )
-        thread.start()
-        return True
-
-    def _query_async_worker(self, frame_bgr, fingertip_norm):
-        try:
-            answer, _ = self.query_sync(frame_bgr, fingertip_norm)
-            with self.lock:
-                self.last_answer = answer
-                self.last_timestamp = time.time()
-            print(f"[VLM-QA] 完成: {answer[:80]}")
-        except Exception as e:
-            with self.lock:
-                self.last_answer = f"查询失败: {str(e)[:80]}"
-                self.last_timestamp = time.time()
-            print(f"[VLM-QA] 失败: {e}")
-        finally:
-            with self.lock:
-                self.is_processing = False
+    def query_async(self, frame_bgr, fingertip_norm=None, question='这是什么？', metadata=None):
+        return requests.launch(metadata or {}, lambda: self.query_sync(frame_bgr, fingertip_norm, question)[0])
 
     def get_state(self):
-        with self.lock:
-            return {
-                "last_answer": self.last_answer,
-                "last_timestamp": self.last_timestamp,
-                "is_processing": self.is_processing,
-            }
+        return {'is_processing': requests.running()}
 
 
 engine = VisualQAEngine()
@@ -197,159 +168,96 @@ def visualize_result(frame_bgr, state, fingertip_norm=None):
     return display
 
 
+def parse_question():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        raise ValueError('需要 JSON 请求')
+    question = data.get('question', '这是什么？')
+    if not isinstance(question, str) or not question.strip() or len(question) > 1000:
+        raise ValueError('问题需要 1–1000 个字符')
+    if not isinstance(data.get('image'), str) or len(data['image']) > 5 * 1024 * 1024:
+        raise ValueError('截图无效或过大')
+    frame = decode_image_b64(data['image'])
+    if frame is None:
+        raise ValueError('无法解码截图')
+    metadata = {}
+    for key in ('frame_seq', 'stream_id'):
+        value = data.get(key)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            raise ValueError('截图编号无效')
+        metadata[key] = value
+    # Voice MCP requests carry the shared frame's PC receipt time. Preserve it
+    # with the request ID; never substitute a newer frame on a later state GET.
+    for key in ('sampled_at', 'age_ms_at_capture'):
+        if key in data:
+            value = data[key]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError('截图时间无效')
+            metadata[key] = value
+    fingertip = None
+    if 'fingertip_x' in data or 'fingertip_y' in data:
+        fx, fy = data.get('fingertip_x'), data.get('fingertip_y')
+        if any(isinstance(v, bool) or not isinstance(v, (int,float)) or not 0 <= v <= 1 for v in (fx,fy)):
+            raise ValueError('指尖坐标无效')
+        fingertip = (fx,fy)
+    return frame, fingertip, question.strip(), metadata
+
+
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({
-        "success": True,
-        "service": "vlm-visual-qa",
-        "model": MODEL_ENDPOINT,
-        "processing": engine.is_processing,
-    })
+    return jsonify(success=True, service='vlm-visual-qa', configured=engine.client is not None,
+                   processing=requests.running(), model=MODEL_ENDPOINT)
+
+
+def submit(asynchronous=False, visualize=False):
+    if engine.client is None:
+        return jsonify(success=False, error='尚未配置 ARK_API_KEY，未发送截图'), 503
+    try:
+        frame, fingertip, question, metadata = parse_question()
+    except Exception:
+        return jsonify(success=False, error='问题、截图或帧号格式无效'), 400
+    try:
+        request_id = requests.launch(metadata, lambda: engine.query_sync(frame, fingertip, question)[0], asynchronous)
+    except Busy:
+        return jsonify(success=False, error='正在回答，请等待当前请求结束', code='VQA_BUSY'), 503
+    record = requests.get(request_id)
+    response = {'success': True, 'request_id': request_id, 'result': record,
+                'triggered': True, 'is_processing': record['state'] == 'running'}
+    if visualize and record['state'] == 'done':
+        response['visualized_image'] = encode_b64(visualize_result(frame, {'last_answer':record['answer']}, fingertip),80)
+    return jsonify(response), 202 if asynchronous else 200
 
 
 @app.route('/detect', methods=['POST'])
 def detect():
-    """同步调用 VLM：直接返回结果（适合手动触发）"""
-    try:
-        data = request.get_json()
-        image_b64 = data.get('image')
-        if not image_b64:
-            return jsonify({"success": False, "error": "No image provided"}), 400
-
-        # 解码图像
-        frame = decode_image_b64(image_b64)
-        if frame is None:
-            return jsonify({"success": False, "error": "Invalid image"}), 400
-
-        # 可选指尖归一化坐标
-        fingertip_norm = None
-        if 'fingertip_x' in data and 'fingertip_y' in data:
-            try:
-                fx = float(data['fingertip_x'])
-                fy = float(data['fingertip_y'])
-                if 0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0:
-                    fingertip_norm = (fx, fy)
-            except (ValueError, TypeError):
-                pass
-
-        t0 = time.time()
-        answer, _ = engine.query_sync(frame, fingertip_norm)
-        elapsed = time.time() - t0
-
-        return jsonify({
-            "success": True,
-            "result": {
-                "answer": answer,
-                "timestamp": int(time.time() * 1000),
-                "fingertip_provided": fingertip_norm is not None,
-            },
-            "processing_time": elapsed,
-        })
-    except Exception as e:
-        print(f"[ERROR] /detect: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+    return submit()
 
 
 @app.route('/detect_visualize', methods=['POST'])
 def detect_visualize():
-    """同步调用 VLM：返回结果 + 可视化图像"""
-    try:
-        data = request.get_json()
-        image_b64 = data.get('image')
-        if not image_b64:
-            return jsonify({"success": False, "error": "No image provided"}), 400
-
-        frame = decode_image_b64(image_b64)
-        if frame is None:
-            return jsonify({"success": False, "error": "Invalid image"}), 400
-
-        fingertip_norm = None
-        if 'fingertip_x' in data and 'fingertip_y' in data:
-            try:
-                fx = float(data['fingertip_x'])
-                fy = float(data['fingertip_y'])
-                if 0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0:
-                    fingertip_norm = (fx, fy)
-            except (ValueError, TypeError):
-                pass
-
-        t0 = time.time()
-        answer, _ = engine.query_sync(frame, fingertip_norm)
-        elapsed = time.time() - t0
-
-        # 生成可视化
-        state = {
-            "last_answer": answer,
-            "is_processing": False,
-        }
-        vis = visualize_result(frame, state, fingertip_norm)
-        vis_b64 = encode_b64(vis, 80)
-
-        return jsonify({
-            "success": True,
-            "result": {
-                "answer": answer,
-                "timestamp": int(time.time() * 1000),
-                "fingertip_provided": fingertip_norm is not None,
-            },
-            "visualized_image": vis_b64,
-            "processing_time": elapsed,
-        })
-    except Exception as e:
-        print(f"[ERROR] /detect_visualize: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+    return submit(visualize=True)
 
 
 @app.route('/trigger_async', methods=['POST'])
 def trigger_async():
-    """异步触发：在后台线程调用 API，立即返回。结果通过 /state 查询"""
-    try:
-        data = request.get_json()
-        image_b64 = data.get('image')
-        if not image_b64:
-            return jsonify({"success": False, "error": "No image provided"}), 400
-
-        frame = decode_image_b64(image_b64)
-        if frame is None:
-            return jsonify({"success": False, "error": "Invalid image"}), 400
-
-        fingertip_norm = None
-        if 'fingertip_x' in data and 'fingertip_y' in data:
-            try:
-                fx = float(data['fingertip_x'])
-                fy = float(data['fingertip_y'])
-                if 0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0:
-                    fingertip_norm = (fx, fy)
-            except (ValueError, TypeError):
-                pass
-
-        triggered = engine.query_async(frame, fingertip_norm)
-        return jsonify({
-            "success": True,
-            "triggered": triggered,
-            "is_processing": engine.is_processing,
-        })
-    except Exception as e:
-        print(f"[ERROR] /trigger_async: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+    return submit(asynchronous=True)
 
 
 @app.route('/state', methods=['GET'])
 def state():
-    """查询当前 VLM 引擎状态"""
-    s = engine.get_state()
-    return jsonify({
-        "success": True,
-        "result": s,
-    })
+    request_id = request.args.get('request_id')
+    if not request_id:
+        return jsonify(success=True, result=engine.get_state())
+    record = requests.get(request_id)
+    if record is None:
+        return jsonify(success=False, error='请求记录不存在', code='REQUEST_NOT_FOUND'), 404
+    return jsonify(success=True, request_id=request_id, result=record)
 
 
 @app.route('/reset', methods=['POST'])
 def reset():
-    with engine.lock:
-        engine.last_answer = ""
-        engine.last_timestamp = 0
-    return jsonify({"success": True})
+    # Clearing display state must never cancel or unlock an in-flight call.
+    return jsonify(success=True, is_processing=requests.running())
 
 
 if __name__ == '__main__':

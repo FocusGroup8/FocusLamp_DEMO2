@@ -64,7 +64,7 @@ class CameraCapture:
         })
         
         dead_clients = set()
-        for client in self.clients:
+        for client in list(self.clients):
             try:
                 await client.send(header)
                 await client.send(frame_bytes)

@@ -6,6 +6,12 @@ FocusLamp「专注灯」系统的**第二版算法端**。接收 ESP32-P4 灯头
 >
 > DEMO1（第一版算法端）见独立仓库：[FocusGroup8/FocusLamp](https://github.com/FocusGroup8/FocusLamp) 的 `FocusLamp_DEMO1_Algorithm` 分支。
 
+## 2026-11-01 更新
+
+- 新增本地手机使用检测，画面与手势、情绪、专注结果统一显示。
+- 改善视频接收、算法调度和专注数据同步，并补充视觉问答测试。
+- 启动前在 `docker/.env` 填写灯头 IP；手机检测还需准备 `docker/algorithms/vlm-game-detector/yolo26s.pt` 模型。
+
 ## 仓库结构
 
 ```

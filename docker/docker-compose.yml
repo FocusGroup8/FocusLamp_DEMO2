@@ -23,7 +23,7 @@ services:
       - "9000:9000"
     environment:
       - PORT=9000
-      - ESP32P4_IP=10.137.119.21
+      - ESP32P4_IP=${ESP32P4_IP:?Set ESP32P4_IP to the current verified head IP before starting}
       - ESP32P4_PORT=80
       - CAMERA_CAPTURE_HOST=host.docker.internal
       - CAMERA_CAPTURE_PORT=9007
@@ -32,6 +32,9 @@ services:
       - FATIGUE_URL=http://fatigue-detector:9005
       - FACE_DETECTOR_URL=http://face-detector:9006
       - GESTURE_MANTIS_URL=http://gesture-mantis-detector:9009
+      # The displayed image is paired to hand inference; process every frame.
+      - GESTURE_SAMPLE_EVERY=${GESTURE_SAMPLE_EVERY:-1}
+      - PHONE_USE_URL=http://phone-detector:9015
       - POSE_URL=http://pose-detector:9010
       - FACE_LANDMARKER_URL=http://face-landmarker:9011
       - FACE_POSITION_URL=http://face-position:9012
@@ -43,6 +46,9 @@ services:
       - WEBSOCKET_PING_TIMEOUT=10
       - WEBSOCKET_CLOSE_TIMEOUT=5
       - INPUT_SOURCE=esp32p4
+      - ENABLED_ALGORITHMS=${ENABLED_ALGORITHMS:-gesture_mantis,emotion,focus,phone_use}
+      # Emotion is displayed in the web cards, not forwarded to the head eyes.
+      - FORWARD_EMOTION_TO_HEAD=false
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -84,6 +90,30 @@ services:
   # ============ 算法服务 ============
   # 说明：算法容器仅通过 docker 内部网络被 main-client 访问，无需发布端口到宿主机。
   # 如需在宿主机调试某个算法，可临时给该服务加 ports 映射。
+
+  # Local phone detection only. Reuses gesture landmarks; no cloud credentials.
+  phone-detector:
+    build:
+      context: ./algorithms
+      dockerfile: phone-detector/Dockerfile
+    container_name: phone-detector
+    environment:
+      - PORT=9015
+      - YOLO_MODEL=/app/yolo26s.pt
+      - PHONE_CONFIDENCE_THRESHOLD=0.35
+      - OMP_NUM_THREADS=2
+      - MKL_NUM_THREADS=2
+      - YOLO_CONFIG_DIR=/tmp/ultralytics
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    mem_limit: 2g
+    cpus: "2.0"
+    logging: *default-logging
+    healthcheck:
+      <<: *default-healthcheck
+      start_period: 90s
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:9015/health', timeout=3)"]
 
   focus-detector:
     build:

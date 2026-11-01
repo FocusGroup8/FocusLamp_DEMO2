@@ -40,7 +40,7 @@ def detect_emotion(image):
     if emotion_detector is None:
         return {
             "type": "no_model",
-            "confidence": 0.0,
+            "confidence": None,
             "rating": 0,
             "face_bbox": None
         }
@@ -51,18 +51,18 @@ def detect_emotion(image):
         if result is None:
             return {
                 "type": "no_face",
-                "confidence": 0.0,
+                "confidence": None,
                 "rating": 0,
                 "face_bbox": None
             }
         
         emotion_name = result.get('emotion', 'neutral')
-        confidence = result.get('confidence', 0.0)
+        confidence = result.get('confidence')
         rating = EMOTION_TO_RATING.get(emotion_name, 41)
         
         return {
             "type": emotion_name,
-            "confidence": float(confidence),
+            "confidence": float(confidence) if confidence is not None else None,
             "rating": rating,
             "face_bbox": None
         }
@@ -71,7 +71,7 @@ def detect_emotion(image):
         print(f"[WARN] Emotion inference failed: {e}")
         return {
             "type": "error",
-            "confidence": 0.0,
+            "confidence": None,
             "rating": 0,
             "error": str(e),
             "face_bbox": None
@@ -105,7 +105,8 @@ def draw_emotion_visualization(image, result):
     
     draw_text_with_bg(vis_image, f"Emotion: {emotion}", (10, 30), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-    draw_text_with_bg(vis_image, f"Confidence: {result['confidence']:.2f}", (10, 60), 
+    confidence_text = f"{result['confidence']:.2f}" if result.get('confidence') is not None else 'unknown'
+    draw_text_with_bg(vis_image, f"Confidence: {confidence_text}", (10, 60), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
     draw_text_with_bg(vis_image, f"Rating: {result['rating']}", (10, 90), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)

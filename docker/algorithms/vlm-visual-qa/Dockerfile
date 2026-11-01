@@ -13,6 +13,8 @@ COPY vlm-visual-qa/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
 
 COPY vlm-visual-qa/server.py ./server.py
+COPY vlm-visual-qa/qa_requests.py ./qa_requests.py
+COPY vlm-visual-qa/test_manual_qa.py ./test_manual_qa.py
 COPY _common/ ./_common/
 
 EXPOSE 9013

@@ -12,7 +12,7 @@ class PomodoroManager:
         self.logger = setup_logging()
         self.logger.info('PomodoroManager initialized')
 
-        self.window_time_start = time.time()
+        self.window_time_start = None
         self.window_time_duration = window_duration
 
         self.engage_level_queue = []
@@ -33,9 +33,11 @@ class PomodoroManager:
         self.focus_level = FocusLevel.Neutral
         self.prev_focus_score = None
         self.last_focus_result = None
+        self.completed_at_ms = None
+        self.completed_at_monotonic = None
 
     def reset_window(self):
-        self.window_time_start = time.time()
+        self.window_time_start = None
         self.engage_level_queue = []
         self.engage_level_count = {
             EngageLevel.HighlyEngaged: 0,
@@ -46,9 +48,11 @@ class PomodoroManager:
         self.focus_level = FocusLevel.Neutral
         self.prev_focus_score = None
         self.last_focus_result = None
+        self.completed_at_ms = None
+        self.completed_at_monotonic = None
 
     def foward_window(self):
-        self.window_time_start = time.time()
+        self.window_time_start = time.monotonic()
         self.engage_level_queue = []
         self.engage_level_count = {
             EngageLevel.HighlyEngaged: 0,
@@ -58,7 +62,18 @@ class PomodoroManager:
         }
 
     def get_window_time_elapsed(self):
-        return time.time() - self.window_time_start
+        return 0.0 if self.window_time_start is None else max(0.0, time.monotonic() - self.window_time_start)
+
+    def window_metadata(self):
+        """Presentation metadata only; the weighted-log score stays unchanged."""
+        return {
+            'state': 'ready' if self.last_focus_result is not None else 'waiting' if self.window_time_start is None else 'collecting',
+            'duration_s': self.window_time_duration,
+            'elapsed_s': min(self.window_time_duration, self.get_window_time_elapsed()),
+            'sample_count': len(self.engage_level_queue),
+            'completed_at_ms': self.completed_at_ms,
+            'completed_age_ms': None if self.completed_at_monotonic is None else max(0, int((time.monotonic() - self.completed_at_monotonic) * 1000)),
+        }
 
     def get_focus_score(self):
         try:
@@ -100,6 +115,8 @@ class PomodoroManager:
                 'focus_score': round(float(focus_score), 4),
                 'engage_level_count': {k.value: v for k, v in self.engage_level_count.items()},
             }
+            self.completed_at_ms = int(time.time() * 1000)
+            self.completed_at_monotonic = time.monotonic()
 
             self.logger.info(f'Focus level: {self.focus_level.name} ({self.focus_level.value}), score={focus_score:.4f}')
         except Exception as e:
@@ -107,8 +124,11 @@ class PomodoroManager:
 
     def update(self, engage_level: int):
         try:
+            level = EngageLevel(engage_level)
+            if self.window_time_start is None:
+                self.window_time_start = time.monotonic()
             self.engage_level_queue.append(engage_level)
-            self.engage_level_count[EngageLevel(engage_level)] += 1
+            self.engage_level_count[level] += 1
 
             if self.get_window_time_elapsed() >= self.window_time_duration:
                 self.calculate_focus_level()

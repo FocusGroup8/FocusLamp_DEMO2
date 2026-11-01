@@ -11,7 +11,14 @@ import cv2
 import numpy as np
 from typing import Dict, Any, Optional, Set
 import threading
+import hashlib
+import math
 from concurrent.futures import ThreadPoolExecutor
+from algorithm_dispatch import AlgorithmFrame, LatestAlgorithmDispatcher
+from perception_state import PerceptionState
+from focus_metadata import FocusMetadata, clock_residence_ms
+from phone_use_policy import PHONE_MAX_AGE_S
+from frontend_stream import LatestFrontend
 
 logger = logging.getLogger('main_client')
 
@@ -74,7 +81,8 @@ class MainClient:
             'face_landmarker': os.environ.get('FACE_LANDMARKER_URL', 'http://127.0.0.1:9011'),
             'face_position': os.environ.get('FACE_POSITION_URL', 'http://127.0.0.1:9012'),
             'vlm_visual_qa': os.environ.get('VLM_VISUAL_QA_URL', 'http://127.0.0.1:9013'),
-            'vlm_game_detector': os.environ.get('VLM_GAME_DETECTOR_URL', 'http://127.0.0.1:9014')
+            'vlm_game_detector': os.environ.get('VLM_GAME_DETECTOR_URL', 'http://127.0.0.1:9014'),
+            'phone_use': os.environ.get('PHONE_USE_URL', 'http://127.0.0.1:9015')
         }
 
         self.enabled_algorithms = {
@@ -87,7 +95,8 @@ class MainClient:
             'face_landmarker': False,
             'face_position': False,
             'vlm_visual_qa': False,
-            'vlm_game_detector': False
+            'vlm_game_detector': False,
+            'phone_use': False
         }
 
         self.forced_algorithms = {
@@ -98,11 +107,33 @@ class MainClient:
         for algo in self.forced_algorithms:
             self.enabled_algorithms[algo] = True
 
+        # A focused deployment must not probe or forcibly enable containers
+        # which were not started (in particular paid VLM services).
+        selected = os.environ.get('ENABLED_ALGORITHMS', '').strip()
+        self.deployed_algorithms = set(self.algorithm_urls)
+        if selected:
+            self.deployed_algorithms = {name.strip() for name in selected.split(',') if name.strip()}
+            unknown = self.deployed_algorithms - set(self.algorithm_urls)
+            if unknown:
+                raise ValueError(f'Unknown ENABLED_ALGORITHMS: {sorted(unknown)}')
+            self.forced_algorithms &= self.deployed_algorithms
+            self.enabled_algorithms = {name: name in self.deployed_algorithms for name in self.algorithm_urls}
+        if self.enabled_algorithms.get('phone_use'):
+            if not self.enabled_algorithms.get('gesture_mantis'):
+                raise ValueError('phone_use requires the existing gesture_mantis hand landmarks')
+            self.forced_algorithms.add('phone_use')
+        self.camera_connected = asyncio.Event()
+        self.inference_success_counts = {}
+
+        gesture_sample_every = os.environ.get('GESTURE_SAMPLE_EVERY', '3').strip()
+        if (not gesture_sample_every.isascii() or not gesture_sample_every.isdecimal() or
+                int(gesture_sample_every) < 1):
+            raise ValueError('GESTURE_SAMPLE_EVERY must be a positive integer')
         self.skip_frames = {
             'focus': 2,
             'emotion': 6,
             'fatigue': 3,
-            'gesture_mantis': 3,
+            'gesture_mantis': int(gesture_sample_every),
             'pose': 3,
             'face_landmarker': 3,
             'face_position': 3,
@@ -117,14 +148,33 @@ class MainClient:
         self.latest_frame_seq = 0
         
         self.pending_frame_header = None
+        self.pending_delivery_frame = None
+        self.delivery_frame_ready = asyncio.Event()
         
         self.session = None
         self.latest_frame = None
         self.latest_frame_bytes = None
+        self.latest_frame_received_at = None
+        self.latest_frame_sha256 = None
+        self.received_image_count = 0
+        self.changed_image_count = 0
         self.latest_results = {}
+        self.focus_metadata = FocusMetadata()
+        self.focus_sent_source = None
+        self.focus_head_clock = None
+        self.focus_head_clock_received_at = None
+        self.perception = PerceptionState()
+        self._phone_generation = 0
+        self._phone_hand_revision = 0
+        self._phone_last_sample_at = None
+        self._phone_input_epoch_at = 0.0
+        self.forward_emotion_to_head = os.environ.get('FORWARD_EMOTION_TO_HEAD', 'false').lower() == 'true'
         self.frame_lock = threading.Lock()
         
         self.frontend_clients: Set[web.WebSocketResponse] = set()
+        self.frontend_senders = {}
+        self._camera_generation = 0
+        self._camera_input_epoch_at = 0.0
         
         self.last_other_algo_time = 0
         self.detect_fps = 0.0
@@ -150,6 +200,8 @@ class MainClient:
 
         # 算法调用并发上限与健康状态（防止容器被突发流量打爆 / 无效请求堆积）
         self.algorithm_semaphore = asyncio.Semaphore(int(os.environ.get('ALGORITHM_MAX_CONCURRENCY', '4')))
+        self.algorithm_dispatcher = LatestAlgorithmDispatcher(self._process_continuous_algorithm)
+        self._last_algorithm_stats_log_at = time.monotonic()
         self.algorithm_healthy = {name: True for name in self.algorithm_urls}
         self.algo_frame_counters = {}
         self.health_check_interval = int(os.environ.get('HEALTH_CHECK_INTERVAL', '30'))
@@ -157,15 +209,19 @@ class MainClient:
         self._preprocess_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='preprocess')
     
     def _preprocess_frame_sync(self, frame_bytes: bytes) -> bytes:
-        """同步翻转+重编码（在独立线程中执行，避免阻塞事件循环）"""
+        """将上一版显示画面再上下翻转一次；两次上下翻转抵消，供网页和算法共用。"""
         try:
             nparr = np.frombuffer(frame_bytes, np.uint8)
             frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             if frame is None:
                 return frame_bytes
             flipped = cv2.flip(frame, 1)
+            rotated = cv2.rotate(flipped, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            rotated = cv2.rotate(rotated, cv2.ROTATE_180)
             encode_params = [cv2.IMWRITE_JPEG_QUALITY, 80]
-            _, buffer = cv2.imencode('.jpg', flipped, encode_params)
+            ok, buffer = cv2.imencode('.jpg', rotated, encode_params)
+            if not ok:
+                raise ValueError('Failed to encode rotated camera frame')
             return buffer.tobytes()
         except Exception as e:
             logger.warning("Frame preprocessing failed: %s", e)
@@ -181,6 +237,9 @@ class MainClient:
     async def check_algorithm_health(self):
         logger.info("Checking algorithm containers health...")
         for name, url in self.algorithm_urls.items():
+            if name not in self.deployed_algorithms:
+                self.algorithm_healthy[name] = False
+                continue
             try:
                 async with self.session.get(
                     f"{url}/health", 
@@ -222,11 +281,11 @@ class MainClient:
         if extra_params:
             payload.update(extra_params)
         
-        # 信号量限制并发请求数，防止容器被突发流量打爆、任务无限堆积
+        # Global HTTP concurrency; continuous pending work is bounded by the dispatcher.
         async with self.algorithm_semaphore:
             try:
                 async with self.session.post(
-                    f"{url}/detect_visualize",
+                    f"{url}/{'detect' if algorithm_name in ('gesture_mantis', 'emotion', 'focus', 'phone_use') else 'detect_visualize'}",
                     json=payload,
                     timeout=aiohttp.ClientTimeout(total=timeout_seconds)
                 ) as response:
@@ -253,12 +312,133 @@ class MainClient:
     async def call_algorithm_and_store(self, algorithm_name: str, image_base64: str, timestamp: int, extra_params: dict = None):
         result = await self.call_algorithm(algorithm_name, image_base64, timestamp, extra_params=extra_params)
         if result is not None:
+            count = self.inference_success_counts.get(algorithm_name, 0) + 1
+            self.inference_success_counts[algorithm_name] = count
+            if count == 1 or count % 30 == 0:
+                logger.info("Inference OK: algorithm=%s count=%d has_image=%s",
+                            algorithm_name, count, bool(result.get('visualized_image')))
             has_vis = 'visualized_image' in result if isinstance(result, dict) else False
             logger.debug("Algorithm %s result: success=%s, has_visualized_image=%s", algorithm_name, result.get('success') if isinstance(result, dict) else 'N/A', has_vis)
             with self.frame_lock:
                 self.latest_results[algorithm_name] = result
+                stored_at = time.monotonic()
+            return stored_at
         else:
             logger.debug("Algorithm %s returned None", algorithm_name)
+        return None
+
+    async def _process_continuous_algorithm(self, name: str, frame: AlgorithmFrame):
+        if name == 'phone_use':
+            return await self._process_phone_use(frame)
+        generation = self._camera_generation
+        if frame.received_at < self._camera_input_epoch_at:
+            return None
+        stored_at = await self.call_algorithm_and_store(
+            name, frame.image_base64, frame.timestamp, extra_params=frame.extra_params)
+        if generation != self._camera_generation:
+            return None
+        if name == 'focus':
+            with self.frame_lock:
+                self.focus_metadata.commit(self.latest_results.get(name) if stored_at is not None else None,
+                    frame.frame_seq, frame.received_at, generation)
+        if stored_at is not None:
+            with self.frame_lock:
+                response = self.latest_results.get(name)
+            if response is not None:
+                self.perception.commit(name, frame, response, stored_at)
+                if name == 'gesture_mantis':
+                    self.broadcast_hand_overlay()
+                    self._schedule_phone_use(frame, response, stored_at)
+        else:
+            self.perception.failed(name)
+            if name == 'gesture_mantis':
+                self.broadcast_hand_overlay()
+            if name == 'gesture_mantis' and self.enabled_algorithms.get('phone_use'):
+                self._invalidate_phone_use(failed=True, reset_sampling=False)
+        return stored_at
+
+    def _invalidate_phone_use(self, failed=False, reset_sampling=True):
+        self._phone_generation += 1
+        if reset_sampling:
+            self._phone_last_sample_at = None
+        self.perception.reset_phone()
+        if failed:
+            self.perception.failed('phone_use')
+        with self.frame_lock:
+            self.latest_results.pop('phone_use', None)
+
+    def _schedule_phone_use(self, frame: AlgorithmFrame, response: dict, now: float):
+        # The exact gesture input (not the latest camera image) is handed to YOLO.
+        # No second hand model and no independent per-camera-frame phone loop.
+        if not self.enabled_algorithms.get('phone_use'):
+            return
+        if frame.received_at < self._phone_input_epoch_at:
+            return  # A gesture response may also arrive after reconnect.
+        if (not self.camera_connected.is_set() or
+                now - frame.received_at > PHONE_MAX_AGE_S):
+            self._invalidate_phone_use(failed=True, reset_sampling=False)
+            return
+        result = response.get('result')
+        if not isinstance(result, dict) or result.get('error') or not isinstance(result.get('hand_detected'), bool):
+            self._invalidate_phone_use(failed=True, reset_sampling=False)
+            return
+        points = PerceptionState._points(result)
+        hand_detected = result['hand_detected']
+        if not hand_detected or points is None:
+            # Even a gesture frame skipped by the 1 Hz YOLO gate is evidence
+            # that overlap was interrupted. Keep the sampling cadence intact.
+            self._phone_hand_revision += 1
+            interrupted = self.perception.interrupt_phone_hand()
+            if interrupted is not None:
+                with self.frame_lock:
+                    if 'phone_use' in self.latest_results:
+                        self.latest_results['phone_use']['result'] = interrupted
+        if (self._phone_last_sample_at is not None and
+                frame.received_at - self._phone_last_sample_at < 1.0):
+            return
+        self._phone_last_sample_at = frame.received_at
+        params = {'frame_seq': frame.frame_seq, 'hand_frame_seq': frame.frame_seq,
+                  'hand_detected': hand_detected,
+                  'hand_landmarks': points if hand_detected else [],
+                  '_phone_generation': self._phone_generation,
+                  '_phone_hand_revision': self._phone_hand_revision}
+        self.algorithm_dispatcher.submit('phone_use',
+            AlgorithmFrame(frame.image_base64, frame.timestamp, frame.frame_seq,
+                           frame.received_at, params))
+
+    async def _process_phone_use(self, frame: AlgorithmFrame):
+        params = dict(frame.extra_params or {})
+        generation = params.pop('_phone_generation', None)
+        hand_revision = params.pop('_phone_hand_revision', None)
+        def current():
+            return (generation == self._phone_generation and
+                    self.enabled_algorithms.get('phone_use') and
+                    self.enabled_algorithms.get('gesture_mantis') and
+                    self.camera_connected.is_set())
+        if not current():
+            return None
+        if time.monotonic() - frame.received_at > PHONE_MAX_AGE_S:
+            self.perception.failed('phone_use')
+            return None
+        response = await self.call_algorithm('phone_use', frame.image_base64,
+                                             frame.timestamp, extra_params=params)
+        if not current():
+            return None  # An old connection's late response cannot restore a result.
+        stored_at = time.monotonic()
+        if not response:
+            self.perception.failed('phone_use')
+            return None
+        if hand_revision != self._phone_hand_revision and isinstance(response.get('result'), dict):
+            # Keep the phone observation, but a newer missing/invalid hand has
+            # already disproved the continuity of this in-flight overlap.
+            response = {**response, 'result': {**response['result'], 'hand_overlap': None}}
+        result = self.perception.commit('phone_use', frame, response, stored_at)
+        if result is None:
+            return None
+        with self.frame_lock:
+            self.latest_results['phone_use'] = {**response, 'result': result}
+        self.inference_success_counts['phone_use'] = self.inference_success_counts.get('phone_use', 0) + 1
+        return stored_at
 
     @staticmethod
     def _get_result_data(latest_results: dict, algo_name: str) -> dict:
@@ -268,7 +448,8 @@ class MainClient:
 
     def _build_enabled_algorithms(self, algorithm_list: list) -> dict:
         """从算法名称列表构建启用字典，forced 算法始终启用"""
-        enabled = {name: (name in algorithm_list) for name in self.algorithm_urls}
+        enabled = {name: (name in algorithm_list and name in self.deployed_algorithms)
+                   for name in self.algorithm_urls}
         for algo in self.forced_algorithms:
             enabled[algo] = True
         return enabled
@@ -314,6 +495,9 @@ class MainClient:
 
     def _check_vlm_triggers(self, image_base64: str, timestamp: int):
         """检查并触发 VLM 算法（在 detect_async 中每帧调用）"""
+        # Visual QA uploads are manual only. A pointing gesture must not send
+        # images to a paid cloud service without the page's explicit action.
+        return
         current_time = time.time()
 
         # ===== 1. Pointing_Up 手势触发 vlm_visual_qa =====
@@ -375,19 +559,22 @@ class MainClient:
 
         self.last_esp32_seq = current_seq
 
-    async def _schedule_algorithms(self, image_base64: str, timestamp: int, frame_seq: int):
+    async def _schedule_algorithms(self, image_base64: str, timestamp: int, frame_seq: int,
+                                   received_at: float = None):
         """算法调度逻辑：每帧算法、VLM 触发检查、节流调度"""
         enabled_list = [k for k, v in self.enabled_algorithms.items() if v]
+        if received_at is None:
+            received_at = time.monotonic()
+        if received_at < self._camera_input_epoch_at:
+            return
 
         # face_detector 和 focus 每帧独立调用，不受节流限制
         if 'face_detector' in self.enabled_algorithms and self.enabled_algorithms['face_detector']:
-            asyncio.create_task(
-                self.call_algorithm_and_store('face_detector', image_base64, timestamp)
-            )
+            self.algorithm_dispatcher.submit('face_detector',
+                AlgorithmFrame(image_base64, timestamp, frame_seq, received_at))
         if 'focus' in self.enabled_algorithms and self.enabled_algorithms['focus']:
-            asyncio.create_task(
-                self.call_algorithm_and_store('focus', image_base64, timestamp)
-            )
+            self.algorithm_dispatcher.submit('focus',
+                AlgorithmFrame(image_base64, timestamp, frame_seq, received_at))
 
         # VLM 触发检查：Pointing_Up 手势触发视觉问答 + 定时触发游戏检测
         # 仅当 gesture_mantis 已启用时才检查手势触发
@@ -412,7 +599,7 @@ class MainClient:
                     pose_landmarks_for_face_pos = pose_resp['result'].get('pose_landmarks')
 
             for algorithm_name in enabled_list:
-                if algorithm_name in ('face_detector', 'focus'):
+                if algorithm_name in ('face_detector', 'focus', 'phone_use', 'vlm_visual_qa'):
                     continue
                 skip_interval = self.skip_frames.get(algorithm_name, 1)
                 # 每算法独立计数器，避免各算法在同一帧集中触发造成突发流量
@@ -424,9 +611,14 @@ class MainClient:
                         extra = {'current_emotion': current_emotion}
                     elif algorithm_name == 'face_position' and pose_landmarks_for_face_pos:
                         extra = {'pose_landmarks': pose_landmarks_for_face_pos}
-                    asyncio.create_task(
-                        self.call_algorithm_and_store(algorithm_name, image_base64, timestamp, extra_params=extra)
-                    )
+                    if algorithm_name in ('vlm_visual_qa', 'vlm_game_detector'):
+                        # Keep trigger/paid-service semantics outside this change.
+                        asyncio.create_task(
+                            self.call_algorithm_and_store(algorithm_name, image_base64, timestamp, extra_params=extra)
+                        )
+                    else:
+                        self.algorithm_dispatcher.submit(algorithm_name,
+                            AlgorithmFrame(image_base64, timestamp, frame_seq, received_at, extra))
 
     def _build_algo_arguments(self) -> dict:
         """构建 algorithm.result 工具的 arguments：从 latest_results 提取 ESP32 关心的字段。
@@ -443,16 +635,13 @@ class MainClient:
         with self.frame_lock:
             latest = self.latest_results
 
-        focus_data = self._get_result_data(latest, 'focus')
-        if focus_data and focus_data.get('engage_level_name'):
-            arguments["focus"] = {
-                'engage_level_name': focus_data.get('engage_level_name'),
-                'focus_level_name': focus_data.get('focus_level_name', 'Pending'),
-                'focus_score': focus_data.get('focus_score'),
-            }
+        with self.frame_lock:
+            focus_payload = self.focus_metadata.payload()
+        if self.enabled_algorithms.get('focus') and focus_payload:
+            arguments['focus'] = focus_payload
 
         emotion_data = self._get_result_data(latest, 'emotion')
-        if emotion_data and emotion_data.get('type'):
+        if self.forward_emotion_to_head and emotion_data and emotion_data.get('type'):
             arguments["emotion"] = emotion_data.get('type')
 
         fatigue_data = self._get_result_data(latest, 'fatigue')
@@ -504,7 +693,12 @@ class MainClient:
             }
         }
 
-    async def detect_async(self, frame_bytes: bytes, frame_seq: int = None, frame_timestamp: int = None):
+    async def detect_async(self, frame_bytes: bytes, frame_seq: int = None, frame_timestamp: int = None,
+                           received_at: float = None):
+        if received_at is None:
+            received_at = time.monotonic()
+        if received_at < self._camera_input_epoch_at:
+            return
         self.frame_counter += 1
 
         if frame_seq is None:
@@ -516,13 +710,24 @@ class MainClient:
         self._track_frame_stats(frame_seq)
 
         image_base64 = base64.b64encode(frame_bytes).decode('utf-8')
+        self.perception.update_frame(image_base64, frame_seq, received_at)
         with self.frame_lock:
             self.latest_frame = image_base64
             self.latest_frame_bytes = frame_bytes
             self.latest_frame_seq = frame_seq
+            self.latest_frame_received_at = received_at
+            digest = hashlib.sha256(frame_bytes).hexdigest()
+            if digest != self.latest_frame_sha256:
+                self.changed_image_count += 1
+            self.latest_frame_sha256 = digest
+            self.received_image_count += 1
 
         t0 = time.time()
-        await self._schedule_algorithms(image_base64, frame_timestamp, frame_seq)
+        await self._schedule_algorithms(image_base64, frame_timestamp, frame_seq, received_at)
+        now_mono = time.monotonic()
+        if now_mono - self._last_algorithm_stats_log_at >= 10:
+            logger.info('Algorithm backpressure: %s', json.dumps(self.algorithm_dispatcher.snapshot()))
+            self._last_algorithm_stats_log_at = now_mono
         dt = time.time() - t0
 
         # 帧率统计
@@ -708,7 +913,56 @@ class MainClient:
 
         return adapted
 
-    async def broadcast_to_frontends(self, frame_bytes: bytes, frame_seq: int = None, frame_timestamp: int = None):
+    async def deliver_latest_frames(self):
+        """Bounded latest-frame slot: browser/preprocessing never waits in recv()."""
+        while True:
+            await self.delivery_frame_ready.wait()
+            item = self.pending_delivery_frame
+            self.pending_delivery_frame = None
+            self.delivery_frame_ready.clear()
+            if item is None:
+                continue
+            data, frame_seq, frame_timestamp, received_at = item
+            try:
+                processed_data = await self._preprocess_frame(data)
+                if received_at < self._camera_input_epoch_at:
+                    continue
+                await self.detect_async(processed_data, frame_seq, frame_timestamp, received_at)
+                await self.broadcast_to_frontends(processed_data, frame_seq, frame_timestamp, received_at)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Latest-frame delivery failed")
+
+    def register_frontend(self, ws):
+        self.frontend_clients.add(ws)
+        def forget():
+            self.frontend_clients.discard(ws)
+            self.frontend_senders.pop(ws, None)
+        sender = LatestFrontend(ws, forget)
+        self.frontend_senders[ws] = sender
+        sender.offer_reply({'type': 'camera_status', 'stream_id': self._camera_generation,
+                            'connected': self.camera_connected.is_set(),
+                            'stale': not self.camera_connected.is_set()})
+        sender.offer_overlay(self.perception.hand_overlay(
+            self.enabled_algorithms, self.algorithm_healthy, self.camera_connected.is_set()))
+        return sender
+
+    async def unregister_frontend(self, ws):
+        self.frontend_clients.discard(ws)
+        sender = self.frontend_senders.pop(ws, None)
+        if sender is not None:
+            await sender.close()
+
+    def broadcast_hand_overlay(self):
+        overlay = self.perception.hand_overlay(
+            self.enabled_algorithms, self.algorithm_healthy, self.camera_connected.is_set())
+        for ws in tuple(self.frontend_clients):
+            sender = self.frontend_senders.get(ws)
+            if sender is not None:
+                sender.offer_overlay(overlay)
+
+    async def broadcast_to_frontends(self, frame_bytes: bytes, frame_seq: int = None, frame_timestamp: int = None, received_at=None):
         if not self.frontend_clients:
             return
         
@@ -720,6 +974,7 @@ class MainClient:
         header = json.dumps({
             'type': 'frame_header',
             'seq': frame_seq,
+            'stream_id': self._camera_generation,
             'timestamp': server_timestamp
         })
         
@@ -739,17 +994,11 @@ class MainClient:
         if results_json:
             logger.debug("Sending algorithm results to %s clients, keys: %s", len(self.frontend_clients), list(self.latest_results.keys()))
         
-        dead_clients = set()
-        for client_ws in list(self.frontend_clients):
-            try:
-                await client_ws.send_str(header)
-                await client_ws.send_bytes(frame_bytes)
-                if results_json:
-                    await client_ws.send_str(results_json)
-            except Exception:
-                dead_clients.add(client_ws)
-        
-        self.frontend_clients -= dead_clients
+        received_at = time.monotonic() if received_at is None else received_at
+        for ws in tuple(self.frontend_clients):
+            sender = self.frontend_senders.get(ws)
+            if sender is not None:
+                sender.offer_frame(json.loads(header), frame_bytes, received_at, results_json)
     
     async def manage_algo_ws_connection(self):
         """维护到 ESP32 /algo 端点的 WebSocket 连接（算法结果回传通道）。
@@ -763,28 +1012,44 @@ class MainClient:
         close_timeout = int(os.environ.get('WEBSOCKET_CLOSE_TIMEOUT', 10))
         retry = 0
         while True:
+            # Establish the image connection first. A broken /algo retry loop
+            # must not consume all head sessions before /camera can connect.
+            await self.camera_connected.wait()
             try:
                 async with websockets.connect(
                     self.algo_ws_url,
+                    proxy=None,  # Local device traffic must not use an HTTP proxy.
+                    open_timeout=5,
                     ping_interval=ping_interval,
                     ping_timeout=ping_timeout,
                     close_timeout=close_timeout,
                     max_size=10 * 1024 * 1024
                 ) as ws:
                     self.algo_ws = ws
+                    self.focus_sent_source = None
+                    self.focus_head_clock = None
+                    self.focus_head_clock_received_at = None
                     logger.info("Connected to /algo (algo results channel): %s", self.algo_ws_url)
-                    retry = 0
                     async for msg in ws:
+                        retry = 0  # Receipt, not handshake alone, proves a working link.
                         # ESP32 仅返回 JSON-RPC 响应（文本帧）；/algo 端点不会发送二进制帧
                         if isinstance(msg, str):
                             logger.debug("algo ws response: %s", msg[:200])
+                            try:
+                                clock=json.loads(msg).get('focus_clock_ms')
+                                if isinstance(clock,int) and 0<=clock<=0xffffffff:
+                                    self.focus_head_clock=clock
+                                    self.focus_head_clock_received_at=time.monotonic()
+                            except (ValueError,AttributeError):
+                                pass
             except Exception as e:
-                retry += 1
-                wait = min(2 ** min(retry, 5), 30)
-                logger.warning("algo ws disconnected (%s), retry in %ss", e, wait)
-                await asyncio.sleep(wait)
+                logger.warning("algo ws disconnected: %r", e)
             finally:
                 self.algo_ws = None
+            retry += 1
+            wait = min(2 ** min(retry, 5), 30)
+            logger.info("Algo retry %s in %ss", retry, wait)
+            await asyncio.sleep(wait)
 
     async def send_algo_results_loop(self):
         """周期向 ESP32 /algo 发送 algorithm.result JSON-RPC。"""
@@ -792,9 +1057,23 @@ class MainClient:
         logger.info("algo results send loop started, interval=%ss", interval)
         while True:
             try:
-                if self.algo_ws is not None:
+                if self.algo_ws is not None and self.camera_connected.is_set():
                     payload = self._build_algo_rpc_payload()
                     if payload is not None:
+                        focus = payload.get('params', {}).get('arguments', {}).get('focus')
+                        if focus and focus['source_epoch'] != self.focus_sent_source:
+                            self.focus_head_clock = None
+                            self.focus_head_clock_received_at = None
+                            self.focus_sent_source = focus['source_epoch']
+                            await self.algo_ws.send(json.dumps({'jsonrpc':'2.0', 'method':'focus.source',
+                                'params':{'source_epoch':focus['source_epoch']}}))
+                        if focus:
+                            if self.focus_head_clock is None or self.focus_head_clock_received_at is None:
+                                payload['params']['arguments'].pop('focus',None)
+                            else:
+                                focus['head_clock_ms']=self.focus_head_clock
+                                focus['head_clock_hold_ms']=clock_residence_ms(
+                                    self.focus_head_clock_received_at,time.monotonic())
                         await self.algo_ws.send(json.dumps(payload))
                         args = payload.get("params", {}).get("arguments", {})
                         logger.info("algo result sent: id=%s keys=%s", payload.get("id"), sorted(args.keys()))
@@ -815,9 +1094,7 @@ class MainClient:
         close_timeout = int(os.environ.get('WEBSOCKET_CLOSE_TIMEOUT', 10))
         
         retry_count = 0
-        max_retries = 10
-        
-        while retry_count < max_retries:
+        while True:
             if self.input_source_switch_requested and self.pending_input_source:
                 logger.info("Switching input source from %s to %s", self.current_input_source, self.pending_input_source)
                 self.current_input_source = self.pending_input_source
@@ -830,14 +1107,17 @@ class MainClient:
             try:
                 async with websockets.connect(
                     self.ws_url, 
+                    proxy=None,
+                    open_timeout=5,
                     ping_interval=ping_interval,
                     ping_timeout=ping_timeout,
                     close_timeout=close_timeout,
-                    max_size=10 * 1024 * 1024
+                    max_size=10 * 1024 * 1024,
+                    max_queue=2,
+                    compression=None
                 ) as ws:
                     source_name = "ESP32P4" if self.current_input_source == 'esp32p4' else "Camera"
                     logger.info("Connected to %s (ping_interval=%ss)", source_name, ping_interval)
-                    retry_count = 0
                     
                     while True:
                         if self.input_source_switch_requested and self.pending_input_source:
@@ -848,6 +1128,8 @@ class MainClient:
                             data = await ws.recv()
                             
                             if isinstance(data, bytes):
+                                received_at = time.monotonic()
+                                retry_count = 0
                                 frame_seq = self.esp32_frame_seq
                                 frame_timestamp = int(time.time() * 1000)
                                 
@@ -863,11 +1145,15 @@ class MainClient:
                                     finally:
                                         self.pending_frame_header = None
                                 
-                                processed_data = await self._preprocess_frame(data)
+                                if not self.camera_connected.is_set():
+                                    logger.info("Camera first image received: %s bytes; enabling /algo", len(data))
+                                    self.camera_connected.set()
+                                    for sender in tuple(self.frontend_senders.values()):
+                                        sender.offer_reply({'type': 'camera_status', 'stream_id': self._camera_generation,
+                                                            'connected': True, 'stale': False})
 
-                                asyncio.create_task(self.detect_async(processed_data, frame_seq, frame_timestamp))
-
-                                await self.broadcast_to_frontends(processed_data, frame_seq, frame_timestamp)
+                                self.pending_delivery_frame = (data, frame_seq, frame_timestamp, received_at)
+                                self.delivery_frame_ready.set()
                             else:
                                 message_str = data if isinstance(data, str) else data.decode('utf-8')
                                 try:
@@ -889,17 +1175,29 @@ class MainClient:
                             continue
             
             except Exception as e:
-                retry_count += 1
-                logger.error("Connection error (attempt %s/%s): %s", retry_count, max_retries, e)
-                if retry_count < max_retries:
-                    wait_time = min(2 ** retry_count, 30)
-                    logger.info("Retrying in %s seconds...", wait_time)
-                    await asyncio.sleep(wait_time)
-        
-        logger.error("Max retries reached, exiting")
-        if self.session:
-            await self.session.close()
+                logger.error("Camera connection error: %r", e)
+            finally:
+                self.camera_connected.clear()
+                self._camera_generation += 1
+                self._camera_input_epoch_at = time.monotonic()
+                self.pending_frame_header = self.pending_delivery_frame = None
+                self.delivery_frame_ready.clear()
+                self.perception.reset_video(self._camera_generation)
+                for sender in tuple(self.frontend_senders.values()):
+                    sender.camera_status({'type': 'camera_status', 'stream_id': self._camera_generation,
+                                          'connected': False, 'stale': True})
+                self.broadcast_hand_overlay()
+                self._phone_input_epoch_at = time.monotonic()
+                self._invalidate_phone_use()
 
+            # Applies to both failed handshakes AND immediate post-upgrade
+            # closes. The original successful-handshake path had no backoff.
+            if not self.input_source_switch_requested:
+                retry_count += 1
+                wait_time = min(2 ** min(retry_count, 5), 30)
+                logger.info("Camera retry %s in %ss", retry_count, wait_time)
+                await asyncio.sleep(wait_time)
+        
 async def handle_index(request):
     static_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'index.html')
     with open(static_path, 'r', encoding='utf-8') as f:
@@ -912,7 +1210,15 @@ async def handle_frame(request):
         if client.latest_frame:
             return web.json_response({
                 "success": True,
-                "image": client.latest_frame
+                "image": client.latest_frame,
+                "frame_seq": client.latest_frame_seq,
+                "received_images": client.received_image_count,
+                "changed_images": client.changed_image_count,
+                "sha256": client.latest_frame_sha256,
+                "age_ms": int((time.monotonic() - client.latest_frame_received_at) * 1000),
+                "camera_connected": client.camera_connected.is_set(),
+                "stale": (not client.camera_connected.is_set() or
+                          time.monotonic() - client.latest_frame_received_at > 3)
             })
     return web.json_response({"success": False, "error": "No frame available"})
 
@@ -921,8 +1227,17 @@ async def handle_results(request):
     with client.frame_lock:
         return web.json_response({
             "success": True,
-            "results": client.latest_results
+            "results": client.latest_results,
+            "algorithm_diagnostics": client.algorithm_dispatcher.snapshot(),
+            "focus_transport": client.focus_metadata.payload()
         })
+
+async def handle_perception(request):
+    client = request.app['client']
+    include_image = getattr(request, 'query', {}).get('include_image', 'true').lower() != 'false'
+    return web.json_response(client.perception.snapshot(
+        client.enabled_algorithms, client.algorithm_healthy, client.camera_connected.is_set(),
+        include_image=include_image))
 
 async def handle_proxy_algorithm(request):
     client = request.app['client']
@@ -944,6 +1259,110 @@ async def handle_proxy_algorithm(request):
             return web.json_response(result)
     except Exception as e:
         return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+async def handle_manual_vqa(request):
+    """Only this explicit POST may upload a user-selected screenshot."""
+    client = request.app['client']
+    service_url = client.algorithm_urls['vlm_visual_qa'].rstrip('/')
+    try:
+        if request.method == 'POST':
+            data = await request.json()
+            if (not isinstance(data, dict) or not isinstance(data.get('question'), str) or
+                    not data['question'].strip() or len(data['question']) > 1000 or
+                    not isinstance(data.get('image'), str) or len(data['image']) > 5*1024*1024 or
+                    any(isinstance(data.get(k), bool) or not isinstance(data.get(k), int) or data[k] < 0
+                        for k in ('frame_seq', 'stream_id'))):
+                return web.json_response({'success':False,'error':'问题、截图或帧号无效'},status=400)
+            payload = {key:data[key] for key in ('question','image','frame_seq','stream_id')}
+            call = client.session.post(service_url+'/trigger_async',json=payload,timeout=aiohttp.ClientTimeout(total=8))
+        else:
+            request_id = request.query.get('request_id','')
+            if len(request_id)>64 or not request_id or any(c not in '0123456789abcdef-' for c in request_id):
+                return web.json_response({'success':False,'error':'请求编号无效'},status=400)
+            call = client.session.get(service_url+'/state',params={'request_id':request_id},timeout=aiohttp.ClientTimeout(total=5))
+        async with call as response:
+            result = await response.json()
+            return web.json_response(result,status=response.status)
+    except (asyncio.TimeoutError, aiohttp.ClientError):
+        return web.json_response({'success':False,'code':'VQA_UNAVAILABLE','error':'视觉问答服务暂不可达；请求结果未知，请勿重复提交'},status=503)
+    except Exception:
+        return web.json_response({'success':False,'error':'视觉问答请求无效或服务返回异常'},status=400)
+
+
+def freeze_voice_vqa_frame(client):
+    """Copy the shared frame identity as one snapshot; never open /camera again.
+
+    sampled_at is the PC's estimated frame-receipt time in Unix milliseconds,
+    not the board's monotonic timestamp. The copied base64 string is immutable.
+    """
+    with client.frame_lock:
+        now = time.monotonic()
+        received_at = client.latest_frame_received_at
+        image = client.latest_frame
+        seq = client.latest_frame_seq
+        stream_id = client._camera_generation
+        if (not client.camera_connected.is_set() or
+                not isinstance(image, str) or not image or len(image) > 5*1024*1024 or
+                isinstance(received_at, bool) or not isinstance(received_at, (int, float)) or
+                not math.isfinite(received_at) or received_at < client._camera_input_epoch_at or
+                not 0 <= now-received_at <= 3.0 or
+                any(isinstance(value, bool) or not isinstance(value, int) or value < 0
+                    for value in (seq, stream_id))):
+            return None
+        age_ms = max(0, int((now-received_at)*1000))
+        return {'image':image, 'frame_seq':seq, 'stream_id':stream_id,
+                'sampled_at':int(time.time()*1000)-age_ms,
+                'age_ms_at_capture':age_ms}
+
+
+async def handle_voice_vqa(request):
+    """Explicit MCP-triggered question: fix one fresh frame, then submit once."""
+    client = request.app['client']
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({'success':False,'code':'INVALID_QUESTION','error':'问题格式无效'},status=400)
+    if (not isinstance(data, dict) or set(data) != {'question'} or
+            not isinstance(data['question'], str) or not data['question'].strip() or
+            len(data['question']) > 1000):
+        return web.json_response({'success':False,'code':'INVALID_QUESTION','error':'仅接受 1–1000 字的问题'},status=400)
+    payload = freeze_voice_vqa_frame(client)
+    if payload is None:
+        return web.json_response({'success':False,'code':'CAMERA_NOT_FRESH',
+                                  'error':'摄像头没有新鲜画面，请先启动相机'},status=503)
+    payload['question'] = data['question'].strip()
+    service_url = client.algorithm_urls['vlm_visual_qa'].rstrip('/')
+    try:
+        async with client.session.post(service_url+'/trigger_async', json=payload,
+                                       timeout=aiohttp.ClientTimeout(total=8)) as response:
+            result = await response.json()
+            return web.json_response(result,status=response.status)
+    except (asyncio.TimeoutError, aiohttp.ClientError):
+        # No retry: the service may already have accepted this exact snapshot.
+        return web.json_response({'success':False,'code':'VQA_UNAVAILABLE',
+                                  'error':'视觉问答请求结果未知，请勿重复提交'},status=503)
+    except Exception:
+        return web.json_response({'success':False,'code':'VQA_UNAVAILABLE',
+                                  'error':'视觉问答服务返回异常，结果未知'},status=503)
+
+
+async def handle_vqa_health(request):
+    """Probe VQA readiness independently of HTTP reachability and camera age."""
+    client = request.app['client']
+    service_url = client.algorithm_urls['vlm_visual_qa'].rstrip('/')
+    try:
+        async with client.session.get(service_url+'/health',timeout=aiohttp.ClientTimeout(total=3)) as response:
+            result = await response.json()
+            if (not isinstance(result, dict) or result.get('success') is not True or
+                    result.get('service') != 'vlm-visual-qa' or
+                    not isinstance(result.get('configured'), bool) or
+                    not isinstance(result.get('processing'), bool)):
+                raise ValueError('Unexpected health response')
+            return web.json_response(result,status=response.status)
+    except Exception:
+        return web.json_response({'success':False,'code':'VQA_UNAVAILABLE',
+                                  'error':'视觉问答服务暂不可用'},status=503)
 
 async def handle_video_feed(request):
     client = request.app['client']
@@ -997,7 +1416,7 @@ async def handle_websocket(request):
     ws = web.WebSocketResponse()
     await ws.prepare(request)
     
-    client.frontend_clients.add(ws)
+    sender = client.register_frontend(ws)
     logger.info("Frontend WebSocket connected, total: %s", len(client.frontend_clients))
     
     try:
@@ -1006,31 +1425,32 @@ async def handle_websocket(request):
                 try:
                     data = json.loads(msg.data)
                     if data.get('type') == 'ping':
-                        await ws.send_json({'type': 'pong'})
+                        sender.offer_reply({'type': 'pong'})
                     elif data.get('type') == 'switch_input':
                         source = data.get('source', 'esp32p4')
                         if source in client.input_sources:
                             client.pending_input_source = source
                             client.input_source_switch_requested = True
-                            await ws.send_json({'type': 'input_source_switching', 'source': source})
+                            sender.offer_reply({'type': 'input_source_switching', 'source': source})
                             logger.info("Input source switch requested: %s", source)
                         else:
-                            await ws.send_json({'type': 'error', 'message': f'Unknown input source: {source}'})
+                            sender.offer_reply({'type': 'error', 'message': f'Unknown input source: {source}'})
                     elif data.get('type') == 'control':
                         algorithms = data.get('algorithms', [])
                         client.enabled_algorithms = client._build_enabled_algorithms(algorithms)
                         logger.info("Algorithm control from Focus Lamp: %s", client.enabled_algorithms)
-                        await ws.send_json({'type': 'control_ack', 'algorithms': client.enabled_algorithms})
+                        sender.offer_reply({'type': 'control_ack', 'algorithms': client.enabled_algorithms})
+                        client.broadcast_hand_overlay()
                     elif data.get('type') == 'report_config':
                         share_live = data.get('shareLive', False)
                         logger.info("Report config from Focus Lamp: shareLive=%s", share_live)
-                        await ws.send_json({'type': 'report_config_ack', 'shareLive': share_live})
+                        sender.offer_reply({'type': 'report_config_ack', 'shareLive': share_live})
                 except Exception:
                     pass
             elif msg.type == web.WSMsgType.ERROR:
                 logger.warning("Frontend WebSocket error: %s", ws.exception())
     finally:
-        client.frontend_clients.discard(ws)
+        await client.unregister_frontend(ws)
         logger.info("Frontend WebSocket disconnected, remaining: %s", len(client.frontend_clients))
     
     return ws
@@ -1064,12 +1484,17 @@ async def handle_switch_input_source(request):
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
 async def start_web_server(client, port=9000):
-    app = web.Application()
+    app = web.Application(client_max_size=6*1024*1024)
     app['client'] = client
     
     app.router.add_get('/', handle_index)
     app.router.add_get('/frame', handle_frame)
+    app.router.add_post('/vqa', handle_manual_vqa)
+    app.router.add_post('/vqa/recognize', handle_voice_vqa)
+    app.router.add_get('/vqa/health', handle_vqa_health)
+    app.router.add_get('/vqa/state', handle_manual_vqa)
     app.router.add_get('/results', handle_results)
+    app.router.add_get('/perception', handle_perception)
     app.router.add_get('/ws', handle_websocket)
     app.router.add_get('/video_feed', handle_video_feed)
     app.router.add_post('/algorithm/{algorithm}', handle_proxy_algorithm)
@@ -1099,8 +1524,14 @@ async def main():
     asyncio.create_task(client.send_algo_results_loop())
     # 周期健康检查：算法容器挂掉后自动停止分发请求，恢复后自动续传
     asyncio.create_task(client.health_check_loop())
+    asyncio.create_task(client.deliver_latest_frames())
 
-    await client.run()
+    try:
+        await client.run()
+    finally:
+        await client.algorithm_dispatcher.close()
+        await asyncio.gather(*(client.unregister_frontend(ws)
+                               for ws in tuple(client.frontend_senders)))
 
 if __name__ == '__main__':
     asyncio.run(main())

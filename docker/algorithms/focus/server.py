@@ -75,7 +75,9 @@ def process_video_frame(frame):
     engage_detect_result = engage_detector.get_detect_result()
 
     if engage_detect_result is not None:
-        pomodoro_manager.update(engage_level=engage_detect_result['engage_level'])
+        score_due = engage_detect_result.pop('_score_sample_due', True)
+        if score_due:
+            pomodoro_manager.update(engage_level=engage_detect_result['engage_level'])
 
     display_engage = engage_detect_result if engage_detect_result is not None else engage_detector.last_inference_result
     if display_engage is None:
@@ -83,6 +85,8 @@ def process_video_frame(frame):
 
     result = {
         'engage_detect_result': display_engage,
+        'sampling': engage_detector.sampling_metadata(),
+        'window': pomodoro_manager.window_metadata(),
     }
 
     if pomodoro_manager.last_focus_result is not None:
@@ -213,9 +217,8 @@ def health():
 
 @app.route('/reset', methods=['POST'])
 def reset():
-    with engage_detector.features_lock:
-        engage_detector.features_queue = []
-        engage_detector.last_inference_result = None
+    with processing_lock:
+        engage_detector.reset()
         pomodoro_manager.full_reset()
     return jsonify({
         "success": True,
@@ -225,18 +228,23 @@ def reset():
 
 @app.route('/detect', methods=['POST'])
 def detect():
-    start_time_req = time.time()
-
-    data = request.json
-    image_base64 = data.get('image')
-
-    if not image_base64:
+    if not processing_lock.acquire(blocking=False):
         return jsonify({
             "success": False,
-            "error": "No image provided"
-        }), 400
+            "error": "Server busy, skipping frame"
+        }), 503
 
+    start_time_req = time.time()
     try:
+        data = request.json
+        image_base64 = data.get('image')
+
+        if not image_base64:
+            return jsonify({
+                "success": False,
+                "error": "No image provided"
+            }), 400
+
         image = decode_image(image_base64)
         if image is None:
             return jsonify({
@@ -258,6 +266,8 @@ def detect():
             "success": False,
             "error": str(e)
         }), 500
+    finally:
+        processing_lock.release()
 
 
 @app.route('/detect_visualize', methods=['POST'])

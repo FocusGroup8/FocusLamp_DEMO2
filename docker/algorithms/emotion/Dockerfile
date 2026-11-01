@@ -14,6 +14,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY requirements.txt .
 
+RUN pip install --no-cache-dir --upgrade pip==25.2
+
 RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt \
     && rm -rf /root/.cache/pip
 

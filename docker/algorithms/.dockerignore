@@ -6,3 +6,5 @@
 !vlm-game-detector/*
 !vlm-visual-qa/
 !vlm-visual-qa/*
+!phone-detector/
+!phone-detector/**

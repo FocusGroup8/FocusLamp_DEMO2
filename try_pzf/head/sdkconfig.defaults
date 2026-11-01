@@ -48,7 +48,7 @@ CONFIG_WS_MANAGER_SERVER_ECHO=n
 #
 # WiFi Manager Configuration
 #
-CONFIG_WIFI_MANAGER_SSID="YOUR_WIFI_SSID"
+CONFIG_WIFI_MANAGER_SSID=""
 CONFIG_WIFI_MANAGER_PASSWORD=""
 # 实测：该手机热点网段每次开启都会随机变化（10.69.166.0/24、10.60.106.0/24 ...），
 # 编译期写死静态 IP 无意义，统一走 DHCP。板间互访改为运行时配置 + 自动发现。

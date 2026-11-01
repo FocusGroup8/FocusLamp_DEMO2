@@ -5,6 +5,7 @@
  */
 
 #include "expressive_eyes_display.h"
+#include "board_init.h"
 #include "pixel_faces_data.h"
 #include "pixel_design_renderer.h"
 #include "focus_ring_renderer.h"
@@ -342,8 +343,18 @@ static void expressive_eyes_task(void *arg)
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),(unsigned)(focus.focus?sizeof(focus_renderer):sizeof(optimized_engine)));
             report_at=now_us;draw_sum=0;draw_max=draw_frames=0;
         }
-        if(guide_drawn || optimized || focus.focus) vTaskDelayUntil(&last_time,pdMS_TO_TICKS(33));
-        else vTaskDelay(pdMS_TO_TICKS(16));
+        if(guide_drawn || optimized || focus.focus) {
+            const TickType_t period = pdMS_TO_TICKS(33);
+            // A slow LVGL flush can take longer than the whole frame budget.
+            // Do not replay missed deadlines in a tight catch-up loop: both
+            // the producer and LVGL need idle time, even while overloaded.
+            if ((TickType_t)(xTaskGetTickCount() - last_time) >= period) {
+                vTaskDelay(std::max<TickType_t>(1, pdMS_TO_TICKS(10)));
+                last_time = xTaskGetTickCount();
+            } else {
+                vTaskDelayUntil(&last_time, period);
+            }
+        } else vTaskDelay(pdMS_TO_TICKS(16));
     }
 
     ESP_LOGI(TAG, "Animation task stopped");
@@ -457,6 +468,28 @@ esp_err_t expressive_eyes_display_init(const expressive_eyes_cfg_t *cfg)
         else ESP_LOGW(TAG,"[FACE_BOOT] Read selection: %s",esp_err_to_name(boot_result));
         nvs_close(saved);
     }else ESP_LOGW(TAG,"[FACE_BOOT] Open selection: %s; using default eyes",esp_err_to_name(boot_result));
+    // Prepare the restored face while the backlight is still off. Never expose
+    // an intermediate default frame while waiting for the animation task.
+    if (pixel_optimized.load() && pixel_role.load() >= 0) {
+        const int64_t now = esp_timer_get_time() / 1000;
+        optimized_engine.update(pixel_role.load(), pixel_expression.load(), pixel_revision.load(), now);
+        lvgl_port_lock(0);
+        auto *buffer = lv_canvas_get_draw_buf(s_state.canvas);
+        pixel_design::render({reinterpret_cast<uint8_t *>(s_state.canvas_buf), s_state.screen_width,
+            s_state.screen_height, (int)buffer->header.stride}, optimized_engine, now, 0, 0);
+        lv_obj_invalidate(s_state.canvas);
+        lvgl_port_unlock();
+    } else {
+        s_state.eyes->update(0.034f);
+    }
+    lvgl_port_lock(0);
+    lv_refr_now(cfg->disp);
+    lvgl_port_unlock();
+    // Two 60 Hz scan periods let the newly flushed picture reach the panel.
+    vTaskDelay(pdMS_TO_TICKS(40));
+    board_lcd_set_backlight(true);
+    ESP_LOGI(TAG, "[FACE_BOOT] First face submitted; backlight enabled");
+
     // Step 4: Start animation task
     BaseType_t ret = xTaskCreatePinnedToCore(expressive_eyes_task, "expr_eyes",
                                              6 * 1024, // stack size

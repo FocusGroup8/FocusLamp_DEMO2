@@ -10,9 +10,11 @@
 #include "driver/gpio.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include <string.h>
 
 #if CONFIG_EXAMPLE_ENABLE_DISPLAY
 #include "esp_lcd_mipi_dsi.h"
+#include "esp_cache.h"
 #include "esp_lcd_st7701.h"
 #include "esp_lcd_touch.h"
 #include "esp_lcd_touch_gt911.h"
@@ -130,16 +132,22 @@ static void init_backlight(void)
         .pin_bit_mask = 1ULL << BOARD_BL_GPIO,
     };
     ESP_ERROR_CHECK(gpio_config(&bk_gpio_config));
-    gpio_set_level(BOARD_BL_GPIO, 1);
-    ESP_LOGI(TAG, "Backlight initialized and turned on");
+    gpio_set_level(BOARD_BL_GPIO, 0);
+    ESP_LOGI(TAG, "[FACE_BOOT] Backlight held off during panel initialization");
+}
+
+void board_lcd_set_backlight(bool enabled)
+{
+    gpio_set_level(BOARD_BL_GPIO, enabled ? 1 : 0);
 }
 
 void board_init_lcd(esp_lcd_panel_handle_t *out_panel)
 {
-    ESP_LOGI(TAG, "KD034WXFID001 (ST7701S) MIPI DSI LCD 480x480 60Hz");
+    ESP_LOGI(TAG, "[LCD_BW_TEST] KD034WXFID001 480x480 RGB565 pixel_clock=%dMHz scan~%dHz",
+             BOARD_LCD_DPI_CLK_MHZ, BOARD_LCD_FRAME_RATE_HZ);
 
-    init_dsi_phy_power();
     init_backlight();
+    init_dsi_phy_power();
 
     ESP_LOGI(TAG, "Creating MIPI DSI bus...");
     esp_lcd_dsi_bus_handle_t mipi_dsi_bus = NULL;
@@ -206,6 +214,16 @@ void board_init_lcd(esp_lcd_panel_handle_t *out_panel)
 
     ESP_LOGI(TAG, "Initializing panel...");
     ESP_ERROR_CHECK(esp_lcd_panel_init(*out_panel));
+
+    // Clear both scanout buffers before exposing the panel. CPU writes must
+    // reach PSRAM before the DPI DMA engine reads them.
+    void *fb0 = NULL, *fb1 = NULL;
+    ESP_ERROR_CHECK(esp_lcd_dpi_panel_get_frame_buffer(*out_panel, 2, &fb0, &fb1));
+    const size_t frame_bytes = BOARD_LCD_H_RES * BOARD_LCD_V_RES * BOARD_LCD_BITS_PER_PIXEL / 8;
+    memset(fb0, 0, frame_bytes);
+    memset(fb1, 0, frame_bytes);
+    ESP_ERROR_CHECK(esp_cache_msync(fb0, frame_bytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M));
+    ESP_ERROR_CHECK(esp_cache_msync(fb1, frame_bytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M));
 
     ESP_LOGI(TAG, "Turning on display...");
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(*out_panel, true));

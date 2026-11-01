@@ -172,7 +172,6 @@ bool task_guide_draw(uint8_t *bytes,int width,int height,int stride,int64_t now_
             char line[80];std::snprintf(line,sizeof(line),"%d. %s",i+1,view.steps[i]);
             centered(bytes,width,height,stride,142+i*64,line,text);
         }
-        centered(bytes,width,height,stride,366,"点击开始，每步3分钟",accent);
     } else if(view.state==task_guide::State::Done) {
         centered(bytes,width,height,stride,224,"本轮引导结束",accent);
     } else {

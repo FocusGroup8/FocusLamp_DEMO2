@@ -49,8 +49,8 @@
  * @{
  */
 #define BOARD_LCD_DPI_CLK_MHZ \
-    20 /*!< DPI pixel clock in MHz. Range: 10-40. Higher = faster refresh but may cause timing issues */
-#define BOARD_LCD_FRAME_RATE_HZ 60 /*!< Target refresh rate in Hz. Computed from DPI clock and timing */
+    16 /*!< Bandwidth diagnostic: 20 -> 16 MHz; about 48 Hz with the unchanged panel timings. */
+#define BOARD_LCD_FRAME_RATE_HZ 48 /*!< Approximate scan rate; expression rendering remains 30 fps. */
 #define BOARD_LCD_HSA 8            /*!< Horizontal sync pulse width in pixel clocks */
 #define BOARD_LCD_HBP 56           /*!< Horizontal back porch in pixel clocks (sync to active area delay) */
 #define BOARD_LCD_HFP 20           /*!< Horizontal front porch in pixel clocks (active area to sync delay) */

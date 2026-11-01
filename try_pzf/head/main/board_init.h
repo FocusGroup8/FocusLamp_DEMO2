@@ -8,6 +8,7 @@
 
 #include "driver/i2c_master.h"
 #include "esp_err.h"
+#include <stdbool.h>
 
 #if CONFIG_EXAMPLE_ENABLE_DISPLAY
 #include "esp_lcd_panel_ops.h"
@@ -21,6 +22,12 @@
  * @param[out] out_panel  Handle to the created LCD panel
  */
 void board_init_lcd(esp_lcd_panel_handle_t *out_panel);
+
+/** Backlight stays off after board_init_lcd until the initial picture is ready. */
+#ifdef __cplusplus
+extern "C"
+#endif
+void board_lcd_set_backlight(bool enabled);
 
 /**
  * @brief Initialize I2C bus and GT911 touch controller.

@@ -137,6 +137,11 @@ esp_err_t display_system_init(const display_config_t *config, display_handles_t 
         gui_swap_buffers(&s_gui);
     }
 
+    // Expressive eyes reveals the panel only after restoring and drawing its
+    // first frame. Other modes may reveal the initialized display here.
+    if (s_config.mode != DISPLAY_MODE_EXPRESSIVE_EYES) {
+        board_lcd_set_backlight(true);
+    }
     s_state = DISPLAY_STATE_IDLE;
     ESP_LOGI(TAG, "Display system initialized successfully");
     ESP_LOGI(TAG, "Mode: %d, Double-buffer: %d, Touch: %d, PPA: %d", s_config.mode, s_config.enable_double_buffer,

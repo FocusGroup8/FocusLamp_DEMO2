@@ -16,6 +16,25 @@
 #endif
 
 #include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+static portMUX_TYPE expression_hold_lock=portMUX_INITIALIZER_UNLOCKED;
+static int64_t expression_hold_until;
+void algo_result_expression_hold(unsigned hold_ms)
+{
+    int64_t until=hold_ms ? esp_timer_get_time()+(int64_t)hold_ms*1000 : 0;
+    portENTER_CRITICAL(&expression_hold_lock);
+    expression_hold_until=until;
+    portEXIT_CRITICAL(&expression_hold_lock);
+}
+bool algo_result_expression_held(void)
+{
+    portENTER_CRITICAL(&expression_hold_lock);
+    int64_t until=expression_hold_until;
+    portEXIT_CRITICAL(&expression_hold_lock);
+    return esp_timer_get_time()<until;
+}
 
 static const char *TAG = "algo_mgr";
 
@@ -82,6 +101,7 @@ static expressive_eyes_expression_t emotion_to_expression(const char *emotion)
  *-------------------------------------------------------------*/
 static void handle_emotion(const cJSON *emotion_item)
 {
+    if (algo_result_expression_held()) return;
     if (!cJSON_IsString(emotion_item) || !emotion_item->valuestring) {
         return;
     }

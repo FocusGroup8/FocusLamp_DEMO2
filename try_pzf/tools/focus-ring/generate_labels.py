@@ -1,7 +1,7 @@
 from pathlib import Path
 from PIL import Image, ImageFont, ImageDraw
 root=Path('head/main/display')
-labels=['专注','分心','严重分心','等待专注数据','语音暂停','已完成','数据过期','连接中断','数据无效']
+labels=['高度专注','普通专注','分心暂停','等待专注数据','语音暂停','已完成','数据过期','连接中断','数据无效']
 font=ImageFont.truetype('C:/Windows/Fonts/simhei.ttf',12)
 rows=[]
 for text in labels:

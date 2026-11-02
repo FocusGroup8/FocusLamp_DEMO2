@@ -73,6 +73,15 @@ esp_err_t camera_stream_start(void);
  */
 esp_err_t camera_stream_stop(void);
 
+/** Accept one background start/stop operation. ESP_OK means accepted.
+ * ESP_ERR_INVALID_STATE means another operation or shutdown is in progress.
+ * An optional completion runs on the control worker after the operation.
+ * On admission failure the caller retains the context and no callback runs.
+ * Completion and its result are also available through get_control_status(). */
+esp_err_t camera_stream_request_control(bool start,
+                                       void (*completion)(esp_err_t result, void *context), void *context);
+void camera_stream_get_control_status(bool *busy, esp_err_t *last_result);
+
 /**
  * @brief Check if streaming is active
  *
@@ -83,7 +92,9 @@ bool camera_stream_is_running(void);
 /**
  * @brief Set JPEG encoding quality
  *
- * Adaptive control may subsequently replace this value. With an FPS ceiling
+ * Q25 and Q35 select RAM-only clarity trials with congestion ceilings
+ * of Q15/Q25/Q35. Other values restore the original adaptive policy.
+ * Adaptive control may subsequently replace the applied value. With an FPS ceiling
  * of 1 or 2, low-load mode always applies Q15 (including at the encoder).
  * Use get_quality() for current control state and Stats actualQ for the last
  * logged frame's encoder input.
@@ -111,6 +122,8 @@ esp_err_t camera_stream_set_fps(int fps);
  * @return Current quality value (1-100)
  */
 int camera_stream_get_quality(void);
+int camera_stream_get_trial_quality(void);
+uint32_t camera_stream_last_jpeg_bytes(void);
 
 /**
  * @brief Get current target FPS
@@ -118,6 +131,30 @@ int camera_stream_get_quality(void);
  * @return Current FPS value (1-30)
  */
 int camera_stream_get_fps(void);
+
+typedef struct {
+    uint32_t seq, session, length;
+    int64_t capture_us;
+    uint32_t capture_cost_us, encode_us;
+} camera_frame_info_t;
+
+typedef struct {
+    camera_frame_info_t frame;
+    uint32_t ready_wait_us, lock_wait_us, network_us, wire_bytes, residence_us;
+    const char *reason;  /* static string */
+    int socket_errno;
+} camera_delivery_t;
+
+typedef struct {
+    uint32_t enqueued, replaced, stale, stopped, resource_drops, oversize, metadata_drops;
+    uint32_t sent, network_failures;
+    uint64_t jpeg_bytes;
+    uint32_t producer_stack_min, sender_stack_min, producer_work_us;
+    camera_frame_info_t produced;
+    camera_delivery_t last_attempt, last_failure;
+} camera_pipeline_stats_t;
+
+void camera_stream_pipeline_stats(camera_pipeline_stats_t *out);
 
 /**
  * @brief Get streaming statistics

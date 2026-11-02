@@ -47,6 +47,9 @@ typedef enum {
  * @return ESP_OK on success
  */
 esp_err_t algo_result_manager_init(void);
+/* Short REST expression override; algorithm inference continues normally. */
+void algo_result_expression_hold(unsigned hold_ms);
+bool algo_result_expression_held(void);
 
 /**
  * @brief Handle algorithm result arguments (called by mcp_cb_algo_result)

@@ -90,6 +90,7 @@ typedef struct {
     int last_error;                /*!< Last error code (errno value: 11=EAGAIN, 104=ECONNRESET) */
     int64_t last_send_duration_us; /*!< Last send duration in microseconds (queue to completion) */
     int64_t avg_send_duration_us;  /*!< EWMA of successful send duration (α=0.2) */
+    uint64_t jpeg_bytes;            /*!< Successful camera-pair payload bytes in this window */
     uint32_t camera_budget_timeouts; /*!< Boot cumulative camera-group budget failures; NOT reset per window */
 } ws_send_stats_t;
 

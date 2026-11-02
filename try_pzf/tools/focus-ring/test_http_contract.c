@@ -4,10 +4,14 @@
 #undef NDEBUG
 #endif
 #include <assert.h>
+#include "../../head/main/algo/focus_rate_protocol.h"
+#include <errno.h>
+#include <netinet/tcp.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include "cJSON.h"
 #include "esp_http_server.h"
 #include "controller_modes.h"
@@ -21,9 +25,27 @@ static unsigned route_count;
 static size_t largest_compact, full_size;
 static esp_err_t guide_report_result=ESP_OK;
 static unsigned guide_reports;
+static int request_fd=17, socket_nodelay, fail_sockopt, fail_guide_snapshot;
+static unsigned sockopt_calls;
+
+int httpd_req_to_sockfd(httpd_req_t *req) { return req->fd; }
+int setsockopt(int fd,int level,int name,const void *value,socklen_t length)
+{
+    assert(fd==17 && level==IPPROTO_TCP && name==TCP_NODELAY);
+    assert(length==sizeof(int) && value!=NULL);
+    ++sockopt_calls;
+    if(fail_sockopt){errno=EINVAL;return -1;}
+    socket_nodelay=*(const int *)value;
+    return 0;
+}
+static void record_send(httpd_req_t *req)
+{
+    if(req->send_calls++==0)req->nodelay_at_first_send=socket_nodelay;
+}
 
 cJSON *task_guide_snapshot(void)
 {
+    if(fail_guide_snapshot)return NULL;
     return cJSON_Parse("{\"controller_boot_id\":4294967295,\"request_id\":3,\"state\":\"ready\",\"steps\":[\"丢掉桌面垃圾\",\"把物品分类放好\",\"擦净桌面\"]}");
 }
 esp_err_t task_guide_report(const cJSON *report)
@@ -57,6 +79,7 @@ esp_err_t httpd_resp_set_hdr(httpd_req_t *req,const char *name,const char *value
 { if(!strcmp(name,"Connection") && !strcmp(value,"close"))req->close_header=1;return ESP_OK; }
 esp_err_t httpd_resp_send(httpd_req_t *req,const char *body,int length)
 {
+    record_send(req);
     assert(length>=0 && (size_t)length<sizeof(req->response));
     memcpy(req->response,body,(size_t)length);req->response[length]=0;
     req->response_size=(size_t)length;return ESP_OK;
@@ -65,6 +88,7 @@ esp_err_t httpd_resp_sendstr(httpd_req_t *req,const char *body)
 { return httpd_resp_send(req,body,(int)strlen(body)); }
 esp_err_t httpd_resp_send_chunk(httpd_req_t *req,const char *body,int length)
 {
+    record_send(req);
     assert(length>=0 && req->response_size+(size_t)length<sizeof(req->response));
     if(length)memcpy(req->response+req->response_size,body,(size_t)length);
     req->response_size+=(size_t)length;req->response[req->response_size]=0;
@@ -73,11 +97,21 @@ esp_err_t httpd_resp_send_chunk(httpd_req_t *req,const char *body,int length)
 esp_err_t httpd_resp_sendstr_chunk(httpd_req_t *req,const char *body)
 { return httpd_resp_send_chunk(req,body,(int)strlen(body)); }
 esp_err_t httpd_resp_send_err(httpd_req_t *req,int code,const char *message)
-{ (void)message;snprintf(req->status,sizeof(req->status),"%d",code);return httpd_resp_sendstr(req,"{}"); }
+{
+    /* IDF 5.5.4 error-helper behavior: successful set-to-1 is followed by
+     * set-to-0, even if the persistent socket was already using NODELAY. */
+    (void)message;
+    int one=1, zero=0;
+    assert(setsockopt(req->fd,IPPROTO_TCP,TCP_NODELAY,&one,sizeof(one))==0);
+    snprintf(req->status,sizeof(req->status),"%d",code);
+    esp_err_t result=httpd_resp_sendstr(req,"{}");
+    assert(setsockopt(req->fd,IPPROTO_TCP,TCP_NODELAY,&zero,sizeof(zero))==0);
+    return result;
+}
 
 static httpd_req_t call_raw(int method,const char *path,const char *body,size_t bytes,size_t declared)
 {
-    httpd_req_t request={.content_len=declared,.input=body,.input_size=bytes,.receive_chunk=7};
+    httpd_req_t request={.content_len=declared,.input=body,.input_size=bytes,.receive_chunk=7,.fd=request_fd};
     for(unsigned i=0;i<route_count;i++)if(routes[i].method==method && !strcmp(routes[i].uri,path)) {
         (void)routes[i].handler(&request);
         assert(request.response_size && !strcmp(request.content_type,"application/json"));
@@ -102,13 +136,16 @@ static uint32_t u32(const cJSON *root,const char *name)
 static void authority(const cJSON *root)
 {
     const char *numbers[]={"uptime_ms","controller_boot_id","session_id","seq","engagement_token",
-        "duration_ms","remaining_ms","rate_half"};
+        "duration_ms","remaining_ms","rate_quarters"};
     for(unsigned i=0;i<sizeof(numbers)/sizeof(numbers[0]);i++)(void)u32(root,numbers[i]);
     assert(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root,"ok")));
     assert(cJSON_IsString(cJSON_GetObjectItemCaseSensitive(root,"mode")));
     assert(cJSON_IsString(cJSON_GetObjectItemCaseSensitive(root,"pause_reason")));
     assert(cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(root,"paused")));
     assert(cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(root,"completed")));
+    int quarters=-1;assert(focus_rate_quarters(root,&quarters));
+    assert(cJSON_GetObjectItemCaseSensitive(root,"rate_half")->valuedouble==quarters/2.0);
+    assert(cJSON_GetObjectItemCaseSensitive(root,"rate")->valuedouble==quarters/4.0);
 }
 static cJSON *compact(const httpd_req_t *r)
 {
@@ -125,8 +162,69 @@ static void bad(const char *body)
     assert(status(&r)==400);cJSON *j=json(&r);
     assert(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(j,"ok")));cJSON_Delete(j);
 }
+static void nodelay_contract(const char *bind_body)
+{
+    const struct {int method;const char *path,*body;} cases[]={
+        {HTTP_GET,"/api/mode",NULL},
+        {HTTP_POST,"/api/mode/engagement",bind_body},
+    };
+    for(unsigned i=0;i<sizeof(cases)/sizeof(cases[0]);i++) {
+        unsigned before=sockopt_calls;
+        socket_nodelay=0;
+        httpd_req_t r=call(cases[i].method,cases[i].path,cases[i].body);
+        assert(status(&r)==200 && sockopt_calls==before+1 && r.nodelay_at_first_send==1);
+        cJSON *j=json(&r);authority(j);cJSON_Delete(j);
+
+        /* Reapply even when already enabled: a reused connection must not
+         * rely on open_fn, nor on the previous request's setting. */
+        before=sockopt_calls;
+        r=call(cases[i].method,cases[i].path,cases[i].body);
+        assert(status(&r)==200 && sockopt_calls==before+1 && r.nodelay_at_first_send==1);
+
+        request_fd=-1;socket_nodelay=0;before=sockopt_calls;
+        r=call(cases[i].method,cases[i].path,cases[i].body);
+        assert(status(&r)==200 && sockopt_calls==before && r.nodelay_at_first_send==0);
+        j=json(&r);authority(j);cJSON_Delete(j);
+        request_fd=17;
+
+        fail_sockopt=1;socket_nodelay=0;before=sockopt_calls;
+        r=call(cases[i].method,cases[i].path,cases[i].body);
+        assert(status(&r)==200 && sockopt_calls==before+1 && r.nodelay_at_first_send==0);
+        j=json(&r);authority(j);cJSON_Delete(j);
+        fail_sockopt=0;
+
+        /* Exercise the actual product's SDK-error branch, then reuse fd17
+         * for a normal response. The mock only supplies SDK socket behavior. */
+        fail_guide_snapshot=1;
+        r=call(HTTP_GET,"/api/mode",NULL);
+        assert(status(&r)==500 && socket_nodelay==0);
+        fail_guide_snapshot=0;before=sockopt_calls;
+        r=call(cases[i].method,cases[i].path,cases[i].body);
+        assert(status(&r)==200 && sockopt_calls==before+1 && r.nodelay_at_first_send==1);
+        j=json(&r);authority(j);cJSON_Delete(j);
+    }
+}
+static void rate_contract(void)
+{
+    const struct {const char *json;bool ok;int q;} cases[]={
+        {"{\"rate_quarters\":3,\"rate_half\":2}",true,3},
+        {"{\"rate_quarters\":4}",true,4},{"{\"rate_quarters\":0}",true,0},
+        {"{\"rate_quarters\":2,\"rate_half\":2}",false,0},
+        {"{\"rate_quarters\":3.1}",false,0},{"{\"rate_quarters\":null,\"rate_half\":2}",false,0},
+        {"{\"rate_half\":2}",true,4},{"{\"rate_half\":1}",true,2},
+        {"{\"rate_half\":1.5}",true,3},{"{\"rate_half\":0.75}",false,0},
+        {"{\"rate_half\":-1}",false,0},{"{}",false,0}
+    };
+    for(unsigned i=0;i<sizeof(cases)/sizeof(cases[0]);i++){
+        cJSON *j=cJSON_Parse(cases[i].json);int q=-1;
+        assert(focus_rate_quarters(j,&q)==cases[i].ok);
+        if(cases[i].ok)assert(q==cases[i].q);
+        cJSON_Delete(j);
+    }
+}
 int main(void)
 {
+    rate_contract();
     assert(controller_modes_init()==ESP_OK);
     assert(mode_http_api_register()==ESP_OK && route_count==4);
     /* Longest uptime and boot/token identities; max configurable duration. */
@@ -150,7 +248,10 @@ int main(void)
             (unsigned long)token,seq,seq);
         r=call(HTTP_POST,"/api/mode/engagement",body);j=compact(&r);
         assert(u32(j,"session_id")==session);
-        if(seq>=2)assert(u32(j,"rate_half")==2);
+        if(seq>=2){
+            assert(u32(j,"rate_quarters")==3);
+            assert(cJSON_GetObjectItemCaseSensitive(j,"rate_half")->valuedouble==1.5);
+        }
         cJSON_Delete(j);
     }
     /* The sender has held a clock echo for 5 s. Only the 100 ms network
@@ -161,7 +262,7 @@ int main(void)
         "\"sample_age_ms\":0,\"valid\":true,\"level\":\"Engaged\"}",
         (unsigned long)((uint32_t)(fake_now/1000)-5100),(unsigned long)boot,(unsigned long)session,(unsigned long)token);
     r=call(HTTP_POST,"/api/mode/engagement",body);j=compact(&r);
-    assert(u32(j,"rate_half")==2);cJSON_Delete(j);
+    assert(u32(j,"rate_quarters")==3);cJSON_Delete(j);
     /* A larger sender hold than receiver elapsed must never clamp into freshness. */
     snprintf(body,sizeof(body),"{\"observed_ms\":%lu,\"observed_hold_ms\":101,\"controller_boot_id\":%lu,\"session_id\":%lu,"
         "\"engagement_token\":%lu,\"sample_seq\":5,\"inference_seq\":5,\"age_ms\":0,"
@@ -231,7 +332,11 @@ int main(void)
     assert(status(&r)==400 && r.close_header);
     r=call_raw(HTTP_POST,"/api/mode/task_guide",nul_body,sizeof(nul_body)-1,sizeof(nul_body)-1);
     assert(status(&r)==400);
+    snprintf(body,sizeof(body),"{\"bind\":true,\"controller_boot_id\":%lu,\"session_id\":%lu}",
+        (unsigned long)boot,(unsigned long)session);
+    nodelay_contract(body);
     printf("PASS: actual HTTP handlers + controller_modes + cJSON; compact max=%zu/512, full=%zu/2048; "
-           "bind/sample authority, residence subtraction, invalid hold400, GET diagnostics, uint32 wrap, stale session409, malformed/truncated/oversized/NUL400\n",
+           "bind/sample authority, residence subtraction, invalid hold400, GET diagnostics, uint32 wrap, stale session409, malformed/truncated/oversized/NUL400; "
+           "NODELAY before both normal responses, invalid fd skip, option failure preserves response, error-to-normal socket reuse\n",
            largest_compact,full_size);
 }

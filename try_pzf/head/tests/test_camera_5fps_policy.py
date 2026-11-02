@@ -56,7 +56,7 @@ class CameraPolicyGuards(unittest.TestCase):
         self.assertIn("frame_quality = frame_fixed_low ? 15 :", task)
         self.assertIn("camera_encode_jpeg(s_state.config.camera, frame_quality, &jpeg_size)", task)
         self.assertIn("actualQ=%d mode=%s", task)
-        self.assertIn("send_call_ms=%lld", task)
+        self.assertIn("d.network_us = wire.network_us", function(STREAM, "send_pending_frame"))
 
     def test_real_window_and_float_ema(self):
         task = function(STREAM, "camera_stream_task")
@@ -64,7 +64,8 @@ class CameraPolicyGuards(unittest.TestCase):
         self.assertIn("uint64_t window_bytes_sent", task)
         self.assertIn("window_bytes_sent * 1000000ULL / (uint64_t)elapsed_us", task)
         self.assertIn("elapsed_us = now - window_start_us", task)
-        self.assertRegex(task, r"window_bytes_sent = 0;\s*window_start_us = now;")
+        self.assertIn("ws_manager_server_take_send_stats(&ws_stats)", task)
+        self.assertIn("window_start_us = now;", task)
         self.assertIn("float smoothed_quality;", STREAM)
         self.assertIn("error * PI_KI * elapsed_sec", update)
         self.assertNotIn("smoothed_quality = (int)", update)
@@ -77,11 +78,12 @@ class CameraPolicyGuards(unittest.TestCase):
         self.assertIn("camera.connected && !fixed_low", task)
 
     def test_payload_counter_is_success_only(self):
-        task = function(STREAM, "camera_stream_task")
-        success = task.index("if (ret == ESP_OK) {", task.index("send_call_start_us"))
-        count = task.index("window_bytes_sent += jpeg_size", success)
-        failure = task.index("} else if (ret != ESP_ERR_NOT_FOUND)", success)
-        self.assertLess(count, failure)
+        pair = function(WS, "ws_manager_server_send_camera_pair")
+        self.assertIn("ok ? bin_len : 0", pair)
+        record = function(WS, "update_window")
+        self.assertLess(record.index("if (ok)"), record.index("jpeg_bytes += jpeg_bytes"))
+        self.assertLess(record.index("jpeg_bytes += jpeg_bytes"), record.index("} else {"))
+        self.assertIn("ws_stats.jpeg_bytes", function(STREAM, "camera_stream_task"))
 
     def test_continuous_recovery_and_timeout_before_no_camera(self):
         bba = function(STREAM, "bba_evaluate")
@@ -110,10 +112,18 @@ class WebsocketOwnershipGuards(unittest.TestCase):
         self.assertLess(admit.index("xSemaphoreTake"), admit.index("camera_client_set_fd(fd)"))
         self.assertLess(admit.index("camera_client_set_fd(fd)"), admit.rindex("xSemaphoreGive"))
         pair = function(WS, "ws_manager_server_send_camera_pair")
+        self.assertIn("xSemaphoreTake(s_camera_send_mutex, portMAX_DELAY)", pair)
+        self.assertNotIn("s_server_mutex", pair)
         self.assertLess(pair.index("xSemaphoreTake"), pair.index("const int client_fd = s_camera_client_fd"))
         self.assertIn("if (client_fd < 0)", pair)
         self.assertNotIn("ws_send_ws_frame(s_camera_client_fd", pair)
         self.assertNotIn("shutdown(s_camera_client_fd", pair)
+        for name in ("server_send_camera_text", "ws_manager_server_send_binary"):
+            body = function(WS, name)
+            self.assertIn("camera_client_same_session(client_fd, session_id)", body)
+        broadcast = function(WS, "ws_manager_server_broadcast_text")
+        self.assertLess(broadcast.index("xSemaphoreGive(s_server_mutex)"),
+                        broadcast.index("server_send_camera_text(camera_fd, camera_session"))
 
     def test_partial_frame_shutdown_and_no_duplicate_app_queue(self):
         pair = function(WS, "ws_manager_server_send_camera_pair")

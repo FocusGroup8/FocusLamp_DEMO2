@@ -5,13 +5,13 @@ static uint16_t pixels[480*480];
 int main(){
     pixel_design::Surface surface{(uint8_t*)pixels,480,480,960};
     struct Item{const char*name;int rate;const char*reason;bool completed;};
-    Item states[]={{"green",2,"running",false},{"orange",1,"running",false},{"red",0,"distracted",false},
+    Item states[]={{"green",4,"running",false},{"orange",3,"running",false},{"red",0,"distracted",false},
                    {"waiting",0,"waiting",false},{"voice",0,"voice",false},{"completed",0,"completed",true},
                    {"stale",0,"data_stale",false},{"invalid",0,"invalid",false}};
     for(auto item:states){
         focus_ring::Renderer r;
         focus_view_t v{};v.focus=true;v.fresh=true;v.boot=1;v.session=1;v.seq=1;
-        v.duration_ms=120000;v.remaining_ms=item.completed?0:87500;v.rate_half=item.rate;
+        v.duration_ms=120000;v.remaining_ms=item.completed?0:87500;v.rate_quarters=item.rate;
         v.paused=!item.rate;v.completed=item.completed;snprintf(v.reason,sizeof(v.reason),"%s",item.reason);
         r.draw(surface,v,0);
         char path[160];snprintf(path,sizeof(path),"tools/focus-ring/previews/%s.ppm",item.name);

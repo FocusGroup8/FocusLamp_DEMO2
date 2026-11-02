@@ -9,7 +9,7 @@ extern "C" {
 typedef struct {
     bool focus, paused, completed, fresh;
     uint32_t boot, session, seq, duration_ms, remaining_ms;
-    int rate_half;
+    int rate_quarters;
     char reason[24];
     int64_t received_us;
 } focus_view_t;

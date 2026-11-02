@@ -1,9 +1,12 @@
 #include "mode_http_api.h"
 
+#include <errno.h>
 #include <math.h>
+#include <netinet/tcp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 
 #include "cJSON.h"
 #include "controller_modes.h"
@@ -18,6 +21,22 @@
 #include "../../shared/focus_transport_age.h"
 
 static const char *TAG = "MODE_API";
+
+/* Reapply for each normal response: IDF error helpers may clear this option
+ * on a persistent socket. Failure must not suppress the existing response. */
+static void nodelay_on(httpd_req_t *req, const char *site)
+{
+    int fd = httpd_req_to_sockfd(req);
+    if (fd < 0) {
+        ESP_LOGW(TAG, "%s nodelay skipped: no socket", site);
+        return;
+    }
+    int one = 1;
+    if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) != 0) {
+        ESP_LOGW(TAG, "%s nodelay failed: errno=%d", site, errno);
+    }
+}
+
 /* HTTPD serializes these handlers. Small retained evidence, no per-frame log I/O. */
 static struct {
     uint32_t received, accepted, malformed, clock_rejected, conflict;
@@ -55,7 +74,7 @@ static esp_err_t mode_status_response(httpd_req_t *req)
     snprintf(response, sizeof(response),
         "{\"http_stack_free_bytes\":%u,\"uptime_ms\":%lu,\"duration_ms\":%lu,\"remaining_ms\":%lu,\"controller_boot_id\":%lu,"
         "\"session_id\":%lu,\"seq\":%lu,\"revision\":%lu,\"engagement_token\":%lu,"
-        "\"rate_half\":%d,\"pause_reason\":\"%s\","
+        "\"rate_quarters\":%d,\"rate\":%g,\"rate_half\":%g,\"pause_reason\":\"%s\","
         "\"ok\":true,\"mode\":\"%s\",\"app_state\":%u,"
         "\"duration_sec\":%lu,\"remaining_sec\":%lu,\"voice_active\":%s,"
         "\"paused\":%s,\"completed\":%s,\"state_only\":%s,"
@@ -66,7 +85,7 @@ static esp_err_t mode_status_response(httpd_req_t *req)
         (unsigned)uxTaskGetStackHighWaterMark(NULL), (unsigned long)state.uptime_ms, (unsigned long)state.duration_ms, (unsigned long)state.remaining_ms,
         (unsigned long)state.controller_boot_id, (unsigned long)state.session_id,
         (unsigned long)state.seq, (unsigned long)state.revision, (unsigned long)state.engagement_token,
-        state.rate_half, controller_modes_pause_name(state.pause_reason),
+        state.rate_quarters, state.rate_quarters / 4.0, state.rate_half, controller_modes_pause_name(state.pause_reason),
         controller_modes_name(state.mode), (unsigned)state.mode,
         (unsigned long)state.duration_sec, (unsigned long)state.remaining_sec,
         state.voice_active ? "true" : "false", state.paused ? "true" : "false",
@@ -88,12 +107,13 @@ static esp_err_t mode_status_response(httpd_req_t *req)
     if (!guide_json) return httpd_resp_send_err(req,HTTPD_500_INTERNAL_SERVER_ERROR,"guide snapshot unavailable");
     /* Stream the extension without doubling the HTTP task's stack footprint. */
     size_t length=strlen(response);
+    nodelay_on(req, "mode_status_response");
     esp_err_t sent=httpd_resp_send_chunk(req,response,length-1);
     char accounting[384];
     snprintf(accounting,sizeof(accounting),
-        ",\"timing_totals\":{\"full_ms\":%lu,\"half_ms\":%lu,\"held_ms\":%lu,"
+        ",\"timing_totals\":{\"full_ms\":%lu,\"normal_ms\":%lu,\"half_ms\":%lu,\"held_ms\":%lu,"
         "\"waiting_ms\":%lu,\"distracted_ms\":%lu,\"invalid_ms\":%lu,\"data_stale_ms\":%lu,\"voice_ms\":%lu}",
-        (unsigned long)state.full_ms,(unsigned long)state.half_ms,(unsigned long)state.held_ms,
+        (unsigned long)state.full_ms,(unsigned long)state.normal_ms,(unsigned long)state.half_ms,(unsigned long)state.held_ms,
         (unsigned long)state.held_waiting_ms,(unsigned long)state.held_distracted_ms,
         (unsigned long)state.held_invalid_ms,(unsigned long)state.held_stale_ms,(unsigned long)state.held_voice_ms);
     if(sent==ESP_OK)sent=httpd_resp_sendstr_chunk(req,accounting);
@@ -209,10 +229,10 @@ static esp_err_t engagement_response(httpd_req_t *req)
     int n=snprintf(body,sizeof(body),
         "{\"ok\":true,\"mode\":\"%s\",\"uptime_ms\":%lu,\"controller_boot_id\":%lu,"
         "\"session_id\":%lu,\"seq\":%lu,\"engagement_token\":%lu,\"duration_ms\":%lu,"
-        "\"remaining_ms\":%lu,\"rate_half\":%d,\"pause_reason\":\"%s\",\"paused\":%s,\"completed\":%s}",
+        "\"remaining_ms\":%lu,\"rate_quarters\":%d,\"rate\":%g,\"rate_half\":%g,\"pause_reason\":\"%s\",\"paused\":%s,\"completed\":%s}",
         controller_modes_name(s.mode),(unsigned long)s.uptime_ms,(unsigned long)s.controller_boot_id,
         (unsigned long)s.session_id,(unsigned long)s.seq,(unsigned long)s.engagement_token,
-        (unsigned long)s.duration_ms,(unsigned long)s.remaining_ms,s.rate_half,
+        (unsigned long)s.duration_ms,(unsigned long)s.remaining_ms,s.rate_quarters,s.rate_quarters / 4.0,s.rate_half,
         controller_modes_pause_name(s.pause_reason),s.paused?"true":"false",s.completed?"true":"false");
     if(n<0 || n>=(int)sizeof(body))return httpd_resp_send_err(req,HTTPD_500_INTERNAL_SERVER_ERROR,"response overflow");
     static int64_t report_at;
@@ -222,6 +242,7 @@ static esp_err_t engagement_response(httpd_req_t *req)
         ESP_LOGI(TAG,"[MODE_HTTP] stack_free_bytes=%u session=%lu reason=%s",(unsigned)uxTaskGetStackHighWaterMark(NULL),
             (unsigned long)s.session_id,controller_modes_pause_name(s.pause_reason));
     }
+    nodelay_on(req, "engagement_response");
     return httpd_resp_send(req,body,n);
 }
 static esp_err_t engagement_handler(httpd_req_t *req)
@@ -331,7 +352,10 @@ esp_err_t mode_http_api_register(void)
     }
     const httpd_uri_t engagement_uri = {.uri="/api/mode/engagement", .method=HTTP_POST, .handler=engagement_handler};
     ret = ws_manager_server_register_uri(&engagement_uri);
-    if (ret != ESP_OK) return ret;
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Register POST /api/mode/engagement failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
     const httpd_uri_t guide_uri={.uri="/api/mode/task_guide",.method=HTTP_POST,.handler=task_guide_handler};
     ret=ws_manager_server_register_uri(&guide_uri);
     if(ret!=ESP_OK)return ret;

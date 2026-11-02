@@ -14,6 +14,7 @@
 #include "connection_manager.h"
 #include "display_system.h"
 #include "esp_http_server.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "focuslamp_discovery.h"
@@ -32,6 +33,7 @@
 #include "sdkconfig.h"
 #include "system_manager.h"
 #include "websocket_manager.h"
+#include <sys/socket.h>
 #include "wifi_manager.h"
 
 #include <string.h>
@@ -222,20 +224,30 @@ static void ws_data_handler(ws_manager_event_t event, void *data)
  * MCP Tool Callbacks: Camera control
  * Real implementations calling camera_stream_* APIs.
  *-------------------------------------------------------------*/
+static esp_err_t mcp_camera_control(bool start, char *response_buf, int response_buf_size)
+{
+    esp_err_t ret = camera_stream_request_control(start, NULL, NULL);
+    bool busy = false;
+    esp_err_t last_result = ESP_OK;
+    camera_stream_get_control_status(&busy, &last_result);
+    snprintf(response_buf, response_buf_size,
+             "{\"ok\":%s,\"accepted\":%s,\"processing\":%s,\"message\":\"%s\"}",
+             ret == ESP_OK ? "true" : "false", ret == ESP_OK ? "true" : "false",
+             busy ? "true" : "false", ret == ESP_OK ? "camera control request accepted" :
+             ret == ESP_ERR_INVALID_STATE ? "camera control busy or unavailable" : "camera control request failed");
+    return ret;
+}
+
 static esp_err_t mcp_cb_camera_start(const void *args_json, char *response_buf, int response_buf_size)
 {
     (void)args_json;
-    esp_err_t ret = camera_stream_start();
-    snprintf(response_buf, response_buf_size, "{\"ok\":%s}", ret == ESP_OK ? "true" : "false");
-    return ret;
+    return mcp_camera_control(true, response_buf, response_buf_size);
 }
 
 static esp_err_t mcp_cb_camera_stop(const void *args_json, char *response_buf, int response_buf_size)
 {
     (void)args_json;
-    esp_err_t ret = camera_stream_stop();
-    snprintf(response_buf, response_buf_size, "{\"ok\":%s}", ret == ESP_OK ? "true" : "false");
-    return ret;
+    return mcp_camera_control(false, response_buf, response_buf_size);
 }
 
 static esp_err_t mcp_cb_camera_set_quality(const void *args_json, char *response_buf, int response_buf_size)
@@ -320,24 +332,80 @@ static esp_err_t mcp_cb_display_show_camera(const void *args_json, char *respons
 /*---------------------------------------------------------------
  * REST API handlers for wifi_test HTTP bridge
  *-------------------------------------------------------------*/
+/* The request copy keeps its HTTPD session alive while the control worker
+ * joins camera tasks. Reply only after completion, preserving existing bridge
+ * clients that treat HTTP 200 as completion of the requested operation. */
+static esp_err_t camera_control_reply(httpd_req_t *req, esp_err_t result)
+{
+    /* Successful operations complete on the worker, so drain the ignored
+     * body there before allowing keep-alive reuse. The web adapter sends {}.
+     * Rejected requests can run on HTTPD: never wait there for missing body
+     * bytes, and never reuse their unread stream. */
+    bool close_body = req->content_len > 0;
+    if (result == ESP_OK && close_body) {
+        char discard[64];
+        size_t remaining = req->content_len;
+        while (remaining) {
+            size_t length = remaining < sizeof(discard) ? remaining : sizeof(discard);
+            int received = httpd_req_recv(req, discard, length);
+            if (received <= 0) {
+                result = ESP_FAIL;
+                break;
+            }
+            remaining -= (size_t)received;
+        }
+        close_body = remaining != 0;
+    }
+    if (close_body) httpd_resp_set_hdr(req, "Connection", "close");
+    const char *response = "{\"code\":0,\"message\":\"success\",\"data\":{}}";
+    if (result != ESP_OK) {
+        bool busy = result == ESP_ERR_INVALID_STATE;
+        httpd_resp_set_status(req, busy ? "503 Service Unavailable" : "500 Internal Server Error");
+        response = busy ? "{\"code\":1,\"message\":\"camera unavailable\",\"data\":{}}" :
+                          "{\"code\":1,\"message\":\"camera control failed\",\"data\":{}}";
+    }
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t sent = httpd_resp_sendstr(req, response);
+    if (close_body || sent != ESP_OK) {
+        int fd = httpd_req_to_sockfd(req);
+        if (fd >= 0) shutdown(fd, SHUT_RDWR);
+    }
+    return sent;
+}
+
+static void camera_control_complete(esp_err_t result, void *context)
+{
+    httpd_req_t *req = context;
+    esp_err_t sent = camera_control_reply(req, result);
+    esp_err_t released = httpd_req_async_handler_complete(req);
+    if (sent != ESP_OK || released != ESP_OK) {
+        ESP_LOGW(TAG, "Camera control response: send=%s release=%s",
+                 esp_err_to_name(sent), esp_err_to_name(released));
+    }
+}
+
+static esp_err_t rest_api_camera_control(httpd_req_t *req, bool start)
+{
+    httpd_req_t *async_req = NULL;
+    esp_err_t ret = httpd_req_async_handler_begin(req, &async_req);
+    if (ret != ESP_OK) {
+        return camera_control_reply(req, ret);
+    }
+    ret = camera_stream_request_control(start, camera_control_complete, async_req);
+    if (ret != ESP_OK) {
+        camera_control_complete(ret, async_req);
+    }
+    return ESP_OK;
+}
+
 static esp_err_t rest_api_camera_start_handler(httpd_req_t *req)
 {
-    esp_err_t ret    = camera_stream_is_running() ? ESP_OK : camera_stream_start();
-    const char *resp = ret == ESP_OK ? "{\"code\":0,\"message\":\"success\",\"data\":{}}"
-                                     : "{\"code\":1,\"message\":\"camera start failed\",\"data\":{}}";
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, resp);
-    return ESP_OK;
+    return rest_api_camera_control(req, true);
 }
 
 static esp_err_t rest_api_camera_stop_handler(httpd_req_t *req)
 {
-    esp_err_t ret    = camera_stream_stop();
-    const char *resp = ret == ESP_OK ? "{\"code\":0,\"message\":\"success\",\"data\":{}}"
-                                     : "{\"code\":1,\"message\":\"camera stop failed\",\"data\":{}}";
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, resp);
-    return ESP_OK;
+    return rest_api_camera_control(req, false);
 }
 
 static esp_err_t rest_api_camera_quality_handler(httpd_req_t *req)
@@ -368,6 +436,47 @@ static esp_err_t rest_api_camera_quality_handler(httpd_req_t *req)
     httpd_resp_sendstr(req, resp);
     return ESP_OK;
 }
+
+#if CONFIG_EXAMPLE_ENABLE_CAMERA
+/* One setting per request so that distinct exposure and gamma trials can be
+ * compared. HTTPD serializes these handlers, including the status readback. */
+static esp_err_t rest_api_camera_image_handler(httpd_req_t *req)
+{
+    char body[80];
+    if (req->content_len == 0 || req->content_len >= sizeof(body)) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Expected one image setting");
+    }
+    size_t used = 0;
+    while (used < req->content_len) {
+        int n = httpd_req_recv(req, body + used, req->content_len - used);
+        if (n <= 0) return ESP_FAIL;
+        used += n;
+    }
+    body[used] = 0;
+    cJSON *root = cJSON_ParseWithOpts(body, NULL, true);
+    cJSON *exposure = cJSON_GetObjectItemCaseSensitive(root, "exposure_target");
+    cJSON *gamma = cJSON_GetObjectItemCaseSensitive(root, "shadow_gamma");
+    cJSON *gamma_level = cJSON_GetObjectItemCaseSensitive(root, "gamma_level");
+    camera_handles_t *camera = system_manager_get_camera_handles();
+    esp_err_t err = ESP_ERR_INVALID_ARG;
+    if (cJSON_IsObject(root) && cJSON_GetArraySize(root) == 1) {
+        if (cJSON_IsNumber(exposure) && exposure->valuedouble == exposure->valueint) {
+            err = camera_set_exposure_target(camera, exposure->valueint);
+        } else if (cJSON_IsBool(gamma)) {
+            err = camera_set_shadow_gamma(camera, cJSON_IsTrue(gamma));
+        } else if (cJSON_IsNumber(gamma_level) && gamma_level->valuedouble == gamma_level->valueint) {
+            err = camera_set_gamma_level(camera, gamma_level->valueint);
+        }
+    }
+    cJSON_Delete(root);
+    if (err != ESP_OK) {
+        return httpd_resp_send_err(req, err == ESP_ERR_INVALID_ARG ? HTTPD_400_BAD_REQUEST :
+                                   HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"code\":0}");
+}
+#endif
 
 static esp_err_t rest_api_camera_fps_handler(httpd_req_t *req)
 {
@@ -458,6 +567,61 @@ static esp_err_t rest_api_display_camera_preview_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+#if CONFIG_EXAMPLE_ENABLE_CAMERA
+static void add_frame_info(cJSON *obj, const camera_frame_info_t *f)
+{
+    cJSON_AddNumberToObject(obj, "seq", f->seq);
+    cJSON_AddNumberToObject(obj, "session", f->session);
+    cJSON_AddNumberToObject(obj, "jpeg_bytes", f->length);
+    cJSON_AddNumberToObject(obj, "capture_us", f->capture_us);
+    cJSON_AddNumberToObject(obj, "capture_cost_us", f->capture_cost_us);
+    cJSON_AddNumberToObject(obj, "encode_us", f->encode_us);
+}
+
+static void add_delivery(cJSON *parent, const char *name, const camera_delivery_t *d)
+{
+    if (!d->reason) return;
+    cJSON *obj = cJSON_AddObjectToObject(parent, name);
+    if (!obj) return;
+    add_frame_info(obj, &d->frame);
+    cJSON_AddStringToObject(obj, "reason", d->reason);
+    cJSON_AddNumberToObject(obj, "ready_wait_us", d->ready_wait_us);
+    cJSON_AddNumberToObject(obj, "lock_wait_us", d->lock_wait_us);
+    cJSON_AddNumberToObject(obj, "network_us", d->network_us);
+    cJSON_AddNumberToObject(obj, "wire_bytes", d->wire_bytes);
+    cJSON_AddNumberToObject(obj, "residence_us", d->residence_us);
+    cJSON_AddNumberToObject(obj, "socket_errno", d->socket_errno);
+}
+
+static void add_pipeline_stats(cJSON *data)
+{
+    camera_pipeline_stats_t stats;
+    camera_stream_pipeline_stats(&stats);
+    cJSON *obj = cJSON_AddObjectToObject(data, "camera_pipeline");
+    if (!obj) return;
+    cJSON_AddNumberToObject(obj, "enqueued", stats.enqueued);
+    cJSON_AddNumberToObject(obj, "replaced", stats.replaced);
+    cJSON_AddNumberToObject(obj, "stale", stats.stale);
+    cJSON_AddNumberToObject(obj, "stopped", stats.stopped);
+    cJSON_AddNumberToObject(obj, "resource_drops", stats.resource_drops);
+    cJSON_AddNumberToObject(obj, "oversize", stats.oversize);
+    cJSON_AddNumberToObject(obj, "metadata_drops", stats.metadata_drops);
+    cJSON_AddNumberToObject(obj, "sent", stats.sent);
+    cJSON_AddNumberToObject(obj, "network_failures", stats.network_failures);
+    cJSON_AddNumberToObject(obj, "jpeg_bytes", stats.jpeg_bytes);
+    cJSON_AddNumberToObject(obj, "producer_stack_min", stats.producer_stack_min);
+    cJSON_AddNumberToObject(obj, "sender_stack_min", stats.sender_stack_min);
+    cJSON_AddNumberToObject(obj, "producer_work_us", stats.producer_work_us);
+    cJSON_AddNumberToObject(obj, "internal_free_bytes", heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    cJSON_AddNumberToObject(obj, "psram_free_bytes", heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    cJSON_AddNumberToObject(obj, "psram_largest_bytes", heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    cJSON *produced = cJSON_AddObjectToObject(obj, "last_produced");
+    if (produced) add_frame_info(produced, &stats.produced);
+    add_delivery(obj, "last_attempt", &stats.last_attempt);
+    add_delivery(obj, "last_failure", &stats.last_failure);
+}
+#endif
+
 static esp_err_t rest_api_status_handler(httpd_req_t *req)
 {
     ws_camera_client_state_t camera = ws_manager_server_get_camera_state();
@@ -476,6 +640,26 @@ static esp_err_t rest_api_status_handler(httpd_req_t *req)
     cJSON *diagnostics=focus_sync_diagnostics();
     if(!root || !data || !diagnostics){cJSON_Delete(root);cJSON_Delete(diagnostics);return httpd_resp_send_500(req);}
     cJSON_AddItemToObject(data,"focus_sync",diagnostics);
+#if CONFIG_EXAMPLE_ENABLE_CAMERA
+    bool control_busy = false;
+    esp_err_t control_result = ESP_OK;
+    camera_stream_get_control_status(&control_busy, &control_result);
+    cJSON_AddBoolToObject(data, "camera_control_busy", control_busy);
+    cJSON_AddNumberToObject(data, "camera_control_result", control_result);
+    camera_handles_t *handles = system_manager_get_camera_handles();
+    if (handles && handles->is_initialized) {
+        add_pipeline_stats(data);
+        uint32_t sent = 0, failed = 0;
+        camera_stream_get_stats(&sent, &failed, NULL, NULL);
+        cJSON_AddNumberToObject(data, "camera_frames_sent", sent);
+        cJSON_AddNumberToObject(data, "camera_frames_failed", failed);
+        cJSON_AddNumberToObject(data, "last_jpeg_bytes", camera_stream_last_jpeg_bytes());
+        cJSON_AddNumberToObject(data, "quality_trial", camera_stream_get_trial_quality());
+        cJSON_AddNumberToObject(data, "exposure_target", handles->exposure_target);
+        cJSON_AddBoolToObject(data, "shadow_gamma", handles->shadow_gamma);
+        cJSON_AddNumberToObject(data, "gamma_level", handles->gamma_level);
+    }
+#endif
     char *json=cJSON_PrintUnformatted(root);cJSON_Delete(root);
     if(!json)return httpd_resp_send_500(req);
     esp_err_t result=httpd_resp_sendstr(req,json);free(json);return result;
@@ -860,6 +1044,7 @@ static esp_err_t mcp_cb_eyes_set_expression(const void *args_json, char *respons
         return ESP_ERR_INVALID_ARG;
     }
 
+    algo_result_expression_hold(0);
     expressive_eyes_set_expression((expressive_eyes_expression_t)expr);
     ESP_LOGI(TAG, "MCP: Eyes set_expression -> %s", expr_item->valuestring);
     snprintf(response_buf, response_buf_size, "{\"ok\":true,\"expression\":\"%s\"}", expr_item->valuestring);
@@ -1104,6 +1289,13 @@ static esp_err_t rest_api_eyes_set_expression_handler(httpd_req_t *req)
         cJSON_Delete(root);httpd_resp_set_type(req,"application/json");
         httpd_resp_sendstr(req,"{\"code\":1,\"message\":\"role changed but boot persistence failed\",\"data\":{}}");return ESP_OK;
     }
+    const cJSON *hold=cJSON_GetObjectItemCaseSensitive(root,"hold_ms");
+    if (hold && (!cJSON_IsNumber(hold) || hold->valuedouble<0 || hold->valuedouble>15000 ||
+                 hold->valuedouble!=hold->valueint)) {
+        cJSON_Delete(root); httpd_resp_set_type(req,"application/json");
+        return httpd_resp_sendstr(req,"{\"code\":1,\"message\":\"invalid hold_ms\"}");
+    }
+    algo_result_expression_hold(hold ? (unsigned)hold->valueint : 0);
     expressive_eyes_set_expression((expressive_eyes_expression_t)expr);
     ESP_LOGI(TAG, "REST: Eyes set_expression -> %s", expr_item->valuestring);
     char resp[192];
@@ -1186,8 +1378,8 @@ static esp_err_t rest_api_eyes_get_expression_handler(httpd_req_t *req)
                            ? s_expression_names[idx]
                            : "unknown";
     char resp[192];
-    snprintf(resp, sizeof(resp), "{\"code\":0,\"data\":{\"expression\":\"%s\",\"role\":\"%s\",\"style\":\"%s\"}}", name,
-             expressive_eyes_get_role(),expressive_eyes_get_style());
+    snprintf(resp, sizeof(resp), "{\"code\":0,\"data\":{\"expression\":\"%s\",\"role\":\"%s\",\"style\":\"%s\",\"held\":%s}}", name,
+             expressive_eyes_get_role(),expressive_eyes_get_style(),algo_result_expression_held() ? "true" : "false");
 #else
     const char *resp = "{\"code\":1,\"message\":\"expressive eyes not enabled\",\"data\":{}}";
 #endif
@@ -1279,6 +1471,12 @@ static void register_rest_api_handlers(void)
         .handler = rest_api_camera_quality_handler,
     };
     safe_register_uri(&api_camera_quality);
+#if CONFIG_EXAMPLE_ENABLE_CAMERA
+    const httpd_uri_t camera_image = {
+        .uri = "/api/camera/image", .method = HTTP_POST, .handler = rest_api_camera_image_handler,
+    };
+    safe_register_uri(&camera_image);
+#endif
 
     const httpd_uri_t api_camera_fps = {
         .uri     = "/api/camera/fps",

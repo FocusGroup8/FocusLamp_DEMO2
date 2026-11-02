@@ -8,6 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <stdio.h>
+#include <string.h>
 
 static const char *TAG = "LCD_UI";
 static bool s_started;
@@ -16,7 +17,8 @@ static bool display_changed(const controller_modes_status_t *a,
                             const controller_modes_status_t *b)
 {
     return a->mode != b->mode || a->remaining_sec != b->remaining_sec ||
-           a->pause_reason != b->pause_reason || a->paused != b->paused || a->completed != b->completed;
+           a->pause_reason != b->pause_reason || a->paused != b->paused || a->completed != b->completed ||
+           a->rate_quarters != b->rate_quarters;
 }
 
 static void status_task(void *arg)
@@ -45,8 +47,15 @@ static void status_task(void *arg)
             const char *name = status.mode == APP_STATE_FOCUS ? "FOCUS" :
                                status.mode == APP_STATE_COMPANION ? "COMPANION" : "IDLE";
             const char *state = status.completed ? "COMPLETE" :
-                                status.mode == APP_STATE_FOCUS ? (status.paused ? controller_modes_pause_name(status.pause_reason) : "RUNNING") :
+                                status.mode == APP_STATE_FOCUS ? (status.paused ? controller_modes_pause_name(status.pause_reason) :
+                                    status.rate_quarters == 4 ? "HIGH 1.0x" : "NORMAL 0.75x") :
                                 status.mode == APP_STATE_COMPANION ? "ACTIVE" : "READY";
+            uint16_t clock_color = LCD_COLOR_WHITE;
+            if (status.mode == APP_STATE_FOCUS) {
+                clock_color = status.completed ? LCD_COLOR_GREEN : status.voice_active ? LCD_COLOR_CYAN :
+                    status.paused ? (!strcmp(controller_modes_pause_name(status.pause_reason),"distracted") ? LCD_COLOR_RED : 0x8c51) :
+                    status.rate_quarters == 4 ? LCD_COLOR_GREEN : 0xfd20;
+            }
             char time_text[16] = "--:--";
             if (status.mode == APP_STATE_FOCUS || status.completed) {
                 snprintf(time_text, sizeof(time_text), "%02u:%02u",
@@ -58,8 +67,8 @@ static void status_task(void *arg)
             char heart_text[20] = "HR:-- bpm";
             if (heart >= 0) snprintf(heart_text, sizeof(heart_text), "HR:%d bpm", heart);
             lcd_draw_string_buffer(0, 12, heart_text, LCD_COLOR_GREEN, LCD_COLOR_BLACK, 1);
-            lcd_draw_string_buffer(0, 24, time_text, LCD_COLOR_WHITE, LCD_COLOR_BLACK, 2);
-            lcd_draw_string_buffer(0, 48, state, LCD_COLOR_YELLOW, LCD_COLOR_BLACK, 1);
+            lcd_draw_string_buffer(0, 24, time_text, clock_color, LCD_COLOR_BLACK, 2);
+            lcd_draw_string_buffer(0, 48, state, clock_color, LCD_COLOR_BLACK, 1);
             ret = lcd_flush_buffer();
             if (ret != ESP_OK) {
                 ESP_LOGW(TAG, "LCD refresh stopped: %s (other modules continue)", esp_err_to_name(ret));

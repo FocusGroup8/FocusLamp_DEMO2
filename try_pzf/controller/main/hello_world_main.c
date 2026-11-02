@@ -1,3 +1,5 @@
+#include "mcp_vision_client.h"
+#include "joke_scene.h"
 /*
  * Smart Voice Assistant for ESP32-P4 + C5 (WT01P4C5-S1)
  *
@@ -234,6 +236,7 @@ static void xiaozhi_event_callback(xiaozhi_manager_event_t event, void *data, vo
          * via xiaozhi_manager_send_wake_word(). */
         break;
     case XIAOZHI_MANAGER_EVENT_DISCONNECTED:
+        joke_scene_note_end();
         tts_capture_abort();
         ESP_LOGW(TAG, "[Xiaozhi] Disconnected from server");
         chat_state_report(false); /* A disconnected dialogue must not freeze focus. */
@@ -247,33 +250,40 @@ static void xiaozhi_event_callback(xiaozhi_manager_event_t event, void *data, vo
         chat_state_report(true);
         break;
     case XIAOZHI_MANAGER_EVENT_AUDIO_CHANNEL_CLOSED:
+        joke_scene_note_end();
         tts_capture_abort();
         ESP_LOGI(TAG, "[Xiaozhi] Audio channel closed — back to idle");
         /* A closed channel ends dialogue; TTS_STOP alone still means listening. */
         chat_state_report(false);
         break;
     case XIAOZHI_MANAGER_EVENT_TTS_START:
+        joke_scene_note_tts_start();
         tts_capture_start();
         ESP_LOGI(TAG, "[Xiaozhi] TTS started");
         break;
     case XIAOZHI_MANAGER_EVENT_TTS_STOP:
+        joke_scene_note_end();
         tts_capture_stop();
         ESP_LOGI(TAG, "[Xiaozhi] TTS stopped — continuing conversation (listening)");
         break;
     case XIAOZHI_MANAGER_EVENT_TTS_SENTENCE:
+        joke_scene_note_sentence();
         tts_capture_sentence(data ? (const char *)data : NULL);
         ESP_LOGI(TAG, "[Xiaozhi] TTS sentence: %s", data ? (const char *)data : "");
         demo_behaviors_note_tts_text(data ? (const char *)data : NULL);
         break;
     case XIAOZHI_MANAGER_EVENT_STT_TEXT:
+        joke_scene_note_user(data ? (const char *)data : NULL);
         task_guide_note_user_text(data ? (const char *)data : NULL);
         ESP_LOGI(TAG, "[Xiaozhi] STT text: %s", data ? (const char *)data : "");
         break;
     case XIAOZHI_MANAGER_EVENT_SERVER_GOODBYE:
+        joke_scene_note_end();
         tts_capture_abort();
         ESP_LOGI(TAG, "[Xiaozhi] Server goodbye — conversation ended, waiting for wake word");
         break;
     case XIAOZHI_MANAGER_EVENT_ERROR:
+        joke_scene_note_end();
         tts_capture_abort();
         ESP_LOGE(TAG, "[Xiaozhi] Error occurred");
         break;
@@ -577,6 +587,9 @@ void app_main(void)
     xiaozhi_cfg.event_cb = xiaozhi_event_callback;
     xiaozhi_cfg.audio_cb = xiaozhi_audio_callback;
 
+    esp_err_t joke_ret=joke_scene_init();
+    mcp_vision_set_accepted_callback(joke_scene_note_vision_accepted);
+    if (joke_ret!=ESP_OK) ESP_LOGW(TAG,"Joke scene unavailable: %s",esp_err_to_name(joke_ret));
     err = xiaozhi_manager_init(&xiaozhi_cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Xiaozhi Manager init failed: %s", esp_err_to_name(err));

@@ -179,14 +179,25 @@ esp_err_t ws_manager_server_broadcast_binary(const char *data, int len);
  */
 esp_err_t ws_manager_server_send_camera_text(const char *data, int len);
 
+#define WS_CAMERA_MAX_JPEG (32 * 1024)
+
+typedef struct {
+    uint32_t lock_wait_us;
+    uint32_t network_us;
+    uint32_t wire_bytes;
+    bool budget_timeout;
+    int socket_errno;
+} ws_camera_send_result_t;
+
 /**
  * @brief Send a frame_header text frame + JPEG binary frame to the /camera
- *        client as one atomic batch (single s_server_mutex critical section).
+ *        client as one atomic batch under its dedicated send/lifetime mutex.
  *
  * The camera lease is serviced before the pair: a due Ping is serialized on
  * this same mutex; an expired Pong deadline releases only that camera slot.
- * Both image frames use per-call nonblocking send() with a shared trial deadline,
- * under the mutex so they cannot interleave with
+ * Both image frames use nonblocking send() with a shared 1500ms deadline;
+ * the global client-tracking mutex is not held during camera I/O. Frames
+ * cannot interleave with
  * frames from other tasks on the same socket. The algorithm client pairs the
  * text frame with the following binary frame to obtain the frame sequence.
  *
@@ -198,7 +209,8 @@ esp_err_t ws_manager_server_send_camera_text(const char *data, int len);
  *         ESP_ERR_TIMEOUT for budget exhaustion with zero group bytes (keeps
  *         connection); ESP_FAIL for other send failures (closes connection).
  */
-esp_err_t ws_manager_server_send_camera_pair(const char *text, int text_len, const char *bin, int bin_len);
+esp_err_t ws_manager_server_send_camera_pair(uint32_t session, const char *text, int text_len,
+                                            const char *bin, int bin_len, ws_camera_send_result_t *result);
 
 /**
  * @brief Get number of connected clients
@@ -228,12 +240,11 @@ ws_camera_client_state_t ws_manager_server_get_camera_state(void);
 esp_err_t ws_manager_server_get_send_stats(ws_send_stats_t *stats);
 
 /**
- * @brief Reset window send statistics, preserving camera_budget_timeouts
+ * @brief Atomically consume the camera-pair window, preserving camera_budget_timeouts
  *
- * Useful for periodic sampling: read stats, reset, wait interval, read again
- * to compute delta-based metrics (e.g., failures per second).
+ * Legacy binary sends are excluded from camera congestion feedback.
  */
-void ws_manager_server_reset_send_stats(void);
+esp_err_t ws_manager_server_take_send_stats(ws_send_stats_t *stats);
 
 #endif /* WS_MANAGER_SERVER_ENABLE */
 

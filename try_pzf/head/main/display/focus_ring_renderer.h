@@ -30,8 +30,8 @@ struct Renderer {
         else if(!strcmp(v.reason,"data_stale")){label=6;}
         else if(!strcmp(v.reason,"invalid")){label=8;}
         else if(!strcmp(v.reason,"distracted")){label=2;rgb=0xeb6262;}
-        else if(v.rate_half==2){label=0;rgb=0x68cf91;}
-        else if(v.rate_half==1){label=1;rgb=0xf0ac52;}
+        else if(v.rate_quarters==4){label=0;rgb=0x68cf91;}
+        else if(v.rate_quarters>0){label=1;rgb=0xf0ac52;}
         uint16_t color=pixel_design::rgb565(rgb);
         std::memset(surface.bytes,0,surface.stride*surface.height);
         float fraction=v.duration_ms?shown/v.duration_ms:0;

@@ -8,6 +8,7 @@
 
 #include "driver/isp_hist.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -367,7 +368,7 @@ static int pi_controller_update(pi_state_t *pi, uint32_t actual_bitrate_bps, uin
 /* HIST ISR-to-task communication (protected by spinlock) */
 static portMUX_TYPE s_hist_spinlock = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t s_latest_hist[MOTION_HIST_BINS];
-static volatile bool s_hist_ready = false;
+static atomic_bool s_hist_ready = false;
 
 /* HIST ISR callback: copies histogram to static buffer.
  * Runs in ISR context — must be fast and IRAM-safe. */
@@ -449,26 +450,163 @@ static bool motion_update(motion_state_t *ms, const uint32_t *curr_hist)
 typedef struct {
     camera_stream_config_t config;
     bool initialized;
-    bool running;
-    TaskHandle_t task_handle;
-    SemaphoreHandle_t lock;
+    atomic_bool running;
+    atomic_bool sender_stop;
+    bool hist_enabled, hist_started;
+    TaskHandle_t sender;
+    SemaphoreHandle_t exited; /* Producer joins before sender is told to exit. */
 
     /* Runtime state */
     atomic_int current_quality;
+    atomic_int trial_quality;       /* Q25/Q35 explicitly requested via the normal quality API */
+    atomic_int trial_ceiling;       /* LOW: 15, MID: 25, HIGH: 35 */
     atomic_int current_fps;
     atomic_int fps_limit; /* User ceiling; BBA must not override it. */
     atomic_int bba_fps;
 
     /* Statistics */
-    uint32_t frames_sent;
-    uint32_t frames_failed;
-    uint32_t frame_size_sum;
-    uint32_t frame_size_count;
+    atomic_uint frames_failed;
+    atomic_uint last_jpeg_bytes;
     int64_t last_stats_time;
-    float actual_fps;
 } stream_state_t;
 
 static stream_state_t s_state = {0};
+
+typedef struct {
+    uint8_t *jpeg;
+    camera_frame_info_t frame;
+    int64_t ready_us;
+} frame_slot_t;
+
+static frame_slot_t s_slots[2];
+static int s_pending = -1, s_inflight = -1;
+static portMUX_TYPE s_pipeline_lock = portMUX_INITIALIZER_UNLOCKED;
+static camera_pipeline_stats_t s_pipeline;
+/* Only public lifecycle/configuration operations take this gate. Neither
+ * worker takes it, so the owner may join both workers while holding it. */
+static atomic_flag s_lifecycle = ATOMIC_FLAG_INIT;
+static portMUX_TYPE s_control_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_control_busy, s_control_closing = true;
+static esp_err_t s_control_result = ESP_OK;
+static void (*s_control_completion)(esp_err_t result, void *context);
+static void *s_control_context;
+
+static void lifecycle_enter(void)
+{
+    while (atomic_flag_test_and_set(&s_lifecycle)) vTaskDelay(1);
+}
+
+void camera_stream_pipeline_stats(camera_pipeline_stats_t *out)
+{
+    portENTER_CRITICAL(&s_pipeline_lock);
+    *out = s_pipeline;
+    portEXIT_CRITICAL(&s_pipeline_lock);
+}
+
+static void publish_frame(camera_frame_info_t frame, const uint8_t *jpeg)
+{
+    /* One producer. Removing pending before copying makes the slot private.
+     * Sender can only claim a published slot, never this one mid-copy. */
+    portENTER_CRITICAL(&s_pipeline_lock);
+    int index = s_inflight == 0 ? 1 : 0;
+    if (s_pending >= 0) index = s_pending;
+    if (!s_slots[index].jpeg) {
+        ++s_pipeline.resource_drops;
+        portEXIT_CRITICAL(&s_pipeline_lock);
+        return;
+    }
+    if (s_pending >= 0) {
+        if (s_slots[index].frame.session == frame.session) ++s_pipeline.replaced;
+        else ++s_pipeline.stale;
+        s_pending = -1;
+    }
+    portEXIT_CRITICAL(&s_pipeline_lock);
+
+    frame_slot_t *slot = &s_slots[index];
+    memcpy(slot->jpeg, jpeg, frame.length);
+    slot->frame = frame;
+    slot->ready_us = esp_timer_get_time();
+    portENTER_CRITICAL(&s_pipeline_lock);
+    s_pending = index;
+    ++s_pipeline.enqueued;
+    portEXIT_CRITICAL(&s_pipeline_lock);
+    xTaskNotifyGive(s_state.sender);
+}
+
+static void send_pending_frame(void)
+{
+    portENTER_CRITICAL(&s_pipeline_lock);
+    int index = s_pending;
+    if (index < 0 || !s_state.running) {
+        portEXIT_CRITICAL(&s_pipeline_lock);
+        return;
+    }
+    s_inflight = index;
+    s_pending = -1;
+    portEXIT_CRITICAL(&s_pipeline_lock);
+
+    const frame_slot_t *slot = &s_slots[index];
+    const camera_frame_info_t f = slot->frame;
+    camera_delivery_t d = {.frame = f, .ready_wait_us = esp_timer_get_time() - slot->ready_us};
+    char header[96];
+    int n = snprintf(header, sizeof(header),
+                     "{\"type\":\"frame_header\",\"seq\":%u,\"capture_us\":%lld}",
+                     (unsigned)f.seq, (long long)f.capture_us);
+    ws_camera_send_result_t wire = {0};
+    bool valid = n > 0 && (size_t)n < sizeof(header);
+    esp_err_t ret = valid ? ws_manager_server_send_camera_pair(f.session, header, n,
+                               (const char *)slot->jpeg, f.length, &wire) : ESP_ERR_INVALID_SIZE;
+    d.lock_wait_us = wire.lock_wait_us;
+    d.network_us = wire.network_us;
+    d.wire_bytes = wire.wire_bytes;
+    d.socket_errno = wire.socket_errno;
+    d.residence_us = esp_timer_get_time() - f.capture_us;
+    uint32_t stack = uxTaskGetStackHighWaterMark(NULL);
+    portENTER_CRITICAL(&s_pipeline_lock);
+    if (ret == ESP_OK) {
+        d.reason = "sent";
+        ++s_pipeline.sent;
+        s_pipeline.jpeg_bytes += f.length;
+    } else if (ret == ESP_ERR_NOT_FOUND) {
+        d.reason = "stale_session";
+        ++s_pipeline.stale;
+    } else if (!valid) {
+        d.reason = "metadata";
+        ++s_pipeline.metadata_drops;
+        ++s_state.frames_failed;
+    } else {
+        d.reason = wire.budget_timeout ? (wire.wire_bytes ? "partial_timeout" : "zero_timeout") :
+                   ret == ESP_ERR_INVALID_STATE ? "server_stopped" : "connection_error";
+        ++s_pipeline.network_failures;
+        ++s_state.frames_failed;
+    }
+    s_pipeline.last_attempt = d;
+    if (ret != ESP_OK && ret != ESP_ERR_NOT_FOUND) s_pipeline.last_failure = d;
+    s_pipeline.sender_stack_min = stack;
+    s_inflight = -1;
+    portEXIT_CRITICAL(&s_pipeline_lock);
+}
+
+static void camera_sender_task(void *arg)
+{
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        if (s_state.sender_stop) break;
+        send_pending_frame();
+        /* A saturated mailbox can keep this priority-7 task ready forever.
+         * Release the CPU after releasing the camera mutex so priority-5
+         * HTTPD can handle Pong, Close, admission and identity requests. */
+        vTaskDelay(1);
+    }
+    xSemaphoreGive(s_state.exited);
+    vTaskDelete(NULL);
+}
+
+static void wait_frame_period(TickType_t start, TickType_t period)
+{
+    TickType_t elapsed = xTaskGetTickCount() - start;
+    vTaskDelay(elapsed < period ? period - elapsed : 1);
+}
 
 /*---------------------------------------------------------------
  * Internal: Streaming task
@@ -477,7 +615,7 @@ static void camera_stream_task(void *arg)
 {
     /* A restarted stream observes new failures, not old boot-history events. */
     ws_send_stats_t initial_ws_stats = {0};
-    (void)ws_manager_server_get_send_stats(&initial_ws_stats);
+    (void)ws_manager_server_take_send_stats(&initial_ws_stats);
     /* Initialize BBA state — start at MID level (current baseline) */
     bba_state_t bba = {
         .current_level       = BBA_LEVEL_MID,
@@ -503,11 +641,11 @@ static void camera_stream_task(void *arg)
 
     /* Successful JPEG payload accepted by the socket, not over-the-air bytes.
      * This clock advances only when its matching byte counter is cleared. */
-    uint64_t window_bytes_sent = 0;
     int64_t window_start_us = esp_timer_get_time();
 
     /* Apply initial BBA settings */
     s_state.current_quality = initial_quality;
+    s_state.trial_ceiling = 25;
     s_state.bba_fps         = s_bba_levels[bba.current_level].fps;
     s_state.current_fps     = MIN(s_bba_levels[bba.current_level].fps, applied_fps_limit);
 
@@ -520,7 +658,7 @@ static void camera_stream_task(void *arg)
 
     int64_t last_stats_log = esp_timer_get_time();
     int64_t diag_last_loop_us = 0, diag_loop_gap_us = 0;
-    int64_t diag_capture_us = 0, diag_encode_us = 0, diag_send_call_us = 0;
+    int64_t diag_capture_us = 0, diag_encode_us = 0;
     bool was_throttled     = false; /* Track throttle state for logging */
 
     while (s_state.running) {
@@ -537,7 +675,8 @@ static void camera_stream_task(void *arg)
          * PI  (fine):   adjusts JPEG quality within BBA level to track target bitrate. */
         if (cap_changed || (now - bba.last_eval_time) >= BBA_EVAL_INTERVAL_SEC * 1000000) {
             ws_send_stats_t ws_stats;
-            if (ws_manager_server_get_send_stats(&ws_stats) == ESP_OK) {
+            if (ws_manager_server_take_send_stats(&ws_stats) == ESP_OK) {
+                uint64_t window_bytes_sent = ws_stats.jpeg_bytes;
                 ws_camera_client_state_t camera = ws_manager_server_get_camera_state();
 
                 /* Accumulate window counters before resetting them. */
@@ -553,6 +692,8 @@ static void camera_stream_task(void *arg)
                 bool budget_changed = ws_stats.camera_budget_timeouts != bba.last_budget_timeouts;
                 bba_level_t prev_level = bba.current_level;
                 bba_level_t curr_level = bba_evaluate(&bba, &ws_stats, camera);
+                s_state.trial_ceiling = curr_level == BBA_LEVEL_LOW ? 15 :
+                                        curr_level == BBA_LEVEL_MID ? 25 : 35;
                 applied_fps_limit = fps_limit;
                 s_state.bba_fps = s_bba_levels[curr_level].fps;
                 s_state.current_fps = MIN(s_bba_levels[curr_level].fps, fps_limit);
@@ -575,7 +716,7 @@ static void camera_stream_task(void *arg)
                         pi.target_bitrate_bps = target_bitrate;
                         /* Static scenes still use the selected cadence, so
                          * they need the same PI feedback as moving scenes. */
-                        if (camera.connected && !fixed_low) {
+                        if (camera.connected && !fixed_low && (ws_stats.total_sent || ws_stats.total_failed)) {
                             int new_q = pi_controller_update(&pi, actual_bitrate, target_bitrate,
                                                              s_bba_levels[curr_level].quality,
                                                              &s_bba_q_ranges[curr_level],
@@ -587,10 +728,8 @@ static void camera_stream_task(void *arg)
                     }
                 }
 
-                /* Reset window and WS stats for next sampling period */
-                window_bytes_sent = 0;
+                /* The window was consumed atomically above. */
                 window_start_us = now;
-                ws_manager_server_reset_send_stats();
             } else {
                 /* An unobserved window cannot extend continuous health. Do
                  * not reset the PI byte counter or its clock on this path. */
@@ -622,11 +761,13 @@ static void camera_stream_task(void *arg)
         /* Capture frame */
         int64_t diag_stage_start_us = esp_timer_get_time();
         esp_err_t ret = camera_capture_frame(s_state.config.camera);
-        diag_capture_us = MAX(diag_capture_us, esp_timer_get_time() - diag_stage_start_us);
+        int64_t capture_us = esp_timer_get_time();
+        uint32_t capture_cost = capture_us - diag_stage_start_us;
+        diag_capture_us = MAX(diag_capture_us, capture_cost);
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "Frame capture failed: %s", esp_err_to_name(ret));
             s_state.frames_failed++;
-            vTaskDelayUntil(&tick_start, frame_period);
+            wait_frame_period(tick_start, frame_period);
             continue;
         }
 
@@ -658,76 +799,69 @@ static void camera_stream_task(void *arg)
         uint32_t jpeg_size = 0;
         int frame_fps_limit = atomic_load(&s_state.fps_limit);
         bool frame_fixed_low = frame_fps_limit <= ADAPTIVE_FPS_MIN;
-        int frame_quality = frame_fixed_low ? 15 : atomic_load(&s_state.current_quality);
+        int frame_quality = frame_fixed_low ? 15 : camera_stream_get_quality();
         effective_fps = MIN(effective_fps, frame_fps_limit);
         frame_period = pdMS_TO_TICKS(1000 / effective_fps);
         diag_stage_start_us = esp_timer_get_time();
         ret = camera_encode_jpeg(s_state.config.camera, frame_quality, &jpeg_size);
-        diag_encode_us = MAX(diag_encode_us, esp_timer_get_time() - diag_stage_start_us);
+        uint32_t encode_cost = esp_timer_get_time() - diag_stage_start_us;
+        diag_encode_us = MAX(diag_encode_us, encode_cost);
         if (ret != ESP_OK || jpeg_size == 0) {
             ESP_LOGW(TAG, "JPEG encode failed: %s", esp_err_to_name(ret));
             s_state.frames_failed++;
-            vTaskDelayUntil(&tick_start, frame_period);
+            wait_frame_period(tick_start, frame_period);
             continue;
         }
 
         /* Get JPEG buffer */
+        s_state.last_jpeg_bytes = jpeg_size;
         const uint8_t *jpeg_buf = camera_get_jpeg_buffer(s_state.config.camera);
         if (!jpeg_buf) {
             ESP_LOGW(TAG, "JPEG buffer NULL");
             s_state.frames_failed++;
-            vTaskDelayUntil(&tick_start, frame_period);
+            wait_frame_period(tick_start, frame_period);
             continue;
         }
 
-        /* Send frame_header text frame (JSON) + JPEG binary frame as one
-         * atomic batch (ws_manager_server_send_camera_pair). The algorithm
-         * client (docker main-client) pairs the header with the following
-         * binary frame to obtain the frame sequence for drop / out-of-order
-         * detection. timestamp is intentionally omitted: ESP32 has no SNTP,
-         * so esp_timer_get_time() is uptime (not Unix epoch); the algorithm
-         * client falls back to its local time.time()*1000 when the
-         * "timestamp" field is absent. Only the /camera client receives the
-         * pair; /mcp and /algo clients are not disturbed. Sending both frames
-         * inside one s_server_mutex critical section prevents interleaving
-         * with frames sent by other tasks (previously a WS corruption issue). */
-        s_frame_seq++;
-        char header_buf[64];
-        int header_len =
-            snprintf(header_buf, sizeof(header_buf), "{\"type\":\"frame_header\",\"seq\":%u}", (unsigned)s_frame_seq);
+        camera_frame_info_t frame = {.seq = ++s_frame_seq, .session = camera.session_id,
+            .length = jpeg_size, .capture_us = capture_us, .capture_cost_us = capture_cost,
+            .encode_us = encode_cost};
         ret = ESP_OK;
-        int64_t send_call_start_us = esp_timer_get_time();
-        if (header_len > 0 && header_len < (int)sizeof(header_buf)) {
-            ret = ws_manager_server_send_camera_pair(header_buf, header_len, (const char *)jpeg_buf, (int)jpeg_size);
-        } else {
-            /* Header build failure: fall back to sending just the binary frame */
-            ret = ws_manager_server_broadcast_binary((const char *)jpeg_buf, (int)jpeg_size);
+        if (camera.connected && s_state.running) {
+            if (jpeg_size <= WS_CAMERA_MAX_JPEG) {
+                publish_frame(frame, jpeg_buf);
+            } else {
+                ret = ESP_ERR_INVALID_SIZE;
+                ++s_state.frames_failed;
+                portENTER_CRITICAL(&s_pipeline_lock);
+                ++s_pipeline.oversize;
+                s_pipeline.last_failure = (camera_delivery_t){.frame = frame, .reason = "oversize"};
+                portEXIT_CRITICAL(&s_pipeline_lock);
+            }
         }
-        /* Optional per-frame trace. Call time includes waiting for the send
-         * mutex; the WS group's dur_ms measures only its own send deadline. */
-        ESP_LOGD(TAG, "Frame: seq=%u actualQ=%d mode=%s jpeg=%u send_call_ms=%lld ret=%s",
-                 (unsigned)s_frame_seq, frame_quality, frame_fixed_low ? "fixed-low" : "adaptive",
-                 (unsigned)jpeg_size, (long long)((esp_timer_get_time() - send_call_start_us) / 1000),
-                 esp_err_to_name(ret));
-
-        diag_send_call_us = MAX(diag_send_call_us, esp_timer_get_time() - send_call_start_us);
-
-        /* Send failures are tracked by ws_manager's send stats which BBA reads.
-         * ESP_ERR_NOT_FOUND (no /camera client) is not counted as a failure. */
-        if (ret == ESP_OK) {
-            s_state.frames_sent++;
-            s_state.frame_size_sum += jpeg_size;
-            s_state.frame_size_count++;
-            window_bytes_sent += jpeg_size; /* For PI bitrate measurement */
-        } else if (ret != ESP_ERR_NOT_FOUND) {
-            s_state.frames_failed++;
+        uint32_t work_us = esp_timer_get_time() - now;
+        uint32_t stack_min = uxTaskGetStackHighWaterMark(NULL);
+        portENTER_CRITICAL(&s_pipeline_lock);
+        s_pipeline.produced = frame;
+        s_pipeline.producer_work_us = work_us;
+        s_pipeline.producer_stack_min = stack_min;
+        portEXIT_CRITICAL(&s_pipeline_lock);
+        /* Oversize is rejected before the socket statistics are updated. Let
+         * the next frame use LOW and require the normal healthy recovery. */
+        if (ret == ESP_ERR_INVALID_SIZE && frame_quality > 18 && s_state.trial_quality) {
+            bba.current_level = bba.pending_level = BBA_LEVEL_LOW;
+            bba.healthy_since = 0;
+            bba.hysteresis_counter = 0;
+            s_state.bba_fps = s_state.current_fps = ADAPTIVE_FPS_MIN;
+            s_state.trial_ceiling = s_state.current_quality = 15;
+            pi_controller_reset(&pi, 15, stream_target_bitrate(BBA_LEVEL_LOW, frame_fps_limit));
         }
 
         /* Periodic stats log (every 10 seconds) */
         now = esp_timer_get_time();
         if (now - last_stats_log >= 10 * 1000 * 1000) {
-            uint32_t avg_size =
-                (s_state.frame_size_count > 0) ? (s_state.frame_size_sum / s_state.frame_size_count) : 0;
+            uint32_t avg_size, completed;
+            camera_stream_get_stats(&completed, NULL, &avg_size, NULL);
             /* Fetch latest ws stats to expose link send duration (throughput
              * diagnostic: avg_size/avg_dur ≈ effective link throughput). */
             int64_t ws_avg_dur_ms  = 0;
@@ -744,9 +878,9 @@ static void camera_stream_task(void *arg)
                      "[camera: connected=%d session=%u budget_total=%u] "
                      "[PI: actual=%lu target=%lu B/s integral=%.2f] "
                      "[motion: %s SAD=%.4f static_cnt=%d] "
-                     "[stage_max_ms: loop_gap=%lld capture=%lld encode=%lld send_call=%lld]",
-                     (unsigned)s_state.frames_sent, (unsigned)s_state.frames_failed, (unsigned)avg_size, effective_fps,
-                     frame_quality, frame_fixed_low ? "fixed-low" : "adaptive", bba.current_level,
+                     "[stage_max_ms: loop_gap=%lld capture=%lld encode=%lld]",
+                     (unsigned)completed, (unsigned)s_state.frames_failed, (unsigned)avg_size, effective_fps,
+                     frame_quality, frame_fixed_low ? "fixed-low" : s_state.trial_quality ? "clarity" : "adaptive", bba.current_level,
                      (unsigned)bba.accum_sent, (unsigned)bba.accum_failed,
                      (long long)ws_avg_dur_ms, (long long)ws_last_dur_ms,
                      camera_log.connected, (unsigned)camera_log.session_id,
@@ -754,24 +888,24 @@ static void camera_stream_task(void *arg)
                      (unsigned long)pi.target_bitrate_bps, pi.integral, motion.is_static ? "STATIC" : "ACTIVE",
                      motion.last_sad, motion.static_count,
                      (long long)(diag_loop_gap_us / 1000), (long long)(diag_capture_us / 1000),
-                     (long long)(diag_encode_us / 1000), (long long)(diag_send_call_us / 1000));
-            diag_loop_gap_us = diag_capture_us = diag_encode_us = diag_send_call_us = 0;
+                     (long long)(diag_encode_us / 1000));
+            diag_loop_gap_us = diag_capture_us = diag_encode_us = 0;
             last_stats_log = now;
         }
 
         /* Delay to maintain effective FPS */
-        vTaskDelayUntil(&tick_start, frame_period);
+        wait_frame_period(tick_start, frame_period);
     }
 
     ESP_LOGI(TAG, "Streaming task ended");
-    s_state.task_handle = NULL;
+    xSemaphoreGive(s_state.exited);
     vTaskDelete(NULL);
 }
 
 /*---------------------------------------------------------------
  * Public API
  *-------------------------------------------------------------*/
-esp_err_t camera_stream_init(const camera_stream_config_t *config)
+static esp_err_t stream_init_locked(const camera_stream_config_t *config)
 {
     if (s_state.initialized) {
         return ESP_ERR_INVALID_STATE;
@@ -780,7 +914,6 @@ esp_err_t camera_stream_init(const camera_stream_config_t *config)
         return ESP_ERR_INVALID_ARG;
     }
 
-    memset(&s_state, 0, sizeof(s_state));
     memcpy(&s_state.config, config, sizeof(*config));
 
     /* Apply defaults */
@@ -798,13 +931,11 @@ esp_err_t camera_stream_init(const camera_stream_config_t *config)
     }
 
     s_state.current_quality = s_state.config.default_quality;
+    s_state.trial_quality = 0;
+    s_state.bba_fps = s_state.config.default_fps;
+    s_state.trial_ceiling   = 25;
     s_state.current_fps     = s_state.config.default_fps;
     s_state.fps_limit       = s_state.config.default_fps;
-
-    s_state.lock = xSemaphoreCreateMutex();
-    if (!s_state.lock) {
-        return ESP_ERR_NO_MEM;
-    }
 
     s_state.initialized = true;
     ESP_LOGI(TAG, "Initialized (quality=%d, fps=%d, stack=%d, prio=%d)", s_state.current_quality, s_state.current_fps,
@@ -812,19 +943,29 @@ esp_err_t camera_stream_init(const camera_stream_config_t *config)
     return ESP_OK;
 }
 
-void camera_stream_deinit(void)
+static void free_sender_resources(void)
 {
-    if (s_state.running) {
-        camera_stream_stop();
+    for (unsigned i = 0; i < 2; ++i) {
+        heap_caps_free(s_slots[i].jpeg);
+        s_slots[i].jpeg = NULL;
     }
-    if (s_state.lock) {
-        vSemaphoreDelete(s_state.lock);
-        s_state.lock = NULL;
-    }
-    s_state.initialized = false;
+    if (s_state.exited) vSemaphoreDelete(s_state.exited);
+    s_state.exited = NULL;
 }
 
-esp_err_t camera_stream_start(void)
+static void stop_hist_statistics(void)
+{
+    if (s_state.hist_started) {
+        esp_isp_hist_controller_stop_continuous_statistics(s_state.config.camera->hist_ctlr);
+        s_state.hist_started = false;
+    }
+    if (s_state.hist_enabled) {
+        esp_isp_hist_controller_disable(s_state.config.camera->hist_ctlr);
+        s_state.hist_enabled = false;
+    }
+}
+
+static esp_err_t stream_start_locked(void)
 {
     if (!s_state.initialized) {
         return ESP_ERR_INVALID_STATE;
@@ -843,9 +984,18 @@ esp_err_t camera_stream_start(void)
      * perform a full deinit/init cycle instead.
      * Decision: marked as known issue (2026-07-24, user confirmed). */
 
+    s_state.exited = xSemaphoreCreateBinary();
+    for (unsigned i = 0; i < 2; ++i)
+        s_slots[i].jpeg = heap_caps_malloc(WS_CAMERA_MAX_JPEG, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_state.exited || !s_slots[0].jpeg || !s_slots[1].jpeg) {
+        free_sender_resources();
+        return ESP_ERR_NO_MEM;
+    }
+
     /* Start camera pipeline */
     esp_err_t ret = camera_controller_start(s_state.config.camera);
     if (ret != ESP_OK) {
+        free_sender_resources();
         ESP_LOGE(TAG, "Camera start failed: %s", esp_err_to_name(ret));
         return ret;
     }
@@ -867,11 +1017,13 @@ esp_err_t camera_stream_start(void)
             if (ret != ESP_OK) {
                 ESP_LOGW(TAG, "Failed to enable HIST controller: %s", esp_err_to_name(ret));
             } else {
+                s_state.hist_enabled = true;
                 ret = esp_isp_hist_controller_start_continuous_statistics(s_state.config.camera->hist_ctlr);
                 if (ret != ESP_OK) {
                     ESP_LOGW(TAG, "Failed to start HIST continuous stats: %s (motion detection disabled)",
                              esp_err_to_name(ret));
                 } else {
+                    s_state.hist_started = true;
                     ESP_LOGI(TAG, "HIST callback registered, controller enabled and stats started");
                 }
             }
@@ -881,22 +1033,36 @@ esp_err_t camera_stream_start(void)
     }
 
     s_state.running          = true;
-    s_state.frames_sent      = 0;
+    s_state.last_jpeg_bytes  = 0;
     s_state.frames_failed    = 0;
-    s_state.frame_size_sum   = 0;
-    s_state.frame_size_count = 0;
-    s_state.last_stats_time  = esp_timer_get_time();
+    s_state.sender_stop = false;
+    portENTER_CRITICAL(&s_pipeline_lock);
+    s_pipeline = (camera_pipeline_stats_t){0};
+    s_state.last_stats_time = esp_timer_get_time();
+    s_pending = s_inflight = -1;
+    portEXIT_CRITICAL(&s_pipeline_lock);
 
     /* Create streaming task on core 1 with elevated priority.
      * Pinning to core 1 isolates camera streaming from display/LVGL (core 0),
      * reducing scheduling jitter. Priority 8 ensures timely frame processing
      * while still below WiFi/LWIP system tasks. */
-    BaseType_t xret = xTaskCreatePinnedToCore(camera_stream_task, "cam_stream", s_state.config.task_stack_size, NULL, 8,
-                                              &s_state.task_handle, 1);
+    BaseType_t xret = xTaskCreatePinnedToCore(camera_sender_task, "cam_send", 4096, NULL, 7,
+                                              &s_state.sender, 1);
+    if (xret == pdPASS) {
+        xret = xTaskCreatePinnedToCore(camera_stream_task, "cam_stream", s_state.config.task_stack_size,
+                                       NULL, 8, NULL, 1);
+        if (xret != pdPASS) {
+            s_state.sender_stop = true;
+            xTaskNotifyGive(s_state.sender);
+            xSemaphoreTake(s_state.exited, portMAX_DELAY);
+        }
+    }
     if (xret != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create streaming task");
         s_state.running = false;
+        s_state.sender = NULL;
+        stop_hist_statistics();
         camera_controller_stop(s_state.config.camera);
+        free_sender_resources();
         return ESP_ERR_NO_MEM;
     }
 
@@ -904,7 +1070,7 @@ esp_err_t camera_stream_start(void)
     return ESP_OK;
 }
 
-esp_err_t camera_stream_stop(void)
+static esp_err_t stream_stop_locked(void)
 {
     if (!s_state.running) {
         return ESP_ERR_INVALID_STATE;
@@ -912,19 +1078,134 @@ esp_err_t camera_stream_stop(void)
 
     s_state.running = false;
 
-    /* Wait for task to exit */
-    while (s_state.task_handle != NULL) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
+    xSemaphoreTake(s_state.exited, portMAX_DELAY); /* Producer cannot notify sender past here. */
+    s_state.sender_stop = true;
+    xTaskNotifyGive(s_state.sender);
+    xSemaphoreTake(s_state.exited, portMAX_DELAY); /* Last network write returned. */
+    s_state.sender = NULL;
+    portENTER_CRITICAL(&s_pipeline_lock);
+    if (s_pending >= 0) ++s_pipeline.stopped;
+    s_pending = -1;
+    portEXIT_CRITICAL(&s_pipeline_lock);
+    free_sender_resources();
 
+    stop_hist_statistics();
     /* Stop camera pipeline */
     esp_err_t ret = camera_controller_stop(s_state.config.camera);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Camera stop failed: %s", esp_err_to_name(ret));
     }
 
-    ESP_LOGI(TAG, "Streaming stopped (sent=%u, failed=%u)", (unsigned)s_state.frames_sent,
+    ESP_LOGI(TAG, "Streaming stopped (sent=%u, failed=%u)", (unsigned)s_pipeline.sent,
              (unsigned)s_state.frames_failed);
+    return ESP_OK;
+}
+
+esp_err_t camera_stream_init(const camera_stream_config_t *config)
+{
+    lifecycle_enter();
+    esp_err_t ret = stream_init_locked(config);
+    if (ret == ESP_OK) {
+        portENTER_CRITICAL(&s_control_lock);
+        s_control_closing = false;
+        s_control_result = ESP_OK;
+        portEXIT_CRITICAL(&s_control_lock);
+    }
+    atomic_flag_clear(&s_lifecycle);
+    return ret;
+}
+
+esp_err_t camera_stream_start(void)
+{
+    lifecycle_enter();
+    esp_err_t ret = stream_start_locked();
+    atomic_flag_clear(&s_lifecycle);
+    return ret;
+}
+
+esp_err_t camera_stream_stop(void)
+{
+    lifecycle_enter();
+    esp_err_t ret = stream_stop_locked();
+    atomic_flag_clear(&s_lifecycle);
+    return ret;
+}
+
+void camera_stream_deinit(void)
+{
+    portENTER_CRITICAL(&s_control_lock);
+    s_control_closing = true;
+    bool busy = s_control_busy;
+    portEXIT_CRITICAL(&s_control_lock);
+    while (busy) {
+        vTaskDelay(1);
+        camera_stream_get_control_status(&busy, NULL);
+    }
+    lifecycle_enter();
+    if (s_state.running) stream_stop_locked();
+    s_state.initialized = false;
+    atomic_flag_clear(&s_lifecycle);
+}
+
+void camera_stream_get_control_status(bool *busy, esp_err_t *last_result)
+{
+    portENTER_CRITICAL(&s_control_lock);
+    if (busy) *busy = s_control_busy;
+    if (last_result) *last_result = s_control_result;
+    portEXIT_CRITICAL(&s_control_lock);
+}
+
+static void camera_control_task(void *arg)
+{
+    bool start = (bool)(uintptr_t)arg;
+    lifecycle_enter();
+    esp_err_t result = ESP_ERR_INVALID_STATE;
+    if (s_state.initialized) {
+        result = ESP_OK;
+        if (s_state.running != start) {
+            if (start) result = stream_start_locked();
+            else result = stream_stop_locked();
+        }
+    }
+    atomic_flag_clear(&s_lifecycle);
+    /* The lifecycle owner has finished touching resources before reopening
+     * admission. A failed operation is observable without retrying it. */
+    portENTER_CRITICAL(&s_control_lock);
+    s_control_result = result;
+    void (*completion)(esp_err_t, void *) = s_control_completion;
+    void *context = s_control_context;
+    portEXIT_CRITICAL(&s_control_lock);
+    if (completion) completion(result, context);
+    portENTER_CRITICAL(&s_control_lock);
+    s_control_completion = NULL;
+    s_control_context = NULL;
+    s_control_busy = false;
+    portEXIT_CRITICAL(&s_control_lock);
+    vTaskDelete(NULL);
+}
+
+esp_err_t camera_stream_request_control(bool start,
+                                       void (*completion)(esp_err_t result, void *context), void *context)
+{
+    portENTER_CRITICAL(&s_control_lock);
+    if (s_control_closing || s_control_busy) {
+        portEXIT_CRITICAL(&s_control_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_control_busy = true;
+    s_control_completion = completion;
+    s_control_context = context;
+    portEXIT_CRITICAL(&s_control_lock);
+    if (xTaskCreate(camera_control_task, "cam_control", 4096,
+                    (void *)(uintptr_t)start, 5, NULL) != pdPASS) {
+        portENTER_CRITICAL(&s_control_lock);
+        s_control_result = ESP_ERR_NO_MEM;
+        s_control_completion = NULL;
+        s_control_context = NULL;
+        s_control_busy = false;
+        portEXIT_CRITICAL(&s_control_lock);
+        return ESP_ERR_NO_MEM;
+    }
     return ESP_OK;
 }
 
@@ -938,12 +1219,15 @@ esp_err_t camera_stream_set_quality(int quality)
     if (quality < 1 || quality > 100) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(100)) != pdTRUE) {
-        return ESP_ERR_TIMEOUT;
+    if (atomic_flag_test_and_set(&s_lifecycle)) return ESP_ERR_INVALID_STATE;
+    if (!s_state.initialized) {
+        atomic_flag_clear(&s_lifecycle);
+        return ESP_ERR_INVALID_STATE;
     }
     int applied_quality = s_state.fps_limit <= ADAPTIVE_FPS_MIN ? 15 : quality;
     s_state.current_quality = applied_quality;
-    xSemaphoreGive(s_state.lock);
+    s_state.trial_quality = (quality == 25 || quality == 35) ? quality : 0;
+    atomic_flag_clear(&s_lifecycle);
     ESP_LOGD(TAG, "Quality requested=%d applied=%d", quality, applied_quality);
     return ESP_OK;
 }
@@ -953,22 +1237,37 @@ esp_err_t camera_stream_set_fps(int fps)
     if (fps < 1 || fps > 30) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(100)) != pdTRUE) {
-        return ESP_ERR_TIMEOUT;
+    if (atomic_flag_test_and_set(&s_lifecycle)) return ESP_ERR_INVALID_STATE;
+    if (!s_state.initialized) {
+        atomic_flag_clear(&s_lifecycle);
+        return ESP_ERR_INVALID_STATE;
     }
     s_state.fps_limit = fps;
     s_state.current_fps = MIN((int)s_state.bba_fps, fps);
     if (fps <= ADAPTIVE_FPS_MIN) {
         s_state.current_quality = 15;
     }
-    xSemaphoreGive(s_state.lock);
+    atomic_flag_clear(&s_lifecycle);
     ESP_LOGD(TAG, "FPS set to %d", fps);
     return ESP_OK;
 }
 
 int camera_stream_get_quality(void)
 {
-    return s_state.fps_limit <= ADAPTIVE_FPS_MIN ? 15 : (int)s_state.current_quality;
+    int trial = atomic_load(&s_state.trial_quality);
+    int ceiling = atomic_load(&s_state.trial_ceiling);
+    return s_state.fps_limit <= ADAPTIVE_FPS_MIN ? 15 :
+           trial ? MIN(trial, ceiling) : (int)s_state.current_quality;
+}
+
+int camera_stream_get_trial_quality(void)
+{
+    return atomic_load(&s_state.trial_quality);
+}
+
+uint32_t camera_stream_last_jpeg_bytes(void)
+{
+    return atomic_load(&s_state.last_jpeg_bytes);
 }
 
 int camera_stream_get_fps(void)
@@ -979,17 +1278,22 @@ int camera_stream_get_fps(void)
 void camera_stream_get_stats(uint32_t *frames_sent, uint32_t *frames_failed, uint32_t *avg_frame_size,
                              float *avg_fps_actual)
 {
+    portENTER_CRITICAL(&s_pipeline_lock);
+    uint64_t bytes = s_pipeline.jpeg_bytes;
+    uint32_t sent = s_pipeline.sent;
+    int64_t started = s_state.last_stats_time;
+    portEXIT_CRITICAL(&s_pipeline_lock);
     if (frames_sent)
-        *frames_sent = s_state.frames_sent;
+        *frames_sent = sent;
     if (frames_failed)
         *frames_failed = s_state.frames_failed;
     if (avg_frame_size) {
-        *avg_frame_size = (s_state.frame_size_count > 0) ? (s_state.frame_size_sum / s_state.frame_size_count) : 0;
+        *avg_frame_size = sent ? bytes / sent : 0;
     }
     if (avg_fps_actual) {
-        int64_t elapsed_us = esp_timer_get_time() - s_state.last_stats_time;
-        if (elapsed_us > 0 && s_state.frames_sent > 0) {
-            *avg_fps_actual = (float)s_state.frames_sent * 1000000.0f / (float)elapsed_us;
+        int64_t elapsed_us = esp_timer_get_time() - started;
+        if (elapsed_us > 0 && sent > 0) {
+            *avg_fps_actual = (float)sent * 1000000.0f / (float)elapsed_us;
         } else {
             *avg_fps_actual = 0.0f;
         }

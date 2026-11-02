@@ -58,22 +58,22 @@ static void cadence_tests(unsigned period)
         uint32_t inference=(frame-1)/period+1;
         int64_t class_age=(int64_t)((frame-1)%period)*1000000+(int64_t)sample_age*1000;
         assert(focus_clock_sample(&clock,frame,inference,class_age,(int64_t)sample_age*1000,
-            true,2,(int64_t)frame*1000000));
-        if(frame<=period)assert(clock.rate_half==0);
-        else if(class_age>=FOCUS_CLASS_TTL_US)assert(clock.rate_half==0 && clock.reason==FOCUS_STALE);
-        else assert(clock.rate_half==2 && clock.reason==FOCUS_RUN);
+            true,4,(int64_t)frame*1000000));
+        if(frame<=period)assert(clock.rate_quarters==0);
+        else if(class_age>=FOCUS_CLASS_TTL_US)assert(clock.rate_quarters==0 && clock.reason==FOCUS_STALE);
+        else assert(clock.rate_quarters==4 && clock.reason==FOCUS_RUN);
         if(frame==10){
             focus_sync_recovery_t recovery={0};
             assert(!focus_sync_failed(&recovery,0));
             /* A transient HTTP error freezes transport observation, not the
              * controller's identity, pending classification or elapsed progress. */
-            assert(clock.candidate_half==2);
+            assert(clock.candidate_quarters==4);
         }
     }
     assert(clock.remaining_us<120000000);
     int64_t expiry=clock.expires_us;
     focus_clock_settle(&clock,expiry+5000000);
-    assert(clock.rate_half==0 && clock.reason==FOCUS_STALE);
+    assert(clock.rate_quarters==0 && clock.reason==FOCUS_STALE);
     int64_t paused=clock.remaining_us;
     focus_clock_settle(&clock,expiry+10000000);
     assert(clock.remaining_us==paused);

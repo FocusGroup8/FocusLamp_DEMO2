@@ -1,7 +1,8 @@
 #pragma once
 
-/* Manual HTTP controls only. Existing actions, gestures and home retain their
- * existing behavior. Servo numbering follows the arm from BOTTOM to TOP:
+/* Manual HTTP controls and the four relative emotion demo plans use these
+ * intervals. Other existing actions, gestures and home retain their behavior.
+ * Servo numbering follows the arm from BOTTOM to TOP:
  *   1=LX bus 1/axis 1, 2=LX bus 2/axis 2, 3=LX bus 3/axis 3,
  *   4=EM3 bus 4/axis 0, 5=LX bus 5/axis 4.
  *
@@ -28,8 +29,8 @@
 #define MOTION_MANUAL_SERVO_3_MAX_RAW 877
 
 #define MOTION_MANUAL_SERVO_4_ENABLED 1
-#define MOTION_MANUAL_SERVO_4_MIN_RAW 527
-#define MOTION_MANUAL_SERVO_4_MAX_RAW 2350
+#define MOTION_MANUAL_SERVO_4_MIN_RAW 1500
+#define MOTION_MANUAL_SERVO_4_MAX_RAW 3000
 
 #define MOTION_MANUAL_SERVO_5_ENABLED 1
 #define MOTION_MANUAL_SERVO_5_MIN_RAW 100

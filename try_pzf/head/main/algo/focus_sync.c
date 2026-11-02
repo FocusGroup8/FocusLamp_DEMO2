@@ -1,5 +1,6 @@
 #include "focus_sync.h"
 #include "focus_sync_recovery.h"
+#include "focus_rate_protocol.h"
 #include "../../../shared/focus_transport_age.h"
 #include <math.h>
 #include <stdio.h>
@@ -222,14 +223,14 @@ static void worker(void *unused)
         focus_view_t next={0};uint32_t next_token=0,next_observed=0;
         const cJSON *mode=cJSON_GetObjectItemCaseSensitive(reply,"mode");
         const cJSON *reason=cJSON_GetObjectItemCaseSensitive(reply,"pause_reason");
-        uint32_t rate=0;
+        int rate=0;
         bool ok=cJSON_IsString(mode)&&cJSON_IsString(reason)&&number(reply,"controller_boot_id",&next.boot)&&
             number(reply,"uptime_ms",&next_observed)&&number(reply,"session_id",&next.session)&&number(reply,"seq",&next.seq)&&
             number(reply,"remaining_ms",&next.remaining_ms)&&number(reply,"duration_ms",&next.duration_ms)&&
-            number(reply,"rate_half",&rate)&&rate<=2&&number(reply,"engagement_token",&next_token);
+            focus_rate_quarters(reply,&rate)&&number(reply,"engagement_token",&next_token);
         if(ok){
             next.focus=!strcmp(mode->valuestring,"focus");next.completed=cJSON_IsTrue(cJSON_GetObjectItem(reply,"completed"));
-            next.paused=cJSON_IsTrue(cJSON_GetObjectItem(reply,"paused"));next.rate_half=rate;
+            next.paused=cJSON_IsTrue(cJSON_GetObjectItem(reply,"paused"));next.rate_quarters=rate;
             next.fresh=true;next.received_us=reply_received_us;
             snprintf(next.reason,sizeof(next.reason),"%s",reason->valuestring);
             portENTER_CRITICAL(&lock);

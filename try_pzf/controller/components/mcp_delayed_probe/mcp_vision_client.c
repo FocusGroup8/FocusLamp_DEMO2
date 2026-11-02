@@ -14,6 +14,11 @@
 #define RESPONSE_SIZE 12288
 static portMUX_TYPE s_lock=portMUX_INITIALIZER_UNLOCKED;
 static char s_url[URL_SIZE];
+static void (*accepted_callback)(void);
+void mcp_vision_set_accepted_callback(void (*callback)(void))
+{
+    portENTER_CRITICAL(&s_lock); accepted_callback=callback; portEXIT_CRITICAL(&s_lock);
+}
 static const char *TAG="MCP_VISION";
 
 esp_err_t mcp_vision_set_url(const char *url)
@@ -130,6 +135,9 @@ char *mcp_vision_answer(const char *question,mcp_probe_guard_t current,void *con
     if (!cJSON_IsString(id) || !valid_id(id->valuestring)) { cJSON_Delete(json);return text_copy("识图服务返回的请求编号无效。"); }
     snprintf(request_id,sizeof(request_id),"%s",id->valuestring);
     ESP_LOGI(TAG,"accepted VQA request_id=%s (question only; image stays on PC)",request_id);
+    void (*callback)(void);
+    portENTER_CRITICAL(&s_lock); callback=accepted_callback; portEXIT_CRITICAL(&s_lock);
+    if (callback && (!current || current(context))) callback();
     while (current(context)) {
         const cJSON *record=item(json,"result"), *rid=item(record,"request_id"), *state=item(record,"state");
         if (!cJSON_IsString(rid) || strcmp(rid->valuestring,request_id) || !cJSON_IsString(state)) {

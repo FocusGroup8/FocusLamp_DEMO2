@@ -1,3 +1,5 @@
+#include "joke_scene.h"
+#include "controller_modes.h"
 /*
  * tts_http_api.c - HTTP endpoints for remote control from the head/base board
  *
@@ -287,6 +289,9 @@ static esp_err_t detect_phone_handler(httpd_req_t *req)
         return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"tts enqueue failed\"}");
     }
 
+    controller_modes_status_t scene_mode;
+    if (controller_modes_get_status(&scene_mode)==ESP_OK && scene_mode.mode==APP_STATE_FOCUS)
+        joke_scene_note_distraction();
     ESP_LOGI(TAG, "Detect reminder queued: %s", text);
     httpd_resp_set_status(req, "200 OK");
     return httpd_resp_sendstr(req, "{\"ok\":true}");
@@ -839,6 +844,52 @@ static const httpd_uri_t arm_jog_uri={
     .uri="/api/arm/jog", .method=HTTP_POST, .handler=arm_jog_handler,
 };
 
+/* Explicit demo trigger only; camera emotion results never call this route. */
+static esp_err_t arm_emotion_handler(httpd_req_t *req)
+{
+    char body[129];
+    if (arm_read_body(req,body,true)!=ESP_OK) return ESP_FAIL;
+    cJSON *root=cJSON_ParseWithOpts(body,NULL,true);
+    const cJSON *emotion=cJSON_GetObjectItemCaseSensitive(root,"emotion");
+    const cJSON *intensity=cJSON_GetObjectItemCaseSensitive(root,"intensity");
+    if (!cJSON_IsObject(root) || !cJSON_IsString(emotion) ||
+        (strcmp(emotion->valuestring,"happy") && strcmp(emotion->valuestring,"angry") &&
+         strcmp(emotion->valuestring,"curious") && strcmp(emotion->valuestring,"sleepy")) ||
+        (intensity && (!cJSON_IsNumber(intensity) || intensity->valuedouble<0 ||
+         intensity->valuedouble>100 || intensity->valuedouble!=intensity->valueint))) {
+        cJSON_Delete(root);
+        httpd_resp_set_status(req,"400 Bad Request");
+        return httpd_resp_sendstr(req,"{\"ok\":false,\"error\":\"Expected emotion happy/angry/curious/sleepy and integer intensity 0..100\"}");
+    }
+    motion_action_params_t params={.intensity=intensity ? intensity->valueint : 50,
+        .speed=30,.repeat_count=1,.mode=MOTION_MODE_COMPANY};
+    esp_err_t ret=motion_action_execute_async(emotion->valuestring,&params);
+    cJSON_Delete(root);
+    return arm_response(req,ret,"{\"ok\":true,\"accepted\":true,\"completed\":false}");
+}
+static const httpd_uri_t arm_emotion_uri={
+    .uri="/api/arm/emotion", .method=HTTP_POST, .handler=arm_emotion_handler,
+};
+
+static esp_err_t arm_emotion_status_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req,"application/json");
+    httpd_resp_set_hdr(req,"Cache-Control","no-store");
+    motion_controller_status_t state;
+    if (motion_controller_get_status(&state)!=ESP_OK) {
+        httpd_resp_set_status(req,"503 Service Unavailable");
+        return httpd_resp_sendstr(req,"{\"ok\":false,\"error\":\"executor unavailable\"}");
+    }
+    char response[160];
+    snprintf(response,sizeof(response),"{\"ok\":true,\"motion_busy\":%s,\"action_status\":\"%s\"}",
+        state.state==MOTION_STATE_EXECUTING ? "true" : "false",
+        arm_action_status_name(state.action_status));
+    return httpd_resp_sendstr(req,response);
+}
+static const httpd_uri_t arm_emotion_status_uri={
+    .uri="/api/arm/emotion", .method=HTTP_GET, .handler=arm_emotion_status_handler,
+};
+
 static esp_err_t arm_gesture_handler(httpd_req_t *req)
 {
     char body[129];
@@ -943,6 +994,11 @@ esp_err_t tts_http_api_init(void)
         ESP_LOGE(TAG, "Failed to register /api/ambient: %s", esp_err_to_name(ret));
         return ret;
     }
+
+    ret = ws_manager_server_register_uri(&arm_emotion_uri);
+    if (ret != ESP_OK) return ret;
+    ret = ws_manager_server_register_uri(&arm_emotion_status_uri);
+    if (ret != ESP_OK) return ret;
 
     ret = ws_manager_server_register_uri(&arm_gesture_uri);
     if (ret != ESP_OK) {

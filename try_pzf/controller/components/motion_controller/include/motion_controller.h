@@ -72,5 +72,6 @@ esp_err_t motion_controller_get_position_snapshot(motion_position_snapshot_t *ou
 
 /* Internal action-library interface; callers outside this component must not use these. */
 bool motion_library_has_action(const char *name);
-void motion_library_run(const char *name, const motion_action_params_t *params);
+esp_err_t motion_library_run(const char *name, const motion_action_params_t *params,
+                             const int16_t start[5]);
 void motion_send_pose(const int16_t pos[5], uint16_t time_ms, uint16_t speed);

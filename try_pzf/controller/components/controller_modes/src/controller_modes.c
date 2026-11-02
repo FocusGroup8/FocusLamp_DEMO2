@@ -69,18 +69,20 @@ static void snapshot_locked(controller_modes_status_t *out)
         .duration_sec = s_duration_sec,
         .remaining_sec = remaining_us > 0 ? (uint32_t)((remaining_us + 999999) / 1000000) : 0,
         .voice_active = s_voice_active,
-        .paused = s_mode == APP_STATE_FOCUS && !s_completed && (s_voice_active || !s_focus.rate_half),
+        .paused = s_mode == APP_STATE_FOCUS && !s_completed && (s_voice_active || !s_focus.rate_quarters),
         .uptime_ms = (uint32_t)(esp_timer_get_time()/1000),
         .duration_ms = s_duration_sec * 1000,
         .remaining_ms = (uint32_t)((remaining_us + 999) / 1000),
         .controller_boot_id = s_boot_id, .session_id = s_focus.session,
         .seq = ++s_focus.seq, .engagement_token = s_input_token,
-        .rate_half = s_mode != APP_STATE_FOCUS || s_voice_active || s_completed ? 0 : s_focus.rate_half,
+        .rate_quarters = s_mode != APP_STATE_FOCUS || s_voice_active || s_completed ? 0 : s_focus.rate_quarters,
         .pause_reason = s_completed ? FOCUS_DONE : s_voice_active ? FOCUS_VOICE : s_focus.reason,
+        .rate_half = s_mode != APP_STATE_FOCUS || s_voice_active || s_completed ? 0 : s_focus.rate_quarters / 2.0,
         .completed = s_completed,
         .revision = s_revision,
         .full_ms = (uint32_t)(s_focus.full_us / 1000),
-        .half_ms = (uint32_t)(s_focus.half_us / 1000),
+        .normal_ms = (uint32_t)(s_focus.normal_us / 1000),
+        .half_ms = 0,
         .held_waiting_ms = (uint32_t)(s_focus.held_us[FOCUS_WAIT] / 1000),
         .held_distracted_ms = (uint32_t)(s_focus.held_us[FOCUS_DISTRACTED] / 1000),
         .held_invalid_ms = (uint32_t)(s_focus.held_us[FOCUS_INVALID] / 1000),
@@ -353,9 +355,11 @@ esp_err_t controller_modes_get_status(controller_modes_status_t *out)
 
 static int engagement_rate(const char *level)
 {
-    if (!strcmp(level, "HighlyEngaged") || !strcmp(level, "Engaged") || !strcmp(level,"高度参与") || !strcmp(level,"参与")) return 2;
-    if (!strcmp(level, "BarelyEngaged") || !strcmp(level,"勉强参与")) return 1;
-    if (!strcmp(level, "NotEngaged") || !strcmp(level,"未参与")) return 0;
+    if (!strcmp(level,"HighlyEngaged") || !strcmp(level,"高度参与") || !strcmp(level,"highly_focus")) return 4;
+    if (!strcmp(level,"Engaged") || !strcmp(level,"参与") || !strcmp(level,"focus")) return 3;
+    if (!strcmp(level,"BarelyEngaged") || !strcmp(level,"NotEngaged") ||
+        !strcmp(level,"勉强参与") || !strcmp(level,"未参与") ||
+        !strcmp(level,"distracted") || !strcmp(level,"tired")) return 0;
     return -1;
 }
 esp_err_t controller_modes_engagement(uint32_t boot, uint32_t session, uint32_t token,
@@ -379,8 +383,8 @@ esp_err_t controller_modes_engagement(uint32_t boot, uint32_t session, uint32_t 
     }
     controller_modes_status_t status; snapshot_locked(&status);
     portEXIT_CRITICAL(&s_lock);
-    ESP_LOGI(TAG, "[FOCUS] session=%lu seq=%lu remaining_ms=%lu rate=%d/2 reason=%s age_ms=%lu",
+    ESP_LOGI(TAG, "[FOCUS] session=%lu seq=%lu remaining_ms=%lu rate=%d/4 reason=%s age_ms=%lu",
         (unsigned long)status.session_id, (unsigned long)status.seq, (unsigned long)status.remaining_ms,
-        status.rate_half, controller_modes_pause_name(status.pause_reason), (unsigned long)age_ms);
+        status.rate_quarters, controller_modes_pause_name(status.pause_reason), (unsigned long)age_ms);
     return ESP_OK;
 }

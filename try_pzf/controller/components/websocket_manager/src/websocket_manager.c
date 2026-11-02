@@ -439,10 +439,9 @@ esp_err_t ws_manager_server_start(void)
      * HTTP server. To allow more, raise CONFIG_LWIP_MAX_SOCKETS via menuconfig. */
     config.max_open_sockets = WS_MANAGER_SERVER_MAX_CONN + 3;
     config.close_fn = ws_session_close_cb;
-    /* Existing REST/WS routes plus GET/POST /api/tts/capture. */
-    /* 15 existing routes (including capture GET/POST and mode GET/POST),
-     * plus manual arm limits GET and single-servo POST. */
-    config.max_uri_handlers = 24; /* Includes PC vision-service registration. */
+    /* 26 current method/path registrations (including capture and modes).
+     * Keep space for late registrations; losing engagement leaves focus waiting. */
+    config.max_uri_handlers = 32;
 
     ESP_LOGI(TAG, "Starting WebSocket server on port %d", config.server_port);
 
@@ -497,7 +496,12 @@ esp_err_t ws_manager_server_register_uri(const httpd_uri_t *uri_desc)
     if (uri_desc == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    return httpd_register_uri_handler(s_server, uri_desc);
+    esp_err_t ret = httpd_register_uri_handler(s_server, uri_desc);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "URI registration failed: method=%d uri=%s error=%s",
+                 (int)uri_desc->method, uri_desc->uri, esp_err_to_name(ret));
+    }
+    return ret;
 }
 
 esp_err_t ws_manager_server_send_text(int client_fd, const char *data, int len)

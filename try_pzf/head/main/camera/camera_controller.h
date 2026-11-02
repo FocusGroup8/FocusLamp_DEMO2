@@ -39,11 +39,14 @@ typedef struct {
     void *frame_buffer;                  /*!< Frame buffer in PSRAM */
     size_t frame_buffer_size;            /*!< Frame buffer size in bytes */
     esp_cam_ctlr_trans_t csi_trans;      /*!< CSI transaction (persistent storage for callback user_data) */
-    void *capture_task;                  /*!< Task handle waiting for frame capture (TaskHandle_t as void*) */
+    void *capture_waiters[2];            /*!< Streaming and optional local preview, protected against the CSI ISR */
     jpeg_encoder_handle_t jpeg_encoder;  /*!< JPEG hardware encoder handle */
     uint8_t *jpeg_out_buf;               /*!< JPEG output buffer in PSRAM */
     size_t jpeg_out_buf_size;            /*!< JPEG output buffer capacity in bytes */
     bool is_initialized;                 /*!< Initialization state flag */
+    int exposure_target;                 /*!< Last successfully programmed sensor AE target */
+    bool shadow_gamma;                   /*!< Hardware shadow-lift curve enabled */
+    int gamma_level;                     /*!< 0 off, 1 mild, 2 medium, 3 strong */
     bool is_streaming;                   /*!< Streaming state flag */
 } camera_handles_t;
 
@@ -74,6 +77,9 @@ typedef struct {
  * @return ESP_OK on success, error code otherwise
  */
 esp_err_t camera_controller_init(const camera_config_t *config, camera_handles_t *handles);
+esp_err_t camera_set_exposure_target(camera_handles_t *handles, int target);
+esp_err_t camera_set_shadow_gamma(camera_handles_t *handles, bool enabled);
+esp_err_t camera_set_gamma_level(camera_handles_t *handles, int level);
 
 /**
  * @brief Start camera streaming

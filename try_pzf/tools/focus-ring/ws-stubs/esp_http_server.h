@@ -16,6 +16,7 @@ typedef struct {
     bool final;
 } httpd_ws_frame_t;
 typedef struct httpd_req {
+    size_t content_len;
     httpd_handle_t handle;
     int method, fd;
     const char *uri;

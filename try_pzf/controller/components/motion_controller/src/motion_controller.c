@@ -462,7 +462,7 @@ static motion_action_status_t run_job(job_t *j)
             }
             break;
         case JOB_ACTION:
-            motion_library_run(j->name,&j->params);
+            fail(motion_library_run(j->name,&j->params,before));
             break;
         }
     }

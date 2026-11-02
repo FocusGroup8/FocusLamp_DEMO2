@@ -31,7 +31,7 @@ class Test(unittest.TestCase):
   exec(compile(ast.Module(body=[method],type_ignores=[]),'actual_run','exec'),scope)
   import threading
   p=types.SimpleNamespace(face_landmarker=Mock(),orientation_landmarker=Mock(),logger=Mock(),
-   orientation_last_attempt=None,features_lock=threading.Lock(),_next_timestamp=lambda:1)
+   orientation_seq=0,orientation_last_attempt=None,features_lock=threading.Lock(),_next_timestamp=lambda:1)
   p.orientation_landmarker.detect.return_value=types.SimpleNamespace(face_landmarks=[points()])
   for value in (0.,.1,.6):clock.value=value;scope['run'](p,object())
   self.assertEqual(p.face_landmarker.detect_async.call_count,3)
@@ -39,3 +39,4 @@ class Test(unittest.TestCase):
   self.assertFalse(p.orientation_shadow['controls_timer'])
   self.assertEqual(p.orientation_shadow['state'],'facing_camera')
 if __name__=='__main__':unittest.main()
+

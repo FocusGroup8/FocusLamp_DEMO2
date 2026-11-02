@@ -11,6 +11,7 @@
 #include "board_config.h"
 #include "board_init.h"
 #include "camera_controller.h"
+#include "camera_tone_curve.h"
 #include "driver/isp.h"
 #include "driver/isp_ae.h"
 #include "driver/isp_hist.h"
@@ -32,6 +33,7 @@
 
 #include <string.h>
 
+static portMUX_TYPE s_capture_waiter_lock = portMUX_INITIALIZER_UNLOCKED;
 static const char *TAG = "CAMERA_CTLR";
 
 /* MIPI CSI PHY LDO — ESP32-P4 shares LDO channel 3 (2.5V) between DSI and CSI PHYs.
@@ -64,9 +66,12 @@ static bool s_camera_on_trans_finished(esp_cam_ctlr_handle_t handle, esp_cam_ctl
 {
     camera_handles_t *handles  = (camera_handles_t *)user_data;
     BaseType_t high_task_woken = pdFALSE;
-    if (handles->capture_task) {
-        vTaskNotifyGiveFromISR((TaskHandle_t)handles->capture_task, &high_task_woken);
+    portENTER_CRITICAL_ISR(&s_capture_waiter_lock);
+    for (unsigned i = 0; i < 2; ++i) {
+        TaskHandle_t waiter = handles->capture_waiters[i];
+        if (waiter) vTaskNotifyGiveFromISR(waiter, &high_task_woken);
     }
+    portEXIT_CRITICAL_ISR(&s_capture_waiter_lock);
     return high_task_woken == pdTRUE;
 }
 
@@ -176,6 +181,7 @@ esp_err_t camera_controller_init(const camera_config_t *config, camera_handles_t
         goto cleanup;
     }
     ESP_LOGI(TAG, "Sensor format set: %s", target_fmt->name);
+    handles->exposure_target = 80; /* ov5647_set_format programs OV5647_AE_TARGET_DEFAULT */
 
     /*--- Step 5: Create CSI controller ---*/
     ESP_LOGI(TAG, "Creating CSI controller (ctlr=%d, %lux%lu, %d-lane, %dMbps)...", BOARD_CSI_CTLR_ID,
@@ -468,6 +474,12 @@ esp_err_t camera_controller_init(const camera_config_t *config, camera_handles_t
              BOARD_JPEG_OUT_BUF_SIZE);
 
     handles->is_initialized = true;
+    /* Apply before capture begins so both local preview and encoded frames
+     * receive the same shadow lift. State readback exposes any failure. */
+    ret = camera_set_gamma_level(handles, 2);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Default shadow lift unavailable: %s", esp_err_to_name(ret));
+    }
     ESP_LOGI(TAG, "Camera pipeline initialized successfully");
     return ESP_OK;
 
@@ -628,6 +640,7 @@ esp_err_t camera_controller_deinit(camera_handles_t *handles)
 
     /* Disable and delete ISP */
     if (handles->isp_proc) {
+        if (handles->shadow_gamma) esp_isp_gamma_disable(handles->isp_proc);
         esp_isp_disable(handles->isp_proc);
         esp_isp_del_processor(handles->isp_proc);
         handles->isp_proc = NULL;
@@ -690,13 +703,23 @@ esp_err_t camera_capture_frame(camera_handles_t *handles)
      * from DMA ISR) notifies this task, and we block here until a frame
      * arrives or timeout.
      */
-    handles->capture_task = xTaskGetCurrentTaskHandle();
 
     /* Clear any pending notifications from previous frames */
     ulTaskNotifyTake(pdTRUE, 0);
+    portENTER_CRITICAL(&s_capture_waiter_lock);
+    unsigned slot = handles->capture_waiters[0] ? 1 : 0;
+    if (handles->capture_waiters[slot]) {
+        portEXIT_CRITICAL(&s_capture_waiter_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    handles->capture_waiters[slot] = xTaskGetCurrentTaskHandle();
+    portEXIT_CRITICAL(&s_capture_waiter_lock);
 
     /* Wait for the next frame completion signal from on_trans_finished */
     uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
+    portENTER_CRITICAL(&s_capture_waiter_lock);
+    handles->capture_waiters[slot] = NULL;
+    portEXIT_CRITICAL(&s_capture_waiter_lock);
     if (notified == 0) {
         ESP_LOGE(TAG, "capture_frame: timeout waiting for frame (5s)");
         return ESP_ERR_TIMEOUT;
@@ -711,6 +734,63 @@ esp_err_t camera_capture_frame(camera_handles_t *handles)
     ESP_LOGD(TAG, "capture_frame: frame received (buf=%p, size=%zu)", handles->frame_buffer,
              handles->frame_buffer_size);
     return ESP_OK;
+}
+
+esp_err_t camera_set_exposure_target(camera_handles_t *handles, int target)
+{
+    if (!handles || !handles->is_initialized) return ESP_ERR_INVALID_STATE;
+    if (target < 80 || target > 104) return ESP_ERR_INVALID_ARG;
+    esp_err_t err = esp_cam_sensor_set_para_value(handles->cam_sensor, ESP_CAM_SENSOR_EXPOSURE_VAL,
+                                                  &target, sizeof(target));
+    if (err == ESP_OK) handles->exposure_target = target;
+    return err;
+}
+
+static esp_err_t program_gamma_curve(camera_handles_t *handles, int level)
+{
+    isp_gamma_curve_points_t curve;
+    for (size_t i = 0; i < ISP_GAMMA_CURVE_POINTS_NUM; ++i) {
+        uint32_t x = (i + 1) * (256 / ISP_GAMMA_CURVE_POINTS_NUM);
+        if (x > 255) x = 255;
+        curve.pt[i].x = x;
+        curve.pt[i].y = camera_tone_value(level, x);
+    }
+    const color_component_t colors[] = {COLOR_COMPONENT_R, COLOR_COMPONENT_G, COLOR_COMPONENT_B};
+    for (size_t i = 0; i < 3; ++i) {
+        esp_err_t err = esp_isp_gamma_configure(handles->isp_proc, colors[i], &curve);
+        if (err != ESP_OK) return err;
+    }
+    return esp_isp_gamma_enable(handles->isp_proc);
+}
+
+esp_err_t camera_set_gamma_level(camera_handles_t *handles, int level)
+{
+    if (!handles || !handles->is_initialized) return ESP_ERR_INVALID_STATE;
+    if (level < 0 || level > 3) return ESP_ERR_INVALID_ARG;
+    int previous = handles->gamma_level;
+    if (level == previous) return ESP_OK;
+    if (handles->shadow_gamma) {
+        esp_err_t err = esp_isp_gamma_disable(handles->isp_proc);
+        if (err != ESP_OK) return err;
+    }
+    handles->shadow_gamma = false;
+    handles->gamma_level = 0;
+    if (level == 0) return ESP_OK;
+    esp_err_t err = program_gamma_curve(handles, level);
+    if (err == ESP_OK) {
+        handles->shadow_gamma = true;
+        handles->gamma_level = level;
+    } else if (previous > 0 && program_gamma_curve(handles, previous) == ESP_OK) {
+        handles->shadow_gamma = true;
+        handles->gamma_level = previous;
+    }
+    ESP_LOGI(TAG, "Gamma requested=%d applied=%d result=%s", level, handles->gamma_level, esp_err_to_name(err));
+    return err;
+}
+
+esp_err_t camera_set_shadow_gamma(camera_handles_t *handles, bool enabled)
+{
+    return camera_set_gamma_level(handles, enabled ? 1 : 0);
 }
 
 esp_err_t camera_encode_jpeg(camera_handles_t *handles, int quality, uint32_t *out_size)

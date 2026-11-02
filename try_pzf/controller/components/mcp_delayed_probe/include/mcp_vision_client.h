@@ -10,3 +10,6 @@ esp_err_t mcp_vision_set_url(const char *url);
 void mcp_vision_get_url(char *out, size_t size);
 /* Returns owned text (free by caller); never performs a second POST. */
 char *mcp_vision_answer(const char *question, mcp_probe_guard_t current, void *context, bool *failed);
+
+/* App callback: recognize request accepted with a validated request_id. */
+void mcp_vision_set_accepted_callback(void (*callback)(void));

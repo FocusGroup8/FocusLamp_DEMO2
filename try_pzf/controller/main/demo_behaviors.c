@@ -1,3 +1,4 @@
+#include "joke_scene.h"
 #include "demo_behaviors.h"
 #include "controller_modes.h"
 #include "led_service.h"
@@ -149,6 +150,7 @@ static void behavior_task(void *arg)
 {
     (void)arg;
     uint32_t revision = UINT32_MAX;
+    bool was_companion=false;
     bool local_ready = false, head_ready = false, welcome_done = true;
     bool owned_breath = false;
     unsigned head_step = 0;
@@ -163,6 +165,8 @@ static void behavior_task(void *arg)
         }
         int64_t now = esp_timer_get_time();
         if (mode.revision != revision) {
+            if (was_companion && mode.mode==APP_STATE_IDLE) joke_scene_note_companion_ended();
+            was_companion=mode.mode==APP_STATE_COMPANION;
             revision = mode.revision;
             head_step = 0; head_ready = false;
             local_ready = false; local_retry = head_retry = speech_retry = 0;

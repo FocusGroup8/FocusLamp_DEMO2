@@ -7,6 +7,8 @@
 #pragma once
 
 #include "esp_err.h"
+#include <stddef.h>
+#include <stdbool.h>
 #include "esp_mcp_engine.h"
 
 #ifdef __cplusplus
@@ -93,6 +95,9 @@ esp_err_t mipi_dsi_bridge_ping(void);
  *         ESP_ERR_INVALID_STATE if the bridge is not initialized.
  */
 esp_err_t mipi_dsi_bridge_mode_set(const char *mode);
+/* Non-MCP joke scene helpers. hold_ms=0 releases algorithm-expression hold. */
+esp_err_t mipi_dsi_bridge_expression_get(char *name,size_t capacity,bool *held);
+esp_err_t mipi_dsi_bridge_expression_set(const char *name,unsigned hold_ms);
 
 #ifdef __cplusplus
 }

@@ -998,6 +998,44 @@ esp_err_t mipi_dsi_bridge_mode_set(const char *mode) {
   return ret;
 }
 
+static bool scene_expression_valid(const char *name)
+{
+    const char *names[]={"neutral","happy","sad","angry","surprised","sleepy","bored","wink_left","wink_right"};
+    for (unsigned i=0; name && i<sizeof(names)/sizeof(*names); ++i)
+        if (!strcmp(name,names[i])) return true;
+    return false;
+}
+esp_err_t mipi_dsi_bridge_expression_get(char *name,size_t capacity,bool *held)
+{
+    if (!name || !capacity || !held) return ESP_ERR_INVALID_ARG;
+    char response[256]={0};
+    esp_err_t ret=http_get("/api/eyes/expression",response,sizeof(response),true);
+    if (ret!=ESP_OK) return ret;
+    cJSON *root=cJSON_Parse(response);
+    const cJSON *code=cJSON_GetObjectItemCaseSensitive(root,"code");
+    const cJSON *data=cJSON_GetObjectItemCaseSensitive(root,"data");
+    const cJSON *expr=cJSON_GetObjectItemCaseSensitive(data,"expression");
+    const cJSON *hold=cJSON_GetObjectItemCaseSensitive(data,"held");
+    bool valid=cJSON_IsNumber(code) && code->valuedouble==0 && cJSON_IsString(expr) &&
+        scene_expression_valid(expr->valuestring) && strlen(expr->valuestring)<capacity && cJSON_IsBool(hold);
+    if (valid) { snprintf(name,capacity,"%s",expr->valuestring); *held=cJSON_IsTrue(hold); }
+    cJSON_Delete(root);
+    return valid ? ESP_OK : ESP_ERR_NOT_SUPPORTED;
+}
+esp_err_t mipi_dsi_bridge_expression_set(const char *name,unsigned hold_ms)
+{
+    if (!scene_expression_valid(name) || hold_ms>15000) return ESP_ERR_INVALID_ARG;
+    char body[80],response[256]={0};
+    snprintf(body,sizeof(body),"{\"expression\":\"%s\",\"hold_ms\":%u}",name,hold_ms);
+    esp_err_t ret=http_post("/api/eyes/expression",body,response,sizeof(response));
+    if (ret!=ESP_OK) return ret;
+    cJSON *root=cJSON_Parse(response);
+    const cJSON *code=cJSON_GetObjectItemCaseSensitive(root,"code");
+    bool ok=cJSON_IsNumber(code) && code->valuedouble==0;
+    cJSON_Delete(root);
+    return ok ? ESP_OK : ESP_FAIL;
+}
+
 #else /* MIPI_DSI_BRIDGE_ENABLE == 0 */
 
 /* Stub implementations when component is disabled */
@@ -1014,4 +1052,13 @@ esp_err_t mipi_dsi_bridge_mode_set(const char *mode) {
   return ESP_ERR_NOT_SUPPORTED;
 }
 
+esp_err_t mipi_dsi_bridge_expression_get(char *name,size_t capacity,bool *held) {
+    (void)name; (void)capacity; (void)held; return ESP_ERR_NOT_SUPPORTED;
+}
+esp_err_t mipi_dsi_bridge_expression_set(const char *name,unsigned hold_ms) {
+    (void)name; (void)hold_ms; return ESP_ERR_NOT_SUPPORTED;
+}
+
 #endif /* MIPI_DSI_BRIDGE_ENABLE */
+
+

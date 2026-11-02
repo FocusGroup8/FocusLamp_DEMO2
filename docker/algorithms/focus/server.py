@@ -68,6 +68,7 @@ def decode_image(image_base64):
 
 
 def process_video_frame(frame):
+    pomodoro_manager.note_frame()
     frame = cv2.flip(frame, 1)
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
@@ -89,7 +90,7 @@ def process_video_frame(frame):
         'window': pomodoro_manager.window_metadata(),
     }
 
-    if pomodoro_manager.last_focus_result is not None:
+    if pomodoro_manager.last_focus_result is not None and pomodoro_manager.score_usable:
         result['focus_level'] = pomodoro_manager.last_focus_result['focus_level']
         result['focus_level_name'] = pomodoro_manager.last_focus_result['focus_level_name']
         result['focus_score'] = pomodoro_manager.last_focus_result['focus_score']

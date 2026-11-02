@@ -148,7 +148,7 @@ class PerceptionState:
                         if isinstance(sampling.get(field), (int, float)):
                             sampling[field] += result_age
                     window = result.get('window', {})
-                    state = window.get('state') if window.get('state') in ('collecting', 'waiting') else 'ready'
+                    state = window.get('state') if window.get('state') in ('collecting', 'waiting', 'insufficient_data') else 'ready'
                     if sampling.get('state') == 'no_face' or isinstance(sampling.get('face_age_ms'), (int, float)) and sampling['face_age_ms'] >= 3000:
                         state = 'no_face'
                     elif sampling.get('state') == 'warming_up':

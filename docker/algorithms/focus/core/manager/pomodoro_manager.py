@@ -13,6 +13,11 @@ class PomodoroManager:
         self.logger.info('PomodoroManager initialized')
 
         self.window_time_start = None
+        self.last_frame_at = None
+        self.input_gap_limit_s = 1.0
+        self.max_input_gap_s = 0.0
+        self.window_invalid = False
+        self.score_usable = True
         self.window_time_duration = window_duration
 
         self.engage_level_queue = []
@@ -38,6 +43,11 @@ class PomodoroManager:
 
     def reset_window(self):
         self.window_time_start = None
+        self.last_frame_at = None
+        self.input_gap_limit_s = 1.0
+        self.max_input_gap_s = 0.0
+        self.window_invalid = False
+        self.score_usable = True
         self.engage_level_queue = []
         self.engage_level_count = {
             EngageLevel.HighlyEngaged: 0,
@@ -51,8 +61,23 @@ class PomodoroManager:
         self.completed_at_ms = None
         self.completed_at_monotonic = None
 
+    def note_frame(self):
+        """An input/processing gap is missing evidence, never NotEngaged."""
+        now = time.monotonic()
+        if self.last_frame_at is not None and self.window_time_start is not None:
+            gap = max(0.0, now - self.last_frame_at)
+            self.max_input_gap_s = max(self.max_input_gap_s, gap)
+            if gap > self.input_gap_limit_s:
+                self.window_invalid = True
+                self.score_usable = False
+        self.last_frame_at = now
+        # Do not depend on a new model classification to finish an invalid window.
+        if self.window_invalid and self.get_window_time_elapsed() >= self.window_time_duration:
+            self.foward_window()
+
     def foward_window(self):
         self.window_time_start = time.monotonic()
+        self.window_invalid = False
         self.engage_level_queue = []
         self.engage_level_count = {
             EngageLevel.HighlyEngaged: 0,
@@ -67,7 +92,10 @@ class PomodoroManager:
     def window_metadata(self):
         """Presentation metadata only; the weighted-log score stays unchanged."""
         return {
-            'state': 'ready' if self.last_focus_result is not None else 'waiting' if self.window_time_start is None else 'collecting',
+            'state': 'insufficient_data' if not self.score_usable else 'ready' if self.last_focus_result is not None else 'waiting' if self.window_time_start is None else 'collecting',
+            'score_usable': self.score_usable,
+            'input_gap_limit_s': self.input_gap_limit_s,
+            'max_input_gap_s': round(self.max_input_gap_s, 3),
             'duration_s': self.window_time_duration,
             'elapsed_s': min(self.window_time_duration, self.get_window_time_elapsed()),
             'sample_count': len(self.engage_level_queue),
@@ -86,6 +114,8 @@ class PomodoroManager:
             return 0
 
     def calculate_focus_level(self):
+        if self.window_invalid:
+            return
         try:
             focus_score = self.get_focus_score()
 
@@ -115,6 +145,7 @@ class PomodoroManager:
                 'focus_score': round(float(focus_score), 4),
                 'engage_level_count': {k.value: v for k, v in self.engage_level_count.items()},
             }
+            self.score_usable = True
             self.completed_at_ms = int(time.time() * 1000)
             self.completed_at_monotonic = time.monotonic()
 

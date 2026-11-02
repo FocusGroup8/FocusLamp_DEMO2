@@ -1,4 +1,6 @@
 import asyncio
+import socket
+import struct
 import websockets
 import json
 import base64
@@ -53,6 +55,16 @@ def camera_retry_delay(retry_count: int, received_frames: int) -> float:
     if received_frames >= 10:
         return 0.5
     return min(2 ** min(retry_count, 5), 30)
+
+
+def decode_linux_tcp_info(data):
+    # Linux UAPI tcp_info fixed prefix, kernel v6.18 include/uapi/linux/tcp.h.
+    if len(data) < 104:
+        return None
+    u32 = lambda offset: struct.unpack_from("=I", data, offset)[0]
+    return {"state": data[0], "pc_rto_ms": u32(8)/1000,
+            "pc_rtt_ms": u32(68)/1000, "last_tcp_data_recv_ms": u32(52),
+            "pc_unacked": u32(24), "pc_total_retrans": u32(100)}
 
 
 class MainClient:
@@ -157,6 +169,7 @@ class MainClient:
         
         self.pending_frame_header = None
         self.pending_delivery_frame = None
+        self.camera_tcp_socket = None
         self.delivery_frame_ready = asyncio.Event()
         self.rt_diag = {"raw": 0, "overwritten": 0, "raw_gap_ms": 0.0, "source_gap_ms": None, "preprocess_ms": 0.0, "delivery_age_ms": 0.0}
         self.rt_last_raw = self.rt_last_source = None
@@ -923,18 +936,34 @@ class MainClient:
 
         return adapted
 
+    def camera_transport_info(self):
+        sock = self.camera_tcp_socket
+        if sock is None or not hasattr(socket, "TCP_INFO"):
+            return None
+        try:
+            return decode_linux_tcp_info(sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 104))
+        except (OSError, ValueError):
+            return None
+
     async def monitor_event_loop(self):
         """Monotonic loop lag; report even when no camera frame arrives."""
         expected = time.monotonic() + 0.1
         window_start = time.monotonic()
         max_lag_ms = 0.0
         ticks = 0
+        last_stall_log = 0.0
         while True:
             await asyncio.sleep(max(0.0, expected-time.monotonic()))
             now = time.monotonic()
             max_lag_ms = max(max_lag_ms, max(0.0, now-expected)*1000)
             ticks += 1
             expected = now + 0.1
+            if (self.camera_connected.is_set() and self.rt_last_raw is not None
+                    and now-self.rt_last_raw >= 0.5 and now-last_stall_log >= 1.0):
+                logger.info("CAMERA_STALL raw_age_ms=%.1f loop_max_lag_ms=%.1f tcp=%s",
+                            (now-self.rt_last_raw)*1000, max_lag_ms,
+                            json.dumps(self.camera_transport_info()))
+                last_stall_log = now
             if now-window_start >= 5.0:
                 raw_age_ms = None if self.rt_last_raw is None else round((now-self.rt_last_raw)*1000, 1)
                 logger.info("EVENT_LOOP_DIAG window_s=%.2f ticks=%d max_lag_ms=%.1f raw_age_ms=%s", now-window_start, ticks, max_lag_ms, raw_age_ms)
@@ -1149,6 +1178,8 @@ class MainClient:
                     max_queue=2,
                     compression=None
                 ) as ws:
+                    self.camera_tcp_socket = ws.transport.get_extra_info("socket")
+                    logger.info("CAMERA_TCP local=%s remote=%s", ws.local_address, ws.remote_address)
                     source_name = "ESP32P4" if self.current_input_source == 'esp32p4' else "Camera"
                     logger.info("Connected to %s (ping_interval=%ss)", source_name, ping_interval)
                     
@@ -1222,6 +1253,7 @@ class MainClient:
             except Exception as e:
                 logger.error("Camera connection error: %r", e)
             finally:
+                self.camera_tcp_socket = None
                 self.camera_connected.clear()
                 self._camera_generation += 1
                 self._camera_input_epoch_at = time.monotonic()
@@ -1280,9 +1312,14 @@ async def handle_results(request):
 async def handle_perception(request):
     client = request.app['client']
     include_image = getattr(request, 'query', {}).get('include_image', 'true').lower() != 'false'
-    return web.json_response(client.perception.snapshot(
+    snapshot = client.perception.snapshot(
         client.enabled_algorithms, client.algorithm_healthy, client.camera_connected.is_set(),
-        include_image=include_image))
+        include_image=include_image)
+    from fusion_shadow import FusionShadow
+    if not hasattr(client, 'fusion_shadow'):
+        client.fusion_shadow = FusionShadow()
+    snapshot['fusion'] = client.fusion_shadow.evaluate(snapshot)
+    return web.json_response(snapshot)
 
 async def handle_proxy_algorithm(request):
     client = request.app['client']
@@ -1583,3 +1620,4 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+

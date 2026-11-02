@@ -47,6 +47,7 @@ class EngageDetectorProvider(EngageDetectorProviderBase):
             min_tracking_confidence = self.config.get('min_tracking_confidence', 0.5)
 
             self.detection_result = None
+            self.orientation_seq=0
             self.orientation_shadow=orientation_from_landmarks(None)
             self.last_orientation_at=None
             self.orientation_last_attempt=None
@@ -131,7 +132,8 @@ class EngageDetectorProvider(EngageDetectorProviderBase):
                 self.orientation_last_attempt=now
                 result=self.orientation_landmarker.detect(mp_image)
                 orientation=orientation_from_landmarks(result.face_landmarks[0] if result.face_landmarks else None)
-                orientation.update(source='mediapipe_image_landmark_geometry_v1',
+                self.orientation_seq+=1
+                orientation.update(sample_seq=self.orientation_seq,source='mediapipe_image_landmark_geometry_v1',
                                    detection_ms=round((time.monotonic()-now)*1000,1),max_fps=2)
                 with self.features_lock:
                     self.orientation_shadow=orientation;self.last_orientation_at=now
@@ -203,6 +205,7 @@ class EngageDetectorProvider(EngageDetectorProviderBase):
     def reset(self):
         with self.features_lock:
             self.features_queue = []
+            self.orientation_seq=0
             self.orientation_shadow=orientation_from_landmarks(None)
             self.last_orientation_at=None
             self.orientation_last_attempt=None
@@ -222,3 +225,4 @@ class EngageDetectorProvider(EngageDetectorProviderBase):
         except Exception as e:
             self.logger.error(f'EngageDetectorProvider close failed: {e}')
             return
+

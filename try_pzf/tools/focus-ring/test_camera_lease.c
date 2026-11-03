@@ -21,7 +21,7 @@ static size_t fail_after=SIZE_MAX;
 static bool fail_with_budget;
 static int preflight_ready=1;
 static unsigned preflight_checks;
-static int last_shutdown=-1, shutdown_count, async_close_count;
+static int last_shutdown=-1, shutdown_count, async_close_count, lru_updates;
 
 int64_t esp_timer_get_time(void) {return now_us;}
 void test_ws_log(const char *tag,const char *format,...) {(void)tag;(void)format;}
@@ -74,8 +74,14 @@ int test_ws_setsockopt(int fd,int level,int option,const void *value,size_t size
 int test_ws_select(int count,fd_set *readable,fd_set *writable,fd_set *error,struct timeval *timeout)
 {
     (void)count;(void)readable;(void)writable;(void)error;assert(!critical_depth && !tracking_depth);
-    if (!timeout->tv_sec && !timeout->tv_usec) {
+    if (!timeout->tv_sec && timeout->tv_usec == CAMERA_PREFLIGHT_WAIT_US) {
         ++preflight_checks;
+        if (preflight_ready == 0) now_us += CAMERA_PREFLIGHT_WAIT_US;
+        if (preflight_ready == 2) { /* writable after 10 ms */
+            if (CAMERA_PREFLIGHT_WAIT_US < 10000) return 0;
+            now_us += 10000;
+            return 1;
+        }
         if (preflight_ready < 0) errno=EINTR;
         return preflight_ready;
     }
@@ -99,7 +105,7 @@ esp_err_t httpd_resp_sendstr(httpd_req_t *req,const char *text) {(void)req;(void
 esp_err_t httpd_resp_set_type(httpd_req_t *req,const char *type) {(void)req;(void)type;return ESP_OK;}
 esp_err_t httpd_sess_trigger_close(httpd_handle_t handle,int fd)
 {(void)handle;(void)fd;assert(!critical_depth);++async_close_count;return ESP_OK;}
-esp_err_t httpd_sess_update_lru_counter(httpd_handle_t handle,int fd) {(void)handle;(void)fd;return ESP_OK;}
+esp_err_t httpd_sess_update_lru_counter(httpd_handle_t handle,int fd) {(void)handle;(void)fd;++lru_updates;return ESP_OK;}
 esp_err_t httpd_register_uri_handler(httpd_handle_t handle,const httpd_uri_t *uri) {(void)handle;(void)uri;return ESP_OK;}
 esp_err_t httpd_start(httpd_handle_t *handle,const httpd_config_t *config) {(void)config;*handle=(void*)1;return ESP_OK;}
 esp_err_t httpd_stop(httpd_handle_t handle) {(void)handle;return ESP_OK;}
@@ -111,7 +117,7 @@ static void reset_server(void)
     s_server=(void*)1;s_server_mutex=&tracking_mutex;s_camera_send_mutex=&camera_mutex;s_server_running=true;
     s_client_count=0;s_algo_client_fd=-1;s_camera_fail_count=0;
     s_camera_state=(ws_camera_client_state_t){0};camera_client_set_fd(-1);
-    last_shutdown=-1;shutdown_count=async_close_count=0;
+    last_shutdown=-1;shutdown_count=async_close_count=lru_updates=0;
     block_send=false;before_camera_take=NULL;
     ResetEvent(send_entered);ResetEvent(send_release);ResetEvent(camera_waiting);
 }
@@ -319,6 +325,38 @@ static void budget_failure_tests(void)
         }
     }
 }
+static void legacy_binary_send_tests(void)
+{
+    const char data[]={0,1,2,(char)0xff,4,5,6,7,8};
+    const uint8_t *payload;size_t length;
+    ws_send_stats_t before,after;
+    reset_server();assert(accept(11,"/camera")==ESP_OK);
+    assert(ws_manager_server_get_send_stats(&before)==ESP_OK);
+    assert(ws_manager_server_send_binary(11,data,sizeof(data))==ESP_OK);
+    size_t end=read_frame(0,HTTPD_WS_TYPE_BINARY,&payload,&length);
+    assert(end==wire_len && length==sizeof(data) && !memcmp(payload,data,sizeof(data)));
+    assert(lru_updates==1 && !shutdown_count && s_camera_client_fd==11);
+    assert(ws_manager_server_get_send_stats(&after)==ESP_OK);
+    assert(after.total_sent==before.total_sent+1 && after.total_failed==before.total_failed);
+    assert(after.jpeg_bytes==before.jpeg_bytes && !after.pool_exhausted);
+
+    /* Fail inside the WS header and inside its payload. Neither partial
+     * stream may remain published as the camera connection. */
+    const size_t failures[]={1,5};
+    for(size_t i=0;i<sizeof(failures)/sizeof(failures[0]);++i){
+        reset_server();assert(accept(11,"/camera")==ESP_OK);assert(accept(12,"/algo")==ESP_OK);
+        assert(ws_manager_server_get_send_stats(&before)==ESP_OK);
+        fail_after=failures[i];
+        assert(ws_manager_server_send_binary(11,data,sizeof(data))==ESP_FAIL);
+        assert(wire_len==failures[i] && shutdown_count==1 && last_shutdown==11);
+        assert(s_camera_client_fd==-1 && s_algo_client_fd==12 && !lru_updates && !async_close_count);
+        assert(ws_manager_server_get_send_stats(&after)==ESP_OK);
+        assert(after.total_failed==before.total_failed+1 && after.total_sent==before.total_sent);
+        assert(after.last_error==ECONNRESET && after.jpeg_bytes==before.jpeg_bytes && !after.pool_exhausted);
+        size_t stopped=wire_len;
+        assert(current_pair("{}",2,"jpg",3)==ESP_ERR_NOT_FOUND && wire_len==stopped);
+    }
+}
 static void preflight_tests(void)
 {
     reset_server();assert(accept(11,"/camera")==ESP_OK);
@@ -342,6 +380,21 @@ static void preflight_tests(void)
     const uint8_t *payload;size_t length;
     size_t end=read_frame(0,1,&payload,&length);end=read_frame(end,2,&payload,&length);
     assert(end==wire_len && !shutdown_count);
+    wire_reset();preflight_ready=2;
+    int64_t start=now_us;
+    ret=ws_manager_server_send_camera_pair(target,"{}",2,"jpg",3,&result);
+    if (CAMERA_PREFLIGHT_WAIT_US >= 10000) {
+        assert(ret==ESP_OK && result.network_us==10000 && result.wire_bytes);
+        wire_reset();preflight_ready=2;fail_after=1;fail_with_budget=true;
+        start=now_us;
+        ret=ws_manager_server_send_camera_pair(target,"{}",2,"jpg",3,&result);
+        assert(ret!=ESP_OK && result.budget_timeout && result.wire_bytes==1 && shutdown_count);
+        assert(now_us-start==CAMERA_SEND_BUDGET_US);
+        reset_server();assert(accept(11,"/camera")==ESP_OK);
+    } else {
+        assert(ret==ESP_ERR_TIMEOUT && result.preflight_drop && !result.wire_bytes);
+    }
+    assert(ws_manager_server_get_send_stats(&after)==ESP_OK);
     wire_reset();preflight_ready=-1;
     assert(ws_manager_server_send_camera_pair(target,"{}",2,"jpg",3,&result)==ESP_OK);
     assert(!result.preflight_drop && !result.budget_timeout && result.wire_bytes && !shutdown_count);
@@ -358,9 +411,9 @@ int main(void)
     send_entered=CreateEvent(NULL,TRUE,FALSE,NULL);send_release=CreateEvent(NULL,TRUE,FALSE,NULL);
     camera_waiting=CreateEvent(NULL,TRUE,FALSE,NULL);assert(send_entered && send_release && camera_waiting);
     pure_lease_tests();actual_handler_tests();partial_ping_tests();full_admission_tests();
-    concurrent_send_tests();delayed_writer_tests();budget_failure_tests();preflight_tests();
+    concurrent_send_tests();delayed_writer_tests();budget_failure_tests();preflight_tests();legacy_binary_send_tests();
     assert(!tracking_depth && !camera_depth && !critical_depth);
-    puts("PASS: actual head framing/lease + threaded JPEG/Pong/close serialization, registry and /algo progress during blocked send, reused-fd delayed writers rejected, 1500ms zero/partial progress budget failures, no tracking-lock camera I/O");
+    puts("PASS: actual head framing/lease + threaded JPEG/Pong/close serialization, registry and /algo progress during blocked send, reused-fd delayed writers rejected, 1500ms zero/partial progress budget failures, legacy binary payload/accounting/LRU and partial-failure close, no tracking-lock camera I/O");
     CloseHandle(send_entered);CloseHandle(send_release);CloseHandle(camera_waiting);
     DeleteCriticalSection(&tracking_mutex);DeleteCriticalSection(&camera_mutex);
 }

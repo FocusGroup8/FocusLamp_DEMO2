@@ -140,6 +140,24 @@ class WebsocketOwnershipGuards(unittest.TestCase):
         self.assertNotIn("httpd_sess_trigger_close(", pair)
         self.assertIn("(1500 * 1000)", WS)
 
+    def test_legacy_binary_send_dropped_pool_direct_send(self):
+        body = function(WS, "server_send_binary")
+        self.assertNotIn("ws_frame_pool_acquire", body)
+        self.assertNotIn("ws_frame_buf_t", body)
+        self.assertNotIn("memcpy(buf->data", body)
+        self.assertNotIn("atomic_store(&buf->in_use", body)
+        self.assertIn("ws_send_ws_frame(client_fd, HTTPD_WS_TYPE_BINARY, (const uint8_t *)data,", body)
+        self.assertIn("int64_t dur_us = esp_timer_get_time() - send_start_us;", body)
+        self.assertIn("if (len > WS_FRAME_BUF_SIZE)", body)
+
+    def test_legacy_binary_send_keeps_failure_close(self):
+        body = function(WS, "server_send_binary")
+        self.assertIn("record_send(false, true, dur_us, 0, 0, false)", body)
+        self.assertIn("record_send(false, false, dur_us, 0, errno, false)", body)
+        self.assertIn("httpd_sess_update_lru_counter(s_server, client_fd)", body)
+        self.assertIn("camera_client_set_fd(-1)", body)
+        self.assertIn("camera_client_reset_failures()", body)
+
     def test_close_cleanup_owns_success_and_failure_paths(self):
         handler = function(WS, "ws_server_handler")
         self.assertEqual(handler.count("ws_finish_close(req)"), 3)

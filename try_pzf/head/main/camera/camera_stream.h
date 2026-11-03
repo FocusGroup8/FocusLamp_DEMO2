@@ -12,6 +12,15 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* Diagnostic builds hold the producer at a runtime-selected 5 or 8 FPS,
+ * fixed Q15, including through disconnects. Normal builds retain BBA/PI. */
+#ifndef CAMERA_FIXED_DIAG
+#define CAMERA_FIXED_DIAG 0
+#endif
+#if CAMERA_FIXED_DIAG != 0 && CAMERA_FIXED_DIAG != 1
+#error "CAMERA_FIXED_DIAG must be 0 or 1"
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -98,6 +107,8 @@ bool camera_stream_is_running(void);
  * of 1 or 2, low-load mode always applies Q15 (including at the encoder).
  * Use get_quality() for current control state and Stats actualQ for the last
  * logged frame's encoder input.
+ * CAMERA_FIXED_DIAG accepts valid requests but always applies Q15; the
+ * applied quality is returned by get_quality(), not the requested value.
  *
  * @param quality  JPEG quality (1-100)
  * @return ESP_OK on success
@@ -107,9 +118,12 @@ esp_err_t camera_stream_set_quality(int quality);
 /**
  * @brief Set the user frame-rate ceiling
  *
- * BBA may select a lower cadence; the conservative profile tops out at 5 FPS.
+ * BBA may select a lower cadence; normal builds top out at 5 FPS. The separate
+ * CAMERA_TRIAL_HIGH_FPS=8 build permits an 8 FPS HIGH level for comparison.
  * A ceiling of 1 or 2 also enables fixed-Q15 low-load mode. This is a runtime
  * setting, not a persistent firmware configuration.
+ * CAMERA_FIXED_DIAG instead accepts only 5 or 8 and uses that fixed producer
+ * target without adaptive downgrade. This does not guarantee received FPS.
  *
  * @param fps  Target FPS (1-30)
  * @return ESP_OK on success
@@ -132,6 +146,8 @@ uint32_t camera_stream_last_jpeg_bytes(void);
  */
 int camera_stream_get_fps(void);
 int camera_stream_get_fps_limit(void);
+bool camera_stream_is_fixed_diag(void);
+int camera_stream_get_max_fps(void);
 
 #ifndef CAMERA_TRIAL_HIGH_FPS
 #define CAMERA_TRIAL_HIGH_FPS 5

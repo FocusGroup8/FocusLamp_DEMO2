@@ -129,3 +129,6 @@ if(NOT CAMERA_TRIAL_HIGH_FPS MATCHES "^(5|8)$")
     message(FATAL_ERROR "CAMERA_TRIAL_HIGH_FPS must be 5 or 8")
 endif()
 target_compile_definitions(${COMPONENT_LIB} PRIVATE CAMERA_TRIAL_HIGH_FPS=${CAMERA_TRIAL_HIGH_FPS})
+
+option(CAMERA_FIXED_DIAG "Fixed camera load: runtime 5/8 FPS, Q15, no BBA or PI" OFF)
+target_compile_definitions(${COMPONENT_LIB} PRIVATE CAMERA_FIXED_DIAG=$<BOOL:${CAMERA_FIXED_DIAG}>)

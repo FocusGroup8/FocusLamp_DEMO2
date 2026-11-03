@@ -93,6 +93,7 @@ typedef struct {
     uint64_t jpeg_bytes;            /*!< Successful camera-pair payload bytes in this window */
     uint32_t camera_budget_timeouts; /*!< Boot cumulative camera-group budget failures; NOT reset per window */
     uint32_t camera_preflight_drops; /*!< Boot cumulative zero-byte admission drops; NOT reset per window */
+    uint32_t camera_preflight_wait_us;
     bool camera_preflight_enabled;  /*!< Build identity for the controlled ON/OFF comparison */
 } ws_send_stats_t;
 

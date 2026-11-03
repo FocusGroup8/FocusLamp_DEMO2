@@ -34,13 +34,15 @@ static const char *TAG = "ws_mgr";
 /* Frame buffer pool for the legacy binary-send API. */
 #if WS_MANAGER_SERVER_ENABLE
 
-#define WS_FRAME_POOL_SIZE 4          /* Number of pre-allocated frame buffers (2 clients × 2 in-flight) */
 #define WS_FRAME_BUF_SIZE WS_CAMERA_MAX_JPEG /* 32KB per buffer, sufficient for Q=15 YUV420 @ 800x640 */
 
 #define CAMERA_SEND_BUDGET_US (1500 * 1000) /* One deadline for metadata + JPEG. */
 
 #ifndef CAMERA_PREFLIGHT_ENABLED
 #define CAMERA_PREFLIGHT_ENABLED 1
+#endif
+#ifndef CAMERA_PREFLIGHT_WAIT_US
+#define CAMERA_PREFLIGHT_WAIT_US 0
 #endif
 
 typedef enum {
@@ -53,15 +55,6 @@ typedef struct {
     size_t bytes; /* All wire bytes: both WS headers and both payloads. */
     ws_send_reason_t reason;
 } ws_send_progress_t;
-
-typedef struct {
-    uint8_t data[WS_FRAME_BUF_SIZE];
-    int len;
-    atomic_bool in_use;
-    int64_t start_time_us; /* Timestamp when send was initiated (for duration tracking) */
-} ws_frame_buf_t;
-
-static ws_frame_buf_t s_frame_pool[WS_FRAME_POOL_SIZE];
 
 /* Never hold this lock over I/O. Bytes and completion counts roll together. */
 static portMUX_TYPE s_stats_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -102,21 +95,6 @@ static void record_send(bool pair, bool ok, int64_t duration, size_t jpeg_bytes,
     portEXIT_CRITICAL(&s_stats_lock);
 }
 
-/* Acquire a free buffer from the pool. */
-static ws_frame_buf_t *ws_frame_pool_acquire(void)
-{
-    for (int i = 0; i < WS_FRAME_POOL_SIZE; i++) {
-        bool expected = false;
-        if (atomic_compare_exchange_strong(&s_frame_pool[i].in_use, &expected, true)) {
-            s_frame_pool[i].start_time_us = esp_timer_get_time();
-            return &s_frame_pool[i];
-        }
-    }
-    portENTER_CRITICAL(&s_stats_lock);
-    s_send_stats.pool_exhausted++;
-    portEXIT_CRITICAL(&s_stats_lock);
-    return NULL; /* All buffers busy — drop this frame */
-}
 #endif
 
 static void dispatch_event(ws_manager_event_t event, void *data)
@@ -1005,7 +983,7 @@ static int camera_socket_select_writable(int fd)
     fd_set wfds;
     FD_ZERO(&wfds);
     FD_SET(fd, &wfds);
-    struct timeval tv = { .tv_sec = 0, .tv_usec = 0 };
+    struct timeval tv = { .tv_sec = 0, .tv_usec = CAMERA_PREFLIGHT_WAIT_US };
     return select(fd + 1, NULL, &wfds, NULL, &tv);
 }
 #endif
@@ -1149,29 +1127,20 @@ static esp_err_t server_send_binary(int client_fd, const char *data, int len, bo
         return ESP_ERR_INVALID_SIZE;
     }
 
-    /* Acquire a buffer from the pre-allocated pool (no malloc per frame) */
-    ws_frame_buf_t *buf = ws_frame_pool_acquire();
-    if (buf == NULL) {
-        /* All pool buffers are in-flight — drop this frame (backpressure) */
-        return ESP_ERR_NO_MEM;
-    }
-
-    memcpy(buf->data, data, len);
-    buf->len           = len;
-    buf->start_time_us = esp_timer_get_time();
-
     /* [FIX 2026-08-08] Send the whole WS frame with a raw blocking send()
      * loop, bypassing httpd_ws_send_frame_async entirely (see ws_send_ws_frame):
      * httpd's WS send path calls send_fn ONCE and treats a partial write as
      * success, delivering a truncated frame that makes the client reset the
      * connection (observed as repeated web_ui disconnects even though
      * ws: failed=0). We build the frame ourselves (FIN + binary opcode +
-     * length, server side needs no masking) with full partial-write handling. */
+     * length, server side needs no masking) with full partial-write handling.
+     * The caller keeps `data` valid for the duration of this synchronous call,
+     * so no copy or pre-allocated pool is needed. */
     int64_t send_start_us = esp_timer_get_time();
-    bool ok               = (ws_send_ws_frame(client_fd, HTTPD_WS_TYPE_BINARY, buf->data, (size_t)buf->len,
-                                       send_start_us, NULL) == ESP_OK);
+    bool ok               = (ws_send_ws_frame(client_fd, HTTPD_WS_TYPE_BINARY, (const uint8_t *)data,
+                                       (size_t)len, send_start_us, NULL) == ESP_OK);
 
-    int64_t dur_us = esp_timer_get_time() - buf->start_time_us;
+    int64_t dur_us = esp_timer_get_time() - send_start_us;
     esp_err_t ret  = ESP_OK;
     if (ok) {
         /* This raw-send path bypasses HTTPD request processing. Successful
@@ -1191,7 +1160,6 @@ static esp_err_t server_send_binary(int client_fd, const char *data, int len, bo
         }
     }
 
-    atomic_store(&buf->in_use, false); /* Return buffer to pool */
     return ret;
 }
 
@@ -1437,6 +1405,7 @@ static esp_err_t snapshot_stats(ws_send_stats_t *stats, bool take)
     *stats = take ? s_pair_stats : s_send_stats;
     stats->camera_budget_timeouts = atomic_load(&s_camera_budget_timeouts_total);
     stats->camera_preflight_drops = atomic_load(&s_camera_preflight_drops_total);
+    stats->camera_preflight_wait_us = CAMERA_PREFLIGHT_ENABLED ? CAMERA_PREFLIGHT_WAIT_US : 0;
     stats->camera_preflight_enabled = CAMERA_PREFLIGHT_ENABLED != 0;
     if (take) {
         memset(&s_send_stats, 0, sizeof(s_send_stats));

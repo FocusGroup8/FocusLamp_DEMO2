@@ -637,7 +637,8 @@ static void camera_stream_task(void *arg)
     /* Initialize PI controller state — fine-tunes JPEG quality within BBA level */
     pi_state_t pi = {0};
     int applied_fps_limit = atomic_load(&s_state.fps_limit);
-    int initial_quality = applied_fps_limit <= ADAPTIVE_FPS_MIN ? 15 : s_bba_levels[bba.current_level].quality;
+    int initial_quality = CAMERA_FIXED_DIAG || applied_fps_limit <= ADAPTIVE_FPS_MIN ?
+                          15 : s_bba_levels[bba.current_level].quality;
     pi_controller_reset(&pi, initial_quality, stream_target_bitrate(bba.current_level, applied_fps_limit));
 
     /* Motion remains diagnostic; static-scene FPS throttling is disabled. */
@@ -649,17 +650,23 @@ static void camera_stream_task(void *arg)
 
     /* Apply initial BBA settings */
     s_state.current_quality = initial_quality;
-    s_state.trial_ceiling = 25;
-    s_state.bba_fps         = s_bba_levels[bba.current_level].fps;
-    s_state.current_fps     = MIN(s_bba_levels[bba.current_level].fps, applied_fps_limit);
+    s_state.trial_ceiling = CAMERA_FIXED_DIAG ? 15 : 25;
+    s_state.bba_fps = CAMERA_FIXED_DIAG ? applied_fps_limit : s_bba_levels[bba.current_level].fps;
+    s_state.current_fps = CAMERA_FIXED_DIAG ? applied_fps_limit :
+                          MIN(s_bba_levels[bba.current_level].fps, applied_fps_limit);
 
-    ESP_LOGI(TAG, "Streaming task started (BBA: level=%d, Q=%d, fps=%d, PI: target=%lu B/s, motion: enabled)",
-             bba.current_level, s_state.current_quality, s_state.current_fps,
-             (unsigned long)pi.target_bitrate_bps);
-    ESP_LOGI(TAG, "BBA policy: camera-only sessions, budget timeout -> LOW, continuous healthy recovery=%ds per level",
-             BBA_CLIENT_STABLE_TIME_SEC);
-    ESP_LOGI(TAG, "Camera profile: max_fps=%d, cap<=2 -> fixed Q15, adaptive Q ceilings=15/16/18",
-             CAMERA_TRIAL_HIGH_FPS);
+    if (CAMERA_FIXED_DIAG) {
+        ESP_LOGI(TAG, "CAMERA_FIXED_DIAG=1 Q=15 runtime_fps=5|8; target_fps=%d; BBA/PI disabled; failures do not change cadence",
+                 applied_fps_limit);
+    } else {
+        ESP_LOGI(TAG, "Streaming task started (BBA: level=%d, Q=%d, fps=%d, PI: target=%lu B/s, motion: enabled)",
+                 bba.current_level, s_state.current_quality, s_state.current_fps,
+                 (unsigned long)pi.target_bitrate_bps);
+        ESP_LOGI(TAG, "BBA policy: camera-only sessions, budget timeout -> LOW, continuous healthy recovery=%ds per level",
+                 BBA_CLIENT_STABLE_TIME_SEC);
+        ESP_LOGI(TAG, "Camera profile: max_fps=%d, cap<=2 -> fixed Q15, adaptive Q ceilings=15/16/18",
+                 CAMERA_TRIAL_HIGH_FPS);
+    }
 
     int64_t last_stats_log = esp_timer_get_time();
     int64_t diag_last_loop_us = 0, diag_loop_gap_us = 0;
@@ -678,7 +685,8 @@ static void camera_stream_task(void *arg)
         /* BBA + PI evaluation: target interval 1 second; blocking may stretch it.
          * BBA (coarse): evaluates network congestion, switches quality level.
          * PI  (fine):   adjusts JPEG quality within BBA level to track target bitrate. */
-        if (cap_changed || (now - bba.last_eval_time) >= BBA_EVAL_INTERVAL_SEC * 1000000) {
+        if (!CAMERA_FIXED_DIAG &&
+            (cap_changed || (now - bba.last_eval_time) >= BBA_EVAL_INTERVAL_SEC * 1000000)) {
             ws_send_stats_t ws_stats;
             if (ws_manager_server_take_send_stats(&ws_stats) == ESP_OK) {
                 uint64_t window_bytes_sent = ws_stats.jpeg_bytes;
@@ -745,10 +753,17 @@ static void camera_stream_task(void *arg)
             bba.last_eval_time = now;
         }
 
-        /* Only /camera consumes JPEGs; /algo or /mcp must not keep full FPS. */
+        /* Adaptive builds idle at low FPS without /camera. Fixed diagnostics
+         * keep the acquisition load unchanged; only publication needs a client. */
         ws_camera_client_state_t camera = ws_manager_server_get_camera_state();
         int effective_fps;
-        if (!camera.connected) {
+        if (CAMERA_FIXED_DIAG) {
+            /* Keep the same acquisition load with no client, on failures and
+             * after reconnection. Connection state only gates publication. */
+            effective_fps = fps_limit;
+            s_state.current_fps = fps_limit;
+            s_state.current_quality = 15;
+        } else if (!camera.connected) {
             effective_fps = MIN(ADAPTIVE_FPS_MIN, (int)s_state.fps_limit);
             if (!was_throttled) {
                 ESP_LOGI(TAG, "No camera client: throttling fps %d -> %d", s_state.current_fps, ADAPTIVE_FPS_MIN);
@@ -805,7 +820,12 @@ static void camera_stream_task(void *arg)
         int frame_fps_limit = atomic_load(&s_state.fps_limit);
         bool frame_fixed_low = frame_fps_limit <= ADAPTIVE_FPS_MIN;
         int frame_quality = frame_fixed_low ? 15 : camera_stream_get_quality();
-        effective_fps = MIN(effective_fps, frame_fps_limit);
+        effective_fps = CAMERA_FIXED_DIAG ? frame_fps_limit : MIN(effective_fps, frame_fps_limit);
+        if (CAMERA_FIXED_DIAG) {
+            frame_quality = 15;
+            s_state.current_fps = frame_fps_limit;
+            s_state.current_quality = 15;
+        }
         frame_period = pdMS_TO_TICKS(1000 / effective_fps);
         diag_stage_start_us = esp_timer_get_time();
         ret = camera_encode_jpeg(s_state.config.camera, frame_quality, &jpeg_size);
@@ -851,9 +871,9 @@ static void camera_stream_task(void *arg)
         s_pipeline.producer_work_us = work_us;
         s_pipeline.producer_stack_min = stack_min;
         portEXIT_CRITICAL(&s_pipeline_lock);
-        /* Oversize is rejected before the socket statistics are updated. Let
-         * the next frame use LOW and require the normal healthy recovery. */
-        if (ret == ESP_ERR_INVALID_SIZE && frame_quality > 18 && s_state.trial_quality) {
+        /* Oversize is always rejected and counted. Only adaptive clarity
+         * trials change cadence/quality in response. */
+        if (!CAMERA_FIXED_DIAG && ret == ESP_ERR_INVALID_SIZE && frame_quality > 18 && s_state.trial_quality) {
             bba.current_level = bba.pending_level = BBA_LEVEL_LOW;
             bba.healthy_since = 0;
             bba.hysteresis_counter = 0;
@@ -877,23 +897,38 @@ static void camera_stream_task(void *arg)
                 ws_last_dur_ms = ws_stats_log.last_send_duration_us / 1000;
             }
             ws_camera_client_state_t camera_log = ws_manager_server_get_camera_state();
-            ESP_LOGI(TAG,
-                     "Stats: sent=%u failed=%u avg_size=%u target_fps=%d actualQ=%d mode=%s bba=%d "
-                     "[ws: sent=%u failed=%u avg_dur=%lldms last=%lldms] "
-                     "[camera: connected=%d session=%u budget_total=%u] "
-                     "[PI: actual=%lu target=%lu B/s integral=%.2f] "
-                     "[motion: %s SAD=%.4f static_cnt=%d] "
-                     "[stage_max_ms: loop_gap=%lld capture=%lld encode=%lld]",
-                     (unsigned)completed, (unsigned)s_state.frames_failed, (unsigned)avg_size, effective_fps,
-                     frame_quality, frame_fixed_low ? "fixed-low" : s_state.trial_quality ? "clarity" : "adaptive", bba.current_level,
-                     (unsigned)bba.accum_sent, (unsigned)bba.accum_failed,
-                     (long long)ws_avg_dur_ms, (long long)ws_last_dur_ms,
-                     camera_log.connected, (unsigned)camera_log.session_id,
-                     (unsigned)ws_stats_log.camera_budget_timeouts, (unsigned long)pi.actual_bitrate_bps,
-                     (unsigned long)pi.target_bitrate_bps, pi.integral, motion.is_static ? "STATIC" : "ACTIVE",
-                     motion.last_sad, motion.static_count,
-                     (long long)(diag_loop_gap_us / 1000), (long long)(diag_capture_us / 1000),
-                     (long long)(diag_encode_us / 1000));
+            if (CAMERA_FIXED_DIAG) {
+                ESP_LOGI(TAG,
+                         "Stats: mode=fixed-diag target_fps=%d actualQ=%d sent=%u failed=%u avg_size=%u "
+                         "[ws: sent=%u failed=%u avg_dur=%lldms last=%lldms] "
+                         "[camera: connected=%d session=%u budget_total=%u] "
+                         "[stage_max_ms: loop_gap=%lld capture=%lld encode=%lld]",
+                         effective_fps, frame_quality, (unsigned)completed, (unsigned)s_state.frames_failed,
+                         (unsigned)avg_size, (unsigned)ws_stats_log.total_sent, (unsigned)ws_stats_log.total_failed,
+                         (long long)ws_avg_dur_ms, (long long)ws_last_dur_ms,
+                         camera_log.connected, (unsigned)camera_log.session_id,
+                         (unsigned)ws_stats_log.camera_budget_timeouts,
+                         (long long)(diag_loop_gap_us / 1000), (long long)(diag_capture_us / 1000),
+                         (long long)(diag_encode_us / 1000));
+            } else {
+                ESP_LOGI(TAG,
+                         "Stats: sent=%u failed=%u avg_size=%u target_fps=%d actualQ=%d mode=%s bba=%d "
+                         "[ws: sent=%u failed=%u avg_dur=%lldms last=%lldms] "
+                         "[camera: connected=%d session=%u budget_total=%u] "
+                         "[PI: actual=%lu target=%lu B/s integral=%.2f] "
+                         "[motion: %s SAD=%.4f static_cnt=%d] "
+                         "[stage_max_ms: loop_gap=%lld capture=%lld encode=%lld]",
+                         (unsigned)completed, (unsigned)s_state.frames_failed, (unsigned)avg_size, effective_fps,
+                         frame_quality, frame_fixed_low ? "fixed-low" : s_state.trial_quality ? "clarity" : "adaptive", bba.current_level,
+                         (unsigned)bba.accum_sent, (unsigned)bba.accum_failed,
+                         (long long)ws_avg_dur_ms, (long long)ws_last_dur_ms,
+                         camera_log.connected, (unsigned)camera_log.session_id,
+                         (unsigned)ws_stats_log.camera_budget_timeouts, (unsigned long)pi.actual_bitrate_bps,
+                         (unsigned long)pi.target_bitrate_bps, pi.integral, motion.is_static ? "STATIC" : "ACTIVE",
+                         motion.last_sad, motion.static_count,
+                         (long long)(diag_loop_gap_us / 1000), (long long)(diag_capture_us / 1000),
+                         (long long)(diag_encode_us / 1000));
+            }
             diag_loop_gap_us = diag_capture_us = diag_encode_us = 0;
             last_stats_log = now;
         }
@@ -928,6 +963,11 @@ static esp_err_t stream_init_locked(const camera_stream_config_t *config)
     if (s_state.config.default_fps <= 0 || s_state.config.default_fps > 30) {
         s_state.config.default_fps = 15;
     }
+    if (CAMERA_FIXED_DIAG) {
+        s_state.config.default_quality = 15;
+        if (s_state.config.default_fps != 5 && s_state.config.default_fps != 8)
+            s_state.config.default_fps = 5;
+    }
     if (s_state.config.task_stack_size <= 0) {
         s_state.config.task_stack_size = STREAM_TASK_STACK_DEFAULT;
     }
@@ -938,7 +978,7 @@ static esp_err_t stream_init_locked(const camera_stream_config_t *config)
     s_state.current_quality = s_state.config.default_quality;
     s_state.trial_quality = 0;
     s_state.bba_fps = s_state.config.default_fps;
-    s_state.trial_ceiling   = 25;
+    s_state.trial_ceiling   = CAMERA_FIXED_DIAG ? 15 : 25;
     s_state.current_fps     = s_state.config.default_fps;
     s_state.fps_limit       = s_state.config.default_fps;
 
@@ -1229,9 +1269,9 @@ esp_err_t camera_stream_set_quality(int quality)
         atomic_flag_clear(&s_lifecycle);
         return ESP_ERR_INVALID_STATE;
     }
-    int applied_quality = s_state.fps_limit <= ADAPTIVE_FPS_MIN ? 15 : quality;
+    int applied_quality = CAMERA_FIXED_DIAG || s_state.fps_limit <= ADAPTIVE_FPS_MIN ? 15 : quality;
     s_state.current_quality = applied_quality;
-    s_state.trial_quality = (quality == 25 || quality == 35) ? quality : 0;
+    s_state.trial_quality = !CAMERA_FIXED_DIAG && (quality == 25 || quality == 35) ? quality : 0;
     atomic_flag_clear(&s_lifecycle);
     ESP_LOGD(TAG, "Quality requested=%d applied=%d", quality, applied_quality);
     return ESP_OK;
@@ -1239,7 +1279,7 @@ esp_err_t camera_stream_set_quality(int quality)
 
 esp_err_t camera_stream_set_fps(int fps)
 {
-    if (fps < 1 || fps > 30) {
+    if (fps < 1 || fps > 30 || (CAMERA_FIXED_DIAG && fps != 5 && fps != 8)) {
         return ESP_ERR_INVALID_ARG;
     }
     if (atomic_flag_test_and_set(&s_lifecycle)) return ESP_ERR_INVALID_STATE;
@@ -1248,8 +1288,9 @@ esp_err_t camera_stream_set_fps(int fps)
         return ESP_ERR_INVALID_STATE;
     }
     s_state.fps_limit = fps;
-    s_state.current_fps = MIN((int)s_state.bba_fps, fps);
-    if (fps <= ADAPTIVE_FPS_MIN) {
+    s_state.current_fps = CAMERA_FIXED_DIAG ? fps : MIN((int)s_state.bba_fps, fps);
+    if (CAMERA_FIXED_DIAG) s_state.bba_fps = fps;
+    if (CAMERA_FIXED_DIAG || fps <= ADAPTIVE_FPS_MIN) {
         s_state.current_quality = 15;
     }
     atomic_flag_clear(&s_lifecycle);
@@ -1259,6 +1300,7 @@ esp_err_t camera_stream_set_fps(int fps)
 
 int camera_stream_get_quality(void)
 {
+    if (CAMERA_FIXED_DIAG) return 15;
     int trial = atomic_load(&s_state.trial_quality);
     int ceiling = atomic_load(&s_state.trial_ceiling);
     return s_state.fps_limit <= ADAPTIVE_FPS_MIN ? 15 :
@@ -1277,12 +1319,23 @@ uint32_t camera_stream_last_jpeg_bytes(void)
 
 int camera_stream_get_fps(void)
 {
+    if (CAMERA_FIXED_DIAG) return atomic_load(&s_state.fps_limit);
     return MIN((int)s_state.current_fps, (int)s_state.fps_limit);
 }
 
 int camera_stream_get_fps_limit(void)
 {
     return atomic_load(&s_state.fps_limit);
+}
+
+bool camera_stream_is_fixed_diag(void)
+{
+    return CAMERA_FIXED_DIAG != 0;
+}
+
+int camera_stream_get_max_fps(void)
+{
+    return CAMERA_FIXED_DIAG ? 8 : CAMERA_TRIAL_HIGH_FPS;
 }
 
 void camera_stream_get_stats(uint32_t *frames_sent, uint32_t *frames_failed, uint32_t *avg_frame_size,

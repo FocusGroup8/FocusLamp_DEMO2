@@ -9,6 +9,7 @@
 #include "algo_result_manager.h"
 #include "focus_sync.h"
 #include "base_bridge.h"
+#include "board_config.h"
 #include "cJSON.h"
 #include "camera_stream.h"
 #include "connection_manager.h"
@@ -611,6 +612,7 @@ static void add_pipeline_stats(cJSON *data)
     cJSON_AddNumberToObject(obj, "preflight_drops", stats.preflight_drops);
     ws_send_stats_t send_stats;
     if (ws_manager_server_get_send_stats(&send_stats) == ESP_OK) {
+        cJSON_AddNumberToObject(obj, "preflight_wait_us", send_stats.camera_preflight_wait_us);
         cJSON_AddBoolToObject(obj, "preflight_enabled", send_stats.camera_preflight_enabled);
         cJSON_AddNumberToObject(obj, "preflight_drops_total", send_stats.camera_preflight_drops);
     }
@@ -651,7 +653,10 @@ static esp_err_t rest_api_status_handler(httpd_req_t *req)
     esp_err_t control_result = ESP_OK;
     camera_stream_get_control_status(&control_busy, &control_result);
     cJSON_AddNumberToObject(data, "fps_limit", camera_stream_get_fps_limit());
-    cJSON_AddNumberToObject(data, "profile_max_fps", CAMERA_TRIAL_HIGH_FPS);
+    cJSON_AddNumberToObject(data, "profile_max_fps", camera_stream_get_max_fps());
+    cJSON_AddBoolToObject(data, "camera_fixed_diag", camera_stream_is_fixed_diag());
+    cJSON_AddNumberToObject(data, "camera_width", BOARD_CAM_H_RES);
+    cJSON_AddNumberToObject(data, "camera_height", BOARD_CAM_V_RES);
     cJSON_AddBoolToObject(data, "camera_control_busy", control_busy);
     cJSON_AddNumberToObject(data, "camera_control_result", control_result);
     camera_handles_t *handles = system_manager_get_camera_handles();

@@ -186,6 +186,7 @@ typedef struct {
     uint32_t network_us;
     uint32_t wire_bytes;
     bool budget_timeout;
+    bool preflight_drop; /* Group dropped (zero bytes) before its first byte: socket not writable. */
     int socket_errno;
 } ws_camera_send_result_t;
 
@@ -206,8 +207,9 @@ typedef struct {
  * @param bin       JPEG binary payload
  * @param bin_len   binary payload length
  * @return ESP_OK on success; ESP_ERR_NOT_FOUND if no camera client;
- *         ESP_ERR_TIMEOUT for budget exhaustion with zero group bytes (keeps
- *         connection); ESP_FAIL for other send failures (closes connection).
+ *         ESP_ERR_TIMEOUT for a preflight drop or budget exhaustion with zero
+ *         group bytes (keeps connection; inspect result flags); ESP_FAIL for
+ *         other send failures (closes connection).
  */
 esp_err_t ws_manager_server_send_camera_pair(uint32_t session, const char *text, int text_len,
                                             const char *bin, int bin_len, ws_camera_send_result_t *result);

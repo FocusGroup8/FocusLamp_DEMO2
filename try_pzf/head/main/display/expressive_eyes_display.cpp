@@ -8,6 +8,7 @@
 #include "board_init.h"
 #include "pixel_faces_data.h"
 #include "pixel_design_renderer.h"
+#include "algo_result_manager.h"
 #include "focus_ring_renderer.h"
 #include "task_guide.h"
 #include "esp_timer.h"
@@ -316,7 +317,7 @@ static void expressive_eyes_task(void *arg)
             const int role=pixel_role.load();
             // A concurrent role change is rechecked before indexing the profile table.
             if (role >= 0 && role < 8) {
-                optimized_engine.update(role,pixel_expression.load(),pixel_revision.load(),begin/1000);
+                optimized_engine.update(role,pixel_expression.load(),pixel_revision.load(),begin/1000,algo_result_expression_held());
                 const int64_t blink=pixel_blink_until.load();
                 if(blink!=last_blink_request){last_blink_request=blink;if(blink)optimized_engine.blinkAt=(blink-280000)/1000;}
                 lvgl_port_lock(0);
@@ -472,7 +473,7 @@ esp_err_t expressive_eyes_display_init(const expressive_eyes_cfg_t *cfg)
     // an intermediate default frame while waiting for the animation task.
     if (pixel_optimized.load() && pixel_role.load() >= 0) {
         const int64_t now = esp_timer_get_time() / 1000;
-        optimized_engine.update(pixel_role.load(), pixel_expression.load(), pixel_revision.load(), now);
+        optimized_engine.update(pixel_role.load(), pixel_expression.load(), pixel_revision.load(), now,algo_result_expression_held());
         lvgl_port_lock(0);
         auto *buffer = lv_canvas_get_draw_buf(s_state.canvas);
         pixel_design::render({reinterpret_cast<uint8_t *>(s_state.canvas_buf), s_state.screen_width,

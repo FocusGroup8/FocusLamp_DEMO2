@@ -21,6 +21,7 @@
 #include "../../shared/focus_transport_age.h"
 
 static const char *TAG = "MODE_API";
+static esp_err_t engagement_response(httpd_req_t *req);
 
 /* Reapply for each normal response: IDF error helpers may clear this option
  * on a persistent socket. Failure must not suppress the existing response. */
@@ -58,6 +59,14 @@ static cJSON *engagement_diagnostics(void)
 
 static esp_err_t mode_status_response(httpd_req_t *req)
 {
+#ifdef FOCUS_SAMPLED_DEMO
+    /* The demo head needs the clock, not a multi-chunk diagnostics snapshot. */
+    const char *query = strchr(req->uri, '?');
+    if (query && strcmp(query, "?compact=1") == 0) {
+        httpd_resp_set_type(req, "application/json");
+        return engagement_response(req);
+    }
+#endif
     controller_modes_status_t state;
     esp_err_t ret = controller_modes_get_status(&state);
     httpd_resp_set_type(req, "application/json");
@@ -111,6 +120,11 @@ static esp_err_t mode_status_response(httpd_req_t *req)
     esp_err_t sent=httpd_resp_send_chunk(req,response,length-1);
     char accounting[384];
     snprintf(accounting,sizeof(accounting),
+#ifdef FOCUS_SAMPLED_DEMO
+        ",\"sampled_demo\":true,\"sample_ttl_ms\":6000"
+#else
+        ",\"sampled_demo\":false,\"sample_ttl_ms\":3000"
+#endif
         ",\"timing_totals\":{\"full_ms\":%lu,\"normal_ms\":%lu,\"half_ms\":%lu,\"held_ms\":%lu,"
         "\"waiting_ms\":%lu,\"distracted_ms\":%lu,\"invalid_ms\":%lu,\"data_stale_ms\":%lu,\"voice_ms\":%lu}",
         (unsigned long)state.full_ms,(unsigned long)state.normal_ms,(unsigned long)state.half_ms,(unsigned long)state.held_ms,
@@ -216,8 +230,8 @@ static bool json_u32(const cJSON *root, const char *key, uint32_t *out)
         v->valuedouble > UINT32_MAX || floor(v->valuedouble) != v->valuedouble) return false;
     *out = (uint32_t)v->valuedouble; return true;
 }
-/* Compact reply: the head only consumes the authoritative clock. Avoid
- * nesting the full diagnostics payload under the engagement request body. */
+/* Compact reply keeps the clock and task guide consumed by the head,
+ * while omitting the full diagnostic payload. */
 static esp_err_t engagement_response(httpd_req_t *req)
 {
     controller_modes_status_t s;
@@ -243,7 +257,19 @@ static esp_err_t engagement_response(httpd_req_t *req)
             (unsigned long)s.session_id,controller_modes_pause_name(s.pause_reason));
     }
     nodelay_on(req, "engagement_response");
-    return httpd_resp_send(req,body,n);
+    if(!strchr(req->uri,'?'))return httpd_resp_send(req,body,n);
+    cJSON *reply=cJSON_Parse(body);
+    cJSON *guide=task_guide_snapshot();
+    if(!reply || !guide) {
+        cJSON_Delete(reply);cJSON_Delete(guide);
+        return httpd_resp_send_err(req,HTTPD_500_INTERNAL_SERVER_ERROR,"guide snapshot unavailable");
+    }
+    cJSON_AddItemToObject(reply,"task_guide",guide);
+    char *json=cJSON_PrintUnformatted(reply);cJSON_Delete(reply);
+    if(!json)return httpd_resp_send_err(req,HTTPD_500_INTERNAL_SERVER_ERROR,"response unavailable");
+    esp_err_t result=httpd_resp_sendstr(req,json);
+    free(json);
+    return result;
 }
 static esp_err_t engagement_handler(httpd_req_t *req)
 {

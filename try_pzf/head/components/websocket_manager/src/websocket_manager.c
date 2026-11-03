@@ -39,6 +39,10 @@ static const char *TAG = "ws_mgr";
 
 #define CAMERA_SEND_BUDGET_US (1500 * 1000) /* One deadline for metadata + JPEG. */
 
+#ifndef CAMERA_PREFLIGHT_ENABLED
+#define CAMERA_PREFLIGHT_ENABLED 1
+#endif
+
 typedef enum {
     WS_SEND_COMPLETE = 0,
     WS_SEND_BUDGET_TIMEOUT,
@@ -66,6 +70,11 @@ static ws_send_stats_t s_send_stats, s_pair_stats;
 /* Never cleared by window resets or server restarts: a stream observer must
  * still see a timeout after the failed camera connection has been closed. */
 static atomic_uint s_camera_budget_timeouts_total = 0;
+
+/* Boot cumulative pre-flight drops: camera group discarded with zero bytes
+ * because the socket was not writable before the first byte. Separate from
+ * budget timeouts so each failure mode stays independently observable. */
+static atomic_uint s_camera_preflight_drops_total = 0;
 
 /* Caller holds the statistics lock. Only successful payload bytes go into PI. */
 static void update_window(ws_send_stats_t *stats, bool ok, int64_t duration, size_t jpeg_bytes, int error)
@@ -984,6 +993,23 @@ esp_err_t ws_manager_server_send_text(int client_fd, const char *data, int len)
     return httpd_ws_send_frame_async(s_server, client_fd, &ws_pkt);
 }
 
+/* Before the FIRST byte of a camera pair is written, test whether the socket
+ * is immediately writable. A full send buffer here means the group cannot be
+ * delivered without blocking; dropping it with zero bytes keeps the WS frame
+ * boundary intact and the connection alive.
+ * Returns >0 writable, 0 not writable (drop group), <0 select error (fall
+ * through to the normal send path so a real connection fault is surfaced). */
+#if CAMERA_PREFLIGHT_ENABLED
+static int camera_socket_select_writable(int fd)
+{
+    fd_set wfds;
+    FD_ZERO(&wfds);
+    FD_SET(fd, &wfds);
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 0 };
+    return select(fd + 1, NULL, &wfds, NULL, &tv);
+}
+#endif
+
 /* Per-call nonblocking writes preserve HTTPD's socket mode. The caller shares
  * one deadline across metadata and JPEG. Count progress even on failure. */
 static ws_send_reason_t ws_raw_send_all(int fd, const uint8_t *data, size_t len,
@@ -1303,6 +1329,32 @@ esp_err_t ws_manager_server_send_camera_pair(uint32_t session, const char *text,
     }
 
     int64_t send_start_us = esp_timer_get_time();
+
+    /* Admission is checked once, before either image frame's first byte.
+     * Readiness does not reserve capacity for the complete group: later
+     * partial failures still close the socket through the unchanged path. */
+#if CAMERA_PREFLIGHT_ENABLED
+    int wready = camera_socket_select_writable(client_fd);
+    if (wready == 0) {
+        int64_t dur_us = esp_timer_get_time() - send_start_us;
+        result->network_us     = (uint32_t)dur_us;
+        result->wire_bytes     = 0;
+        result->budget_timeout = false;
+        result->preflight_drop = true;
+        result->socket_errno   = EAGAIN;
+        uint32_t drops = atomic_fetch_add(&s_camera_preflight_drops_total, 1) + 1;
+        record_send(true, false, dur_us, 0, EAGAIN, false); /* failed frame, not a budget timeout */
+        static int64_t last_preflight_log_us;
+        if (drops == 1 || send_start_us - last_preflight_log_us >= 10000000) {
+            ESP_LOGW(TAG, "Camera group: preflight not writable, zero-byte drop fd=%d (preflight_drops=%u)",
+                     client_fd, (unsigned)drops);
+            last_preflight_log_us = send_start_us;
+        }
+        xSemaphoreGive(s_camera_send_mutex);
+        return ESP_ERR_TIMEOUT;
+    }
+#endif
+
     ws_send_progress_t group = {0};
     bool ok               = (ws_send_ws_frame(client_fd, HTTPD_WS_TYPE_TEXT, (const uint8_t *)text,
                                       (size_t)text_len, send_start_us, &group) == ESP_OK) &&
@@ -1384,6 +1436,8 @@ static esp_err_t snapshot_stats(ws_send_stats_t *stats, bool take)
     portENTER_CRITICAL(&s_stats_lock);
     *stats = take ? s_pair_stats : s_send_stats;
     stats->camera_budget_timeouts = atomic_load(&s_camera_budget_timeouts_total);
+    stats->camera_preflight_drops = atomic_load(&s_camera_preflight_drops_total);
+    stats->camera_preflight_enabled = CAMERA_PREFLIGHT_ENABLED != 0;
     if (take) {
         memset(&s_send_stats, 0, sizeof(s_send_stats));
         memset(&s_pair_stats, 0, sizeof(s_pair_stats));

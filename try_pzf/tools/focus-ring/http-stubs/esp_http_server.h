@@ -5,6 +5,7 @@ enum { HTTP_GET, HTTP_POST };
 #define HTTPD_SOCK_ERR_TIMEOUT (-2)
 #define HTTPD_500_INTERNAL_SERVER_ERROR 500
 typedef struct httpd_req {
+    const char *uri;
     size_t content_len;
     const char *input;
     size_t input_size, consumed, receive_chunk;

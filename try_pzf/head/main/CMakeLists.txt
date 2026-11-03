@@ -117,3 +117,15 @@ idf_component_register(SRCS ${COMP_SRCS}
                        INCLUDE_DIRS ${COMP_INCLUDE_DIRS}
                        REQUIRES ${COMP_REQUIRES}
                        PRIV_REQUIRES ${COMP_PRIV_REQUIRES})
+
+option(FOCUS_SAMPLED_DEMO "Enable sampled countdown demonstration settings" OFF)
+if(FOCUS_SAMPLED_DEMO)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE FOCUS_SAMPLED_DEMO=1)
+endif()
+
+# The 8 FPS variant is a separate trial; normal builds remain capped at 5.
+set(CAMERA_TRIAL_HIGH_FPS "5" CACHE STRING "Camera HIGH cadence for the 5/8 FPS comparison")
+if(NOT CAMERA_TRIAL_HIGH_FPS MATCHES "^(5|8)$")
+    message(FATAL_ERROR "CAMERA_TRIAL_HIGH_FPS must be 5 or 8")
+endif()
+target_compile_definitions(${COMPONENT_LIB} PRIVATE CAMERA_TRIAL_HIGH_FPS=${CAMERA_TRIAL_HIGH_FPS})

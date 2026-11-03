@@ -15,6 +15,16 @@
 #include "task_guide.h"
 #endif
 
+#if defined(FOCUS_SAMPLED_DEMO) && FOCUS_SAMPLED_DEMO
+#define FOCUS_SYNC_SAMPLED_DEMO 1
+#define FOCUS_SYNC_HTTP_TIMEOUT_MS 2500
+#define FOCUS_SYNC_VIEW_TTL_US 6000000LL
+#else
+#define FOCUS_SYNC_SAMPLED_DEMO 0
+#define FOCUS_SYNC_HTTP_TIMEOUT_MS 900
+#define FOCUS_SYNC_VIEW_TTL_US 2000000LL
+#endif
+
 static portMUX_TYPE lock = portMUX_INITIALIZER_UNLOCKED;
 static focus_view_t view;
 static bool started;
@@ -33,6 +43,9 @@ cJSON *focus_sync_diagnostics(void)
     cJSON *j=cJSON_CreateObject(); if(!j)return NULL;
 #define ADD(field) cJSON_AddNumberToObject(j,#field,d.field)
     cJSON_AddNumberToObject(j,"version",1);
+    cJSON_AddBoolToObject(j,"sampled_demo",FOCUS_SYNC_SAMPLED_DEMO);
+    cJSON_AddNumberToObject(j,"timeout_ms",FOCUS_SYNC_HTTP_TIMEOUT_MS);
+    cJSON_AddNumberToObject(j,"view_ttl_ms",FOCUS_SYNC_VIEW_TTL_US/1000);
     ADD(received);ADD(accepted);ADD(malformed);ADD(clock_rejected);ADD(source_rejected);
     ADD(sample_seq);ADD(inference_seq);ADD(input_age_ms);ADD(input_sample_age_ms);ADD(transit_ms);
     ADD(echo_elapsed_ms);ADD(echo_hold_ms);
@@ -106,7 +119,7 @@ void focus_sync_sample(int fd,const cJSON *j)
 void focus_sync_get_view(focus_view_t *out)
 {
     portENTER_CRITICAL(&lock); *out=view; portEXIT_CRITICAL(&lock);
-    out->fresh=out->fresh && esp_timer_get_time()-out->received_us<2000000;
+    out->fresh=out->fresh && esp_timer_get_time()-out->received_us<FOCUS_SYNC_VIEW_TTL_US;
 }
 typedef struct { char data[3072]; size_t size; bool overflow; } response_t;
 static esp_err_t collect(esp_http_client_event_t *event)
@@ -127,12 +140,17 @@ static cJSON *exchange_path(const focuslamp_endpoint_t *peer,const char *path,co
     static char host[64];static uint16_t port;
     *status=0;
     char url[160];snprintf(url,sizeof(url),"http://%s:%u/api/mode%s",peer->host,peer->port,path);
+#if FOCUS_SYNC_SAMPLED_DEMO
+    /* Read the same authoritative state without the full diagnostic extension. */
+    if(!body && !*path)snprintf(url,sizeof(url),"http://%s:%u/api/mode?compact=1",peer->host,peer->port);
+#endif
     response_t response={0};
     if(client && (strcmp(host,peer->host)||port!=peer->port)){
         esp_http_client_cleanup(client);client=NULL;
     }
     if(!client){
-        esp_http_client_config_t cfg={.url=url,.timeout_ms=900,.event_handler=collect,.user_data=&response,
+        /* Socket timeout only, not an end-to-end request deadline. */
+        esp_http_client_config_t cfg={.url=url,.timeout_ms=FOCUS_SYNC_HTTP_TIMEOUT_MS,.event_handler=collect,.user_data=&response,
             .method=body?HTTP_METHOD_POST:HTTP_METHOD_GET};
         client=esp_http_client_init(&cfg);
         if(client){snprintf(host,sizeof(host),"%s",peer->host);port=peer->port;}
@@ -169,9 +187,11 @@ static void worker(void *unused)
         int response_status=0;
         int64_t reply_received_us=0;
         bool binding=false;
+        bool peer_changed=false;
         int64_t begin=esp_timer_get_time();
         if(focuslamp_discovery_get_peer(FOCUSLAMP_ROLE_CONTROLLER,&peer)==ESP_OK){
             if(strcmp(peer.host,bound_host)||peer.port!=bound_port){
+                peer_changed=true;
                 token=boot=0;recovery=(focus_sync_recovery_t){.probe=true};
                 snprintf(bound_host,sizeof(bound_host),"%s",peer.host);bound_port=peer.port;
             }
@@ -253,7 +273,15 @@ static void worker(void *unused)
             }
         }
         if(!ok && focus_sync_failed(&recovery,response_status)){token=boot=0;}
-        if(!ok){portENTER_CRITICAL(&lock);view.fresh=false;portEXIT_CRITICAL(&lock);}
+        if(!ok){
+            /* Demo tolerates a short transport outage by freezing the last
+             * received authority value. Its receipt timestamp is never renewed.
+             * Explicit rejection, malformed state or changed identity must not
+             * keep an old session visible as fresh. No local countdown runs. */
+            bool keep_last=FOCUS_SYNC_SAMPLED_DEMO && !peer_changed && !reply &&
+                (response_status==0 || (response_status>=500 && response_status<600));
+            if(!keep_last){portENTER_CRITICAL(&lock);view.fresh=false;portEXIT_CRITICAL(&lock);}
+        }
         cJSON_Delete(reply);
         /* No backlog; one request in flight, no catch-up loops. */
         int64_t elapsed=esp_timer_get_time()-begin;

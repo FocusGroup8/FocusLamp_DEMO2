@@ -4,9 +4,14 @@
 
 /* Pure monotonic-time engine; callers serialize access. All times are local us.
  * The renderer never advances this clock. 15 s accommodates the existing
- * classifier's 30-frame stride; transport/face freshness is independently 3 s. */
+ * classifier's 30-frame stride. The sampled demo explicitly allows 6 s of
+ * face/sample age; normal builds retain 3 s. Transport validation is separate. */
 #define FOCUS_CLASS_TTL_US 15000000LL
+#if defined(FOCUS_SAMPLED_DEMO) && FOCUS_SAMPLED_DEMO
+#define FOCUS_SAMPLE_TTL_US 6000000LL
+#else
 #define FOCUS_SAMPLE_TTL_US 3000000LL
+#endif
 #define FOCUS_DEBOUNCE_US 1000000LL
 /* FocusCode dev-server-refactoring PomodoroManager: highly_focus=1, focus=.75,
  * distracted/tired=0. Keep this device's monotonic clock and freshness guards.

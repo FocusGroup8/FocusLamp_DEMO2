@@ -57,7 +57,7 @@ typedef struct {
 static const bba_level_config_t s_bba_levels[BBA_LEVEL_COUNT] = {
     [BBA_LEVEL_LOW]  = {.quality = 15, .fps = 2},
     [BBA_LEVEL_MID]  = {.quality = 16, .fps = 5},
-    [BBA_LEVEL_HIGH] = {.quality = 18, .fps = 5},
+    [BBA_LEVEL_HIGH] = {.quality = 18, .fps = CAMERA_TRIAL_HIGH_FPS},
 };
 
 /* BBA evaluation interval (seconds) */
@@ -574,6 +574,10 @@ static void send_pending_frame(void)
         d.reason = "metadata";
         ++s_pipeline.metadata_drops;
         ++s_state.frames_failed;
+    } else if (wire.preflight_drop) {
+        d.reason = "preflight_drop";
+        ++s_pipeline.preflight_drops;
+        ++s_state.frames_failed;
     } else {
         d.reason = wire.budget_timeout ? (wire.wire_bytes ? "partial_timeout" : "zero_timeout") :
                    ret == ESP_ERR_INVALID_STATE ? "server_stopped" : "connection_error";
@@ -581,7 +585,7 @@ static void send_pending_frame(void)
         ++s_state.frames_failed;
     }
     s_pipeline.last_attempt = d;
-    if (ret != ESP_OK && ret != ESP_ERR_NOT_FOUND) s_pipeline.last_failure = d;
+    if (ret != ESP_OK && ret != ESP_ERR_NOT_FOUND && !wire.preflight_drop) s_pipeline.last_failure = d;
     s_pipeline.sender_stack_min = stack;
     s_inflight = -1;
     portEXIT_CRITICAL(&s_pipeline_lock);
@@ -654,7 +658,8 @@ static void camera_stream_task(void *arg)
              (unsigned long)pi.target_bitrate_bps);
     ESP_LOGI(TAG, "BBA policy: camera-only sessions, budget timeout -> LOW, continuous healthy recovery=%ds per level",
              BBA_CLIENT_STABLE_TIME_SEC);
-    ESP_LOGI(TAG, "Camera profile: conservative-5fps-v1, cap<=2 -> fixed Q15, adaptive Q ceilings=15/16/18");
+    ESP_LOGI(TAG, "Camera profile: max_fps=%d, cap<=2 -> fixed Q15, adaptive Q ceilings=15/16/18",
+             CAMERA_TRIAL_HIGH_FPS);
 
     int64_t last_stats_log = esp_timer_get_time();
     int64_t diag_last_loop_us = 0, diag_loop_gap_us = 0;
@@ -1273,6 +1278,11 @@ uint32_t camera_stream_last_jpeg_bytes(void)
 int camera_stream_get_fps(void)
 {
     return MIN((int)s_state.current_fps, (int)s_state.fps_limit);
+}
+
+int camera_stream_get_fps_limit(void)
+{
+    return atomic_load(&s_state.fps_limit);
 }
 
 void camera_stream_get_stats(uint32_t *frames_sent, uint32_t *frames_failed, uint32_t *avg_frame_size,

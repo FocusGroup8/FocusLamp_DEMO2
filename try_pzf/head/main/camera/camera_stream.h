@@ -131,6 +131,11 @@ uint32_t camera_stream_last_jpeg_bytes(void);
  * @return Current FPS value (1-30)
  */
 int camera_stream_get_fps(void);
+int camera_stream_get_fps_limit(void);
+
+#ifndef CAMERA_TRIAL_HIGH_FPS
+#define CAMERA_TRIAL_HIGH_FPS 5
+#endif
 
 typedef struct {
     uint32_t seq, session, length;
@@ -147,7 +152,7 @@ typedef struct {
 
 typedef struct {
     uint32_t enqueued, replaced, stale, stopped, resource_drops, oversize, metadata_drops;
-    uint32_t sent, network_failures;
+    uint32_t sent, network_failures, preflight_drops;
     uint64_t jpeg_bytes;
     uint32_t producer_stack_min, sender_stack_min, producer_work_us;
     camera_frame_info_t produced;

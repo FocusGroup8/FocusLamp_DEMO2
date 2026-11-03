@@ -21,6 +21,10 @@ static uint32_t s_boot_id, s_input_token;
 static int64_t s_last_us;
 static int64_t s_last_summary_us;
 static bool s_completed;
+/* Leave a brief completion indication, then restore the ordinary idle mode.
+ * Owned here rather than by either display, so both screens leave together. */
+#define FOCUS_COMPLETE_HOLD_US 2000000LL
+static int64_t s_completed_at_us;
 static uint32_t s_revision;
 static esp_timer_handle_t s_timer;
 
@@ -51,8 +55,26 @@ static bool advance_locked(int64_t now_us)
     bool was_completed = s_focus.completed;
     focus_clock_settle(&s_focus, now_us);
     s_completed = s_focus.completed;
-    if (!was_completed && s_completed) ++s_revision;
-    return !was_completed && s_completed;
+    bool just_completed = !was_completed && s_completed;
+    if (just_completed) {
+        s_completed_at_us = now_us;
+        ++s_revision;
+    } else if (s_mode == APP_STATE_FOCUS && s_completed &&
+               now_us - s_completed_at_us >= FOCUS_COMPLETE_HOLD_US) {
+        s_mode = APP_STATE_IDLE;
+        s_duration_sec = 0;
+        s_input_token = 0;
+        s_focus.active = false;
+        s_focus.completed = false;
+        s_focus.rate_quarters = 0;
+        s_focus.candidate_quarters = -1;
+        s_focus.reason = FOCUS_WAIT;
+        s_completed = false;
+        s_completed_at_us = 0;
+        ++s_revision;
+        mirror_locked();
+    }
+    return just_completed;
 }
 
 const char *controller_modes_pause_name(unsigned reason)
@@ -97,7 +119,7 @@ static void snapshot_locked(controller_modes_status_t *out)
 static void log_completed(bool completed, uint32_t duration_sec)
 {
     if (completed) {
-        ESP_LOGI(TAG, "Focus completed: duration=%u s, remaining=0, scope=state_only",
+        ESP_LOGI(TAG, "Focus completed: duration=%u s, remaining=0, return_to_idle_after=2s, scope=state_only",
                  (unsigned)duration_sec);
     }
 }
@@ -177,6 +199,7 @@ esp_err_t controller_modes_init(void)
         s_duration_sec = 0;
         s_focus.remaining_us = 0; s_focus.active = false; s_focus.completed = false;
         s_completed = false;
+        s_completed_at_us = 0;
         s_last_us = esp_timer_get_time();
         s_last_summary_us = s_last_us;
         s_initialized = true;
@@ -217,6 +240,7 @@ esp_err_t controller_modes_focus_start(uint32_t minutes)
         focus_clock_start(&s_focus, s_duration_sec, s_last_us);
         s_input_token = 0;
         s_completed = false;
+        s_completed_at_us = 0;
         paused = s_voice_active;
         mirror_locked();
     }
@@ -248,6 +272,7 @@ esp_err_t controller_modes_companion_start(void)
         s_duration_sec = 0;
         s_focus.remaining_us = 0; s_focus.active = false; s_focus.completed = false;
         s_completed = false;
+        s_completed_at_us = 0;
         mirror_locked();
     }
     portEXIT_CRITICAL(&s_lock);
@@ -279,6 +304,7 @@ static esp_err_t stop_mode(app_state_t expected, bool any_mode)
         s_duration_sec = 0;
         s_focus.remaining_us = 0; s_focus.active = false; s_focus.completed = false;
         s_completed = false;
+        s_completed_at_us = 0;
         mirror_locked();
     }
     portEXIT_CRITICAL(&s_lock);

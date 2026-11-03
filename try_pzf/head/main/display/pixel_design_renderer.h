@@ -39,7 +39,7 @@ struct Engine {
     bool switching=false,swapped=false;
     Pose current(int64_t now) const {return blend(from,to,smooth(float(now-start)/duration));}
     void transition(Pose target,int ms,int64_t now){from=current(now);to=target;start=now;duration=std::max(1,ms);}
-    void update(int r,int expr,uint32_t rev,int64_t now) {
+    void update(int r,int expr,uint32_t rev,int64_t now,bool held=false) {
         if(r!=requestRole || role<0){
           // Keep only the latest destination, freezing the face currently on screen.
           startClosure=role<0?1:closure(now);from=to=current(now);start=now;duration=1;
@@ -62,8 +62,8 @@ struct Engine {
           exiting=false;exitAt=expr?now+t.entry+t.hold:0;finishAt=expr?exitAt+t.exit:0;
           if(expr)habitAt=-100000;
         }
-        if(exitAt&&now>=exitAt&&!exiting){exiting=true;transition(poses[0],profiles[role].timings[requested].exit,now);}
-        if(finishAt&&now>=finishAt){from=to=poses[0];start=now;duration=1;visible=0;exitAt=finishAt=0;}
+        if(!held&&exitAt&&now>=exitAt&&!exiting){exiting=true;transition(poses[0],profiles[role].timings[requested].exit,now);}
+        if(!held&&finishAt&&now>=finishAt){from=to=poses[0];start=now;duration=1;visible=0;exitAt=finishAt=0;}
         if(!visible&&now>=nextBlink){blinkAt=now;rng^=rng<<13;rng^=rng>>17;rng^=rng<<5;
           const auto&p=profiles[role];nextBlink=now+p.blinkMin+rng%(p.blinkMax-p.blinkMin+1);}
     }

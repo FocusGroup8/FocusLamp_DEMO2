@@ -30,7 +30,8 @@ typedef struct {
 } controller_modes_status_t;
 
 esp_err_t controller_modes_init(void);
-/* Minutes must be 1..180. Repeated focus start does not reset a session. */
+/* Minutes must be 1..180. Repeated running start does not reset a session.
+ * Completion is shown briefly (2 s), then automatically returns to idle. */
 esp_err_t controller_modes_focus_start(uint32_t minutes);
 /* Typed stops are idempotent and never stop another active mode. */
 esp_err_t controller_modes_focus_stop(void);

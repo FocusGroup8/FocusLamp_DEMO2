@@ -11,6 +11,7 @@ import unittest
 
 HEAD = Path(__file__).resolve().parents[1]
 STREAM = (HEAD / "main/camera/camera_stream.c").read_text(encoding="utf-8")
+STREAM_HEADER = (HEAD / "main/camera/camera_stream.h").read_text(encoding="utf-8")
 WS = (HEAD / "components/websocket_manager/src/websocket_manager.c").read_text(encoding="utf-8")
 NETWORK = (HEAD / "main/network/network_manager.c").read_text(encoding="utf-8")
 
@@ -37,7 +38,13 @@ def level_table(name, fields):
     table = re.search(r"\b" + name + r"\[BBA_LEVEL_COUNT\]\s*=\s*\{(.*?)\n\};", STREAM, re.S).group(1)
     result = {}
     for level, body in re.findall(r"\[BBA_LEVEL_(LOW|MID|HIGH)\]\s*=\s*\{(.*?)\}", table):
-        result[level] = tuple(int(re.search(r"\." + field + r"\s*=\s*(\d+)", body).group(1)) for field in fields)
+        values=[]
+        for field in fields:
+            token=re.search(r"\." + field + r"\s*=\s*(\d+|CAMERA_TRIAL_HIGH_FPS)",body).group(1)
+            if token == "CAMERA_TRIAL_HIGH_FPS":
+                token=re.search(r"#define CAMERA_TRIAL_HIGH_FPS\s+(\d+)",STREAM_HEADER).group(1)
+            values.append(int(token))
+        result[level]=tuple(values)
     return result
 
 

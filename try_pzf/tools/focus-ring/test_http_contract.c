@@ -111,8 +111,9 @@ esp_err_t httpd_resp_send_err(httpd_req_t *req,int code,const char *message)
 
 static httpd_req_t call_raw(int method,const char *path,const char *body,size_t bytes,size_t declared)
 {
-    httpd_req_t request={.content_len=declared,.input=body,.input_size=bytes,.receive_chunk=7,.fd=request_fd};
-    for(unsigned i=0;i<route_count;i++)if(routes[i].method==method && !strcmp(routes[i].uri,path)) {
+    httpd_req_t request={.uri=path,.content_len=declared,.input=body,.input_size=bytes,.receive_chunk=7,.fd=request_fd};
+    size_t path_length=strcspn(path,"?");
+    for(unsigned i=0;i<route_count;i++)if(routes[i].method==method && strlen(routes[i].uri)==path_length && !strncmp(routes[i].uri,path,path_length)) {
         (void)routes[i].handler(&request);
         assert(request.response_size && !strcmp(request.content_type,"application/json"));
         assert(request.response_size==strlen(request.response));return request;
@@ -290,6 +291,18 @@ int main(void)
     assert(cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(guide,"steps"))==3);
     assert(!strcmp(cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(guide,"steps"),0)->valuestring,"丢掉桌面垃圾"));
     assert(full_size>largest_compact);cJSON_Delete(j);
+#ifdef FOCUS_SAMPLED_DEMO
+    r=call(HTTP_GET,"/api/mode?compact=1",NULL);
+    assert(status(&r)==200 && r.response_size<1024 && r.send_calls==1);
+    j=json(&r);authority(j);
+    guide=cJSON_GetObjectItemCaseSensitive(j,"task_guide");
+    assert(cJSON_IsObject(guide));
+    assert(!strcmp(cJSON_GetObjectItemCaseSensitive(guide,"state")->valuestring,"ready"));
+    assert(cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(guide,"steps"))==3);
+    assert(!strcmp(cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(guide,"steps"),0)->valuestring,"丢掉桌面垃圾"));
+    assert(!cJSON_HasObjectItem(j,"engagement_diagnostics"));
+    cJSON_Delete(j);
+#endif
     /* An old session must reject instead of restarting its progress. */
     snprintf(body,sizeof(body),"{\"bind\":true,\"controller_boot_id\":%lu,\"session_id\":%lu}",
         (unsigned long)boot,(unsigned long)(session-1));

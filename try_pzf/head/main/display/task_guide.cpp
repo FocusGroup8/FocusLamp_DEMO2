@@ -221,9 +221,10 @@ extern "C" void task_guide_report_ack(uint32_t sequence)
     portEXIT_CRITICAL(&guard);
 }
 
-void task_guide_prepare(uint8_t *bytes, int width, int height, int stride)
+void task_guide_release_graphics()
 {
-    task_guide::Screen::prepare(fola::Canvas(bytes, width, height, stride));
+    if (drew_last_frame) screen.release();
+    drew_last_frame = false;
 }
 
 bool task_guide_draw(uint8_t *bytes, int width, int height, int stride, int64_t now)
@@ -240,7 +241,7 @@ bool task_guide_draw(uint8_t *bytes, int width, int height, int stride, int64_t 
     log_transition(before, after, "local timer");
 
     if (frame.view.state == task_guide::State::Idle && !frame.notice) {
-        drew_last_frame = false;
+        task_guide_release_graphics();
         return false;
     }
     // Draw outside the spinlock; the frame is a private copy.

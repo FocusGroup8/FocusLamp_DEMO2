@@ -27,6 +27,7 @@ if (CONFIG_EXAMPLE_ENABLE_DISPLAY)
                            "display/display_system.c"
                            "display/lvgl_display.c"
                            "display/expressive_eyes_display.cpp"
+                           "display/focus_ring_renderer.cpp"
                            "display/task_guide.cpp"
                            "display/task_guide_view.cpp"
                            "display/fola_gfx.cpp"

@@ -115,6 +115,7 @@ public:
     Rect draw(const Canvas &c, float fraction, const TrackStyle &style);
     /* Builds the band table without drawing (tens of ms, once). */
     bool prepare(const Canvas &c) { return build(c); }
+    void release();
     /* Design-space distance from the panel centre to the outer glow on the
      * vertical/horizontal axis. Content inside this box never touches it. */
     static float inner_clearance();

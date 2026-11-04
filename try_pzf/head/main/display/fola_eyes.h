@@ -1,7 +1,7 @@
 #pragma once
 
 // FOBI glow eyes from Figma 台灯 / 眼睛 (5:49): neutral teal pair 5:2797,
-// green focus pair 5:5293, lavender / lemon / orange spectrum variants.
+// green task timer and lavender completion eyes.
 //
 // Each eye is seven concentric superellipse layers (spill, two blooms, body,
 // core glow, core, highlight). They are composited once per palette and
@@ -25,9 +25,6 @@ struct Palette {
 extern const Palette kTeal;     // 孔雀石青 Peacock Teal (P12)
 extern const Palette kGreen;    // 草芽嫩绿 Tender Grass (focus progress)
 extern const Palette kLavender; // 薰衣草雾 Lavender Haze (completion)
-extern const Palette kLemon;    // 明亮柠檬黄 Lemon Yellow
-extern const Palette kOrange;   // 橘子汽水 Mirinda Orange
-
 /* Per-eye shape. The defaults are the Figma neutral eye. Lids are cut at
  * draw time; the happy arch is its own sprite so the glow follows it. */
 struct EyeShape {
@@ -49,9 +46,6 @@ struct EyeLayout {
     float cx, cy;  // centre between the eyes, design space
     bool inside_track = false; // clip the repaint to the inside of fola::Track
 };
-/* Figma neutral placement: full size, slightly above the panel centre. */
-EyeLayout neutral_layout(const Palette &palette);
-
 /* Largest gaze/lift a pose may use; the repaint rectangle covers it. */
 constexpr float kMaxGaze = 10, kMaxGazeY = 6, kMaxLift = 8;
 
@@ -62,27 +56,21 @@ Rect eyes_area(const Canvas &c, const EyeLayout &layout);
 bool draw_eyes(const Canvas &c, const EyeLayout &layout, const EyePose &pose);
 /* Builds the sprite ahead of time (it takes tens of ms on the first use). */
 void prepare_eyes(const Canvas &c, const EyeLayout &layout, bool happy = false);
+void release_eye_cache();
 
-/* Blinks, small glances and eased expression changes, driven by now_ms. */
+/* Blinks and small task-screen glances, driven by now_ms. */
 class EyeMotion {
 public:
     void reset(const EyePose &base, int64_t now_ms);
-    void set(const EyePose &base, int64_t now_ms, int ease_ms = 180);
-    void blink(int64_t now_ms) { blink_at_ = now_ms; }
-    /* External gaze in -1..1; disables the automatic glances until cleared. */
-    void look(float x, float y) { look_x_ = x; look_y_ = y; looking_ = true; }
-    void clear_look() { looking_ = false; }
     bool glances = true;
     EyePose pose(int64_t now_ms);
 
 private:
     uint32_t random();
-    EyePose from_, to_;
-    int64_t changed_at_ = 0, ease_ms_ = 1, blink_at_ = -100000, next_blink_ = 0;
+    EyePose base_;
+    int64_t blink_at_ = -100000, next_blink_ = 0;
     int64_t glance_at_ = 0, next_glance_ = 0;
     float glance_from_x_ = 0, glance_from_y_ = 0, glance_x_ = 0, glance_y_ = 0;
-    float look_x_ = 0, look_y_ = 0;
-    bool looking_ = false;
     uint32_t seed_ = 0x2f6b9d1u;
 };
 

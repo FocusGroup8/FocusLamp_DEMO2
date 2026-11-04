@@ -150,6 +150,13 @@ void Screen::prepare(const Canvas &canvas)
     track().prepare(canvas);
 }
 
+void Screen::release()
+{
+    track().release();
+    release_eye_cache();
+    scene_ = Scene::None;
+}
+
 Screen::Scene Screen::scene_for(const Frame &f)
 {
     switch (f.view.state) {

@@ -25,6 +25,7 @@ public:
     /* Builds the eye sprites and track table before the first guide, so the
      * first frames do not stall the LVGL lock. Optional. */
     static void prepare(const fola::Canvas &canvas);
+    void release();
 
     /* Step-number banner at the start of each step. */
     static constexpr uint32_t kBannerMs = 1200;

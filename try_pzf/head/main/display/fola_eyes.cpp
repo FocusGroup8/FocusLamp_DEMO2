@@ -19,19 +19,6 @@ const Palette kGreen = {hex(0x82d351), hex(0x8fd866), hex(0xa0df7e),
 const Palette kLavender = {hex(0xd3afef), hex(0xd9b8f2), hex(0xe0c3f6),
                            {hex(0xd8c6e6), hex(0xc9b2db), hex(0xa48fb4)}, hex(0xd0bddf),
                            {hex(0xe6dbef), hex(0xd6c7e3), hex(0xc8b6d6), hex(0xb9a5ca)}, hex(0xf6f0fa)};
-const Palette kLemon = {hex(0xd0c52c), hex(0xd5cc4f), hex(0xdcd56f),
-                        {hex(0xd5d194), hex(0xc6c070), hex(0xa19c51)}, hex(0xcdc98a),
-                        {hex(0xe4e2be), hex(0xd4d19e), hex(0xc5c184), hex(0xb7b26c)}, hex(0xf7f6e6)};
-const Palette kOrange = {hex(0xff9d5d), hex(0xffa870), hex(0xffb787),
-                         {hex(0xfabfa1), hex(0xf3a882), hex(0xc98663)}, hex(0xf3b697),
-                         {hex(0xfbd7c5), hex(0xf4c2a9), hex(0xeaaf91), hex(0xdf9d7b)}, hex(0xfff1ea)};
-
-EyeLayout neutral_layout(const Palette &palette)
-{
-    // Body boxes at x135/x286, y164 in the 540x499 frame: centre (265, 238).
-    return {&palette, 1.0f, fig_x(265), fig_y(238)};
-}
-
 namespace {
 
 // Figma geometry, in Figma px around the eye centre.
@@ -83,7 +70,7 @@ struct Sprite {
     uint8_t *rgb = nullptr;  // composited on black, 3 bytes per pixel
     uint32_t used = 0;
 };
-constexpr int kSlots = 5;
+constexpr int kSlots = 3; // Running, completion and timeout.
 Sprite sprites[kSlots];
 uint32_t use_clock = 0;
 
@@ -170,10 +157,10 @@ const Sprite *sprite_for(const Canvas &c, const EyeLayout &layout, bool happy)
 }
 
 /* One composited row of 8-bit pixels for the area being repainted. */
+uint8_t *buffer = nullptr;
+int capacity = 0;
 uint8_t *row_buffer(int width)
 {
-    static uint8_t *buffer = nullptr;
-    static int capacity = 0;
     if (width > capacity) {
         std::free(buffer);
         buffer = static_cast<uint8_t *>(cache_alloc(size_t(width) * 3));
@@ -190,6 +177,17 @@ struct EyePlacement {
 };
 
 } // namespace
+
+void release_eye_cache()
+{
+    for (Sprite &s : sprites) {
+        std::free(s.rgb);
+        s = {};
+    }
+    std::free(buffer);
+    buffer = nullptr;
+    capacity = 0;
+}
 
 Rect eyes_area(const Canvas &c, const EyeLayout &layout)
 {
@@ -295,22 +293,6 @@ bool draw_eyes(const Canvas &c, const EyeLayout &layout, const EyePose &pose)
 
 namespace {
 
-EyeShape lerp(const EyeShape &a, const EyeShape &b, float t)
-{
-    return {a.open + (b.open - a.open) * t, a.lid + (b.lid - a.lid) * t, a.tilt + (b.tilt - a.tilt) * t,
-            t < 0.5f ? a.happy : b.happy};
-}
-EyePose lerp(const EyePose &a, const EyePose &b, float t)
-{
-    EyePose p;
-    p.left = lerp(a.left, b.left, t);
-    p.right = lerp(a.right, b.right, t);
-    p.gaze_x = a.gaze_x + (b.gaze_x - a.gaze_x) * t;
-    p.gaze_y = a.gaze_y + (b.gaze_y - a.gaze_y) * t;
-    p.lift = a.lift + (b.lift - a.lift) * t;
-    return p;
-}
-
 /* Lid closure of a blink: 70 ms close, 30 ms shut, 120 ms open. */
 float blink_closure(int64_t t)
 {
@@ -332,25 +314,16 @@ uint32_t EyeMotion::random()
 
 void EyeMotion::reset(const EyePose &base, int64_t now_ms)
 {
-    from_ = to_ = base;
-    changed_at_ = now_ms;
-    ease_ms_ = 1;
+    base_ = base;
+    blink_at_ = now_ms - 220;
     next_blink_ = now_ms + 1600;
     next_glance_ = now_ms + 2200;
     glance_from_x_ = glance_from_y_ = glance_x_ = glance_y_ = 0;
 }
 
-void EyeMotion::set(const EyePose &base, int64_t now_ms, int ease_ms)
-{
-    from_ = lerp(from_, to_, smooth(float(now_ms - changed_at_) / ease_ms_));
-    to_ = base;
-    changed_at_ = now_ms;
-    ease_ms_ = std::max(1, ease_ms);
-}
-
 EyePose EyeMotion::pose(int64_t now_ms)
 {
-    EyePose p = lerp(from_, to_, smooth(float(now_ms - changed_at_) / ease_ms_));
+    EyePose p = base_;
     if (now_ms >= next_blink_) {
         blink_at_ = now_ms;
         // Mostly single blinks every 2.8-6 s, sometimes a quick double.
@@ -360,28 +333,20 @@ EyePose EyeMotion::pose(int64_t now_ms)
     p.left.open *= 1 - 0.94f * closed;
     p.right.open *= 1 - 0.94f * closed;
 
-    float gx, gy;
-    if (looking_) {
-        gx = look_x_ * kMaxGaze;
-        gy = look_y_ * kMaxGazeY;
-    } else {
-        if (glances && now_ms >= next_glance_) {
-            const float t = smooth((now_ms - glance_at_) / 150.0f);
-            glance_from_x_ += (glance_x_ - glance_from_x_) * t;
-            glance_from_y_ += (glance_y_ - glance_from_y_) * t;
-            // Small glances, back to centre about a third of the time.
-            const bool centre = random() % 3 == 0;
-            glance_x_ = centre ? 0 : (int(random() % 15) - 7);
-            glance_y_ = centre ? 0 : (int(random() % 7) - 3);
-            glance_at_ = now_ms;
-            next_glance_ = now_ms + 2600 + random() % 2800;
-        }
+    if (glances && now_ms >= next_glance_) {
         const float t = smooth((now_ms - glance_at_) / 150.0f);
-        gx = glance_from_x_ + (glance_x_ - glance_from_x_) * t;
-        gy = glance_from_y_ + (glance_y_ - glance_from_y_) * t;
+        glance_from_x_ += (glance_x_ - glance_from_x_) * t;
+        glance_from_y_ += (glance_y_ - glance_from_y_) * t;
+        // Small glances, back to centre about a third of the time.
+        const bool centre = random() % 3 == 0;
+        glance_x_ = centre ? 0 : (int(random() % 15) - 7);
+        glance_y_ = centre ? 0 : (int(random() % 7) - 3);
+        glance_at_ = now_ms;
+        next_glance_ = now_ms + 2600 + random() % 2800;
     }
-    p.gaze_x += gx;
-    p.gaze_y += gy;
+    const float t = smooth((now_ms - glance_at_) / 150.0f);
+    p.gaze_x += glance_from_x_ + (glance_x_ - glance_from_x_) * t;
+    p.gaze_y += glance_from_y_ + (glance_y_ - glance_from_y_) * t;
     return p;
 }
 

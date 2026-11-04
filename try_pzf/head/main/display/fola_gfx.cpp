@@ -489,16 +489,23 @@ bool Track::inner_span(const Canvas &c, int py, int &x0, int &x1)
     return x1 > x0;
 }
 
-bool Track::build(const Canvas &c)
+void Track::release()
 {
-    if (failed_) return false;
-    if (runs_ && built_width_ == c.width() && built_height_ == c.height()) return true;
-    std::free(runs_); // the band only changes with the panel size, which in practice never happens
+    std::free(runs_);
     std::free(distance_);
     std::free(position_);
     runs_ = nullptr;
     distance_ = nullptr;
     position_ = nullptr;
+    failed_ = false;
+    run_count_ = built_width_ = built_height_ = 0;
+}
+
+bool Track::build(const Canvas &c)
+{
+    if (failed_) return false;
+    if (runs_ && built_width_ == c.width() && built_height_ == c.height()) return true;
+    release();
     const float u = c.unit(), inv = 1 / u;
     // Pass 1 counts pixels, pass 2 fills the tables.
     for (int pass = 0; pass < 2; ++pass) {
@@ -543,6 +550,7 @@ bool Track::build(const Canvas &c)
             distance_ = static_cast<int8_t *>(cache_alloc(pixels));
             position_ = static_cast<uint16_t *>(cache_alloc(pixels * sizeof(uint16_t)));
             if (!runs_ || !distance_ || !position_) {
+                release();
                 failed_ = true;
                 return false;
             }

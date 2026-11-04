@@ -966,7 +966,7 @@ static esp_err_t stream_init_locked(const camera_stream_config_t *config)
     if (CAMERA_FIXED_DIAG) {
         s_state.config.default_quality = 15;
         if (s_state.config.default_fps != 5 && s_state.config.default_fps != 8)
-            s_state.config.default_fps = 5;
+            s_state.config.default_fps = 8;
     }
     if (s_state.config.task_stack_size <= 0) {
         s_state.config.task_stack_size = STREAM_TASK_STACK_DEFAULT;

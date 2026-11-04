@@ -10,6 +10,7 @@
 #include "pixel_design_renderer.h"
 #include "algo_result_manager.h"
 #include "focus_ring_renderer.h"
+#include "fola_eyes.h"
 #include "task_guide.h"
 #include "esp_timer.h"
 #include "nvs.h"
@@ -39,6 +40,41 @@ static std::atomic<uint32_t> pixel_revision{0};
 static std::atomic<int> pixel_visible_expression{0};
 static pixel_design::Engine optimized_engine;
 static focus_ring::Renderer focus_renderer;
+// "fola" role: Figma FOBI glow eyes (fola_eyes.h), the default face.
+static std::atomic<bool> fola_role{true};
+static fola::EyeMotion fola_motion;
+
+static fola::EyePose fola_pose(int expression)
+{
+    fola::EyePose p;
+    auto both = [&](float open, float lid, float tilt) {
+        p.left.open = p.right.open = open;
+        p.left.lid = p.right.lid = lid;
+        p.left.tilt = p.right.tilt = tilt;
+    };
+    switch ((expressive_eyes_expression_t)expression) {
+    case EXPRESSIVE_EYES_HAPPY: p.left.happy = p.right.happy = true; break;
+    case EXPRESSIVE_EYES_SAD: both(1, 0.06f, -0.3f); p.gaze_y = 3; break;
+    case EXPRESSIVE_EYES_ANGRY: both(1, 0.08f, 0.38f); break;
+    case EXPRESSIVE_EYES_SURPRISED: both(1.12f, 0, 0); break;
+    case EXPRESSIVE_EYES_SLEEPY: both(0.22f, 0, 0); p.gaze_y = 3; break; // 休眠眯眯眼
+    case EXPRESSIVE_EYES_BORED: both(0.62f, 0.2f, 0); p.gaze_y = 5; break;
+    // Labels use the robot's left/right; EyePose uses screen coordinates.
+    case EXPRESSIVE_EYES_WINK_LEFT: p.right.open = 0.08f; break;
+    case EXPRESSIVE_EYES_WINK_RIGHT: p.left.open = 0.08f; break;
+    default: break;
+    }
+    return p;
+}
+
+/* Draws the fola face; repaints the whole canvas only when `full`. */
+static void fola_draw(uint8_t *bytes, int width, int height, int stride, int64_t now_ms, bool full)
+{
+    const fola::Canvas canvas(bytes, width, height, stride);
+    const fola::EyeLayout layout = fola::neutral_layout(fola::kTeal);
+    if (full) canvas.background(canvas.bounds());
+    fola::draw_eyes(canvas, layout, fola_motion.pose(now_ms));
+}
 
 static void task_guide_touch_event(lv_event_t *event)
 {
@@ -285,6 +321,10 @@ static void expressive_eyes_task(void *arg)
     int64_t report_at=esp_timer_get_time();
     uint64_t draw_sum=0;uint32_t draw_max=0,draw_frames=0;
     int64_t last_blink_request=0;
+    // Which renderer drew the previous frame; the fola face repaints fully after another one.
+    enum class Drawer { None, Guide, Focus, Pixel, Legacy, Fola } last_drawer = Drawer::None;
+    uint32_t fola_revision = pixel_revision.load();
+    int fola_gaze_x = 0, fola_gaze_y = 0;
     while (s_state.running) {
         TickType_t now = xTaskGetTickCount();
         float dt       = (float)(now - last_time) * portTICK_PERIOD_MS / 1000.0f;
@@ -292,6 +332,7 @@ static void expressive_eyes_task(void *arg)
 
         focus_view_t focus; focus_sync_get_view(&focus);
         const bool optimized = pixel_role.load() >= 0 && pixel_optimized.load();
+        const bool fola_face = fola_role.load();
         bool guide_drawn=false;
         if(s_state.canvas && s_state.canvas_buf) {
             lvgl_port_lock(0);
@@ -303,7 +344,9 @@ static void expressive_eyes_task(void *arg)
         }
         if(guide_drawn) {
             // Timer and screen releases stay local even when discovery/HTTP is unavailable.
+            last_drawer = Drawer::Guide;
         } else if (focus.focus && s_state.canvas && s_state.canvas_buf) {
+            last_drawer = Drawer::Focus;
             const int64_t begin=esp_timer_get_time();
             lvgl_port_lock(0);
             auto *buffer=lv_canvas_get_draw_buf(s_state.canvas);
@@ -312,7 +355,34 @@ static void expressive_eyes_task(void *arg)
             lv_obj_invalidate(s_state.canvas);
             lvgl_port_unlock();
             uint32_t us=(uint32_t)(esp_timer_get_time()-begin);draw_sum+=us;draw_max=std::max(draw_max,us);draw_frames++;
+        } else if (fola_face && s_state.canvas && s_state.canvas_buf) {
+            const int64_t begin=esp_timer_get_time();
+            const int64_t now_ms=begin/1000;
+            const bool full = last_drawer != Drawer::Fola;
+            if (full) {
+                fola_motion.reset(fola_pose(pixel_expression.load()), now_ms);
+                fola_revision = pixel_revision.load();
+            } else if (pixel_revision.load() != fola_revision) {
+                fola_revision = pixel_revision.load();
+                fola_motion.set(fola_pose(pixel_expression.load()), now_ms);
+            }
+            const int64_t blink=pixel_blink_until.load();
+            if(blink!=last_blink_request){last_blink_request=blink;if(blink)fola_motion.blink(now_ms);}
+            if (pixel_gaze_x.load() != fola_gaze_x || pixel_gaze_y.load() != fola_gaze_y) {
+                fola_gaze_x = pixel_gaze_x.load(); fola_gaze_y = pixel_gaze_y.load();
+                if (fola_gaze_x || fola_gaze_y) fola_motion.look(fola_gaze_x / 12.0f, fola_gaze_y / 6.0f);
+                else fola_motion.clear_look();
+            }
+            lvgl_port_lock(0);
+            auto *buffer=lv_canvas_get_draw_buf(s_state.canvas);
+            fola_draw(reinterpret_cast<uint8_t*>(s_state.canvas_buf),s_state.screen_width,s_state.screen_height,
+                (int)buffer->header.stride,now_ms,full);
+            lv_obj_invalidate(s_state.canvas);
+            lvgl_port_unlock();
+            last_drawer = Drawer::Fola;
+            uint32_t us=(uint32_t)(esp_timer_get_time()-begin);draw_sum+=us;draw_max=std::max(draw_max,us);draw_frames++;
         } else if (optimized && s_state.canvas && s_state.canvas_buf) {
+            last_drawer = Drawer::Pixel;
             const int64_t begin=esp_timer_get_time();
             const int role=pixel_role.load();
             // A concurrent role change is rechecked before indexing the profile table.
@@ -331,20 +401,21 @@ static void expressive_eyes_task(void *arg)
                 uint32_t us=(uint32_t)(esp_timer_get_time()-begin);draw_sum+=us;draw_max=std::max(draw_max,us);draw_frames++;
             }
         } else if (s_state.eyes) {
+            last_drawer = Drawer::Legacy;
             optimized_engine.role=-1;
             s_state.eyes->update(dt);
         }
         int64_t now_us=esp_timer_get_time();
         if(now_us-report_at>=5000000){
             if(draw_frames)ESP_LOGI(TAG,"%s frames=%lu avg_us=%lu max_us=%lu internal_free=%u internal_min=%u psram_free=%u psram_largest=%u engine_bytes=%u",
-                focus.focus ? "[FOCUS_PERF]" : "[PIXEL_PERF]", (unsigned long)draw_frames,(unsigned long)(draw_sum/draw_frames),(unsigned long)draw_max,
+                focus.focus ? "[FOCUS_PERF]" : (fola_face ? "[FOLA_PERF]" : "[PIXEL_PERF]"), (unsigned long)draw_frames,(unsigned long)(draw_sum/draw_frames),(unsigned long)draw_max,
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT),
                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT),
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),(unsigned)(focus.focus?sizeof(focus_renderer):sizeof(optimized_engine)));
             report_at=now_us;draw_sum=0;draw_max=draw_frames=0;
         }
-        if(guide_drawn || optimized || focus.focus) {
+        if(guide_drawn || optimized || focus.focus || fola_face) {
             const TickType_t period = pdMS_TO_TICKS(33);
             // A slow LVGL flush can take longer than the whole frame budget.
             // Do not replay missed deadlines in a tight catch-up loop: both
@@ -468,10 +539,28 @@ esp_err_t expressive_eyes_display_init(const expressive_eyes_cfg_t *cfg)
         }
         else ESP_LOGW(TAG,"[FACE_BOOT] Read selection: %s",esp_err_to_name(boot_result));
         nvs_close(saved);
-    }else ESP_LOGW(TAG,"[FACE_BOOT] Open selection: %s; using default eyes",esp_err_to_name(boot_result));
+    }else ESP_LOGW(TAG,"[FACE_BOOT] Open selection: %s; using default fola eyes",esp_err_to_name(boot_result));
+    // Eye sprites and the task track table take a moment to build; do it
+    // now, while the backlight is off, instead of on the first guide frame.
+    {
+        lvgl_port_lock(0);
+        auto *buffer = lv_canvas_get_draw_buf(s_state.canvas);
+        task_guide_prepare(reinterpret_cast<uint8_t *>(s_state.canvas_buf), s_state.screen_width,
+            s_state.screen_height, (int)buffer->header.stride);
+        lvgl_port_unlock();
+    }
     // Prepare the restored face while the backlight is still off. Never expose
     // an intermediate default frame while waiting for the animation task.
-    if (pixel_optimized.load() && pixel_role.load() >= 0) {
+    if (fola_role.load()) {
+        const int64_t now = esp_timer_get_time() / 1000;
+        fola_motion.reset(fola_pose(pixel_expression.load()), now);
+        lvgl_port_lock(0);
+        auto *buffer = lv_canvas_get_draw_buf(s_state.canvas);
+        fola_draw(reinterpret_cast<uint8_t *>(s_state.canvas_buf), s_state.screen_width, s_state.screen_height,
+            (int)buffer->header.stride, now, true);
+        lv_obj_invalidate(s_state.canvas);
+        lvgl_port_unlock();
+    } else if (pixel_optimized.load() && pixel_role.load() >= 0) {
         const int64_t now = esp_timer_get_time() / 1000;
         optimized_engine.update(pixel_role.load(), pixel_expression.load(), pixel_revision.load(), now,algo_result_expression_held());
         lvgl_port_lock(0);
@@ -591,11 +680,19 @@ expressive_eyes_expression_t expressive_eyes_get_expression(void)
 esp_err_t expressive_eyes_set_role(const char *role)
 {
     if (!role) return ESP_ERR_INVALID_ARG;
+    if (!strcmp(role, "fola")) {
+        pixel_gaze_x.store(0); pixel_gaze_y.store(0); pixel_blink_until.store(0);
+        pixel_role.store(-1);
+        fola_role.store(true);
+        pixel_revision.fetch_add(1);
+        return ESP_OK;
+    }
     int selected = -2;
     if (!strcmp(role, "legacy")) selected = -1;
     for (int i = 0; i < 8; ++i) if (!strcmp(role, pixel_role_names[i])) selected = i;
     if (selected == -2) return ESP_ERR_INVALID_ARG;
     pixel_gaze_x.store(0); pixel_gaze_y.store(0); pixel_blink_until.store(0);
+    fola_role.store(false);
     pixel_role.store(selected);
     pixel_revision.fetch_add(1);
     return ESP_OK;
@@ -603,6 +700,7 @@ esp_err_t expressive_eyes_set_role(const char *role)
 
 const char *expressive_eyes_get_role(void)
 {
+    if (fola_role.load()) return "fola";
     int role = pixel_role.load();
     return role < 0 ? "legacy" : pixel_role_names[role];
 }

@@ -81,6 +81,14 @@ int main(void) {
     assert(task_guide_prepare_request(user,prompt,sizeof(prompt))==ESP_OK);assert(request("waiting")==4);
     now_ms=30000;assert(request("timeout")==4);
     result=(esp_mcp_tool_result_t){0};assert(engine.tools[0]->callback(NULL,&result)==ESP_OK&&result.is_error);
+    // Replay the captured voice turn without an HTTP prompt or a synthetic token.
+    const char *recognized="帮我把桌面整理的任务拆成三部给我。";
+    mode.mode=APP_STATE_IDLE;mode.revision++;
+    task_guide_note_user_text(recognized);assert(request("waiting")==5);
+    token_from_pending(&engine,token,sizeof(token));
+    result=(esp_mcp_tool_result_t){0};
+    assert(engine.tools[1]->callback(&props,&result)==ESP_OK&&!result.is_error);
+    assert(request("ready")==5);
     for(unsigned i=0;i<engine.count;i++)esp_mcp_tool_destroy(engine.tools[i]);
     puts("PASS: production task guide idle/STT/HTTP prompt/token echo/MCP steps/mode/timeout paths");
 }

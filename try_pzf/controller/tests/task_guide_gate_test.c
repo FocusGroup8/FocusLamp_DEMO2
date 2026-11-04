@@ -14,6 +14,12 @@ int main(void)
     assert(tg_request_intent("帮我把清理桌面这个任务分解为3步，然后放在屏幕上提示我"));
     assert(tg_request_intent("请把整理书桌分成三步"));
     assert(tg_request_intent("把任务分为三步放屏幕上"));
+    assert(tg_request_intent("帮我把桌面整理的任务拆成三部给我。"));
+    assert(tg_request_intent("请把整理桌面的任务分成3部。"));
+    assert(!tg_request_intent("不要帮我把任务拆成三部给我。"));
+    assert(!tg_request_intent("这个任务是帮我找三部电影。"));
+    assert(!tg_request_intent("请把这个任务拆成三部电影。"));
+    assert(!tg_request_intent("你把它放在灯头的LCD屏幕里面给我。"));
     assert(!tg_request_intent("不要帮我拆解任务"));
     assert(!tg_request_intent("不用拆解这个任务"));
     assert(!tg_request_intent("拆解这个词是什么意思"));

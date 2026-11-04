@@ -82,8 +82,9 @@ esp_err_t expressive_eyes_display_deinit(void);
  */
 void expressive_eyes_set_expression(expressive_eyes_expression_t expr);
 
-/** Select legacy, yoyo, diggy, dilly, dash, scout, phew, chacha or tock.
- * Prototype selection is volatile and returns to legacy after restart. */
+/** Select fola (default, Figma FOBI glow eyes), legacy, yoyo, diggy, dilly,
+ * dash, scout, phew, chacha or tock. Persist with expressive_eyes_save_selection();
+ * without a saved selection the face starts as fola. */
 esp_err_t expressive_eyes_set_role(const char *role);
 const char *expressive_eyes_get_role(void);
 /** Optional visual renderer; legacy role always uses the original blue eyes. */

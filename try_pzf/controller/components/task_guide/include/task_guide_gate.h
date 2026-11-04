@@ -56,6 +56,22 @@ static inline const char *tg_gate_name(tg_gate_state_t state)
     static const char *names[]={"idle","waiting","ready","timeout","dismissed","done"};
     return state<=TG_DONE ? names[state] : "idle";
 }
+/* STT may write the measure word 部 for 步. Only accept it after an explicit
+ * task split, with a phrase boundary; 三部电影 and 三部曲 still mean what they say. */
+static inline bool tg_asr_task_split(const char *text)
+{
+    if (!strstr(text, "任务") || strstr(text, "别把") || strstr(text, "不想")) return false;
+    static const char *const phrases[] = {"拆成三部", "拆成3部", "分成三部", "分成3部"};
+    for (size_t i=0; i<sizeof(phrases)/sizeof(phrases[0]); ++i) {
+        const char *match = strstr(text, phrases[i]);
+        if (!match) continue;
+        const char *tail = match + strlen(phrases[i]);
+        if (!*tail || strchr(".,!?", *tail) ||
+            strncmp(tail, "。", strlen("。")) == 0 || strncmp(tail, "，", strlen("，")) == 0 ||
+            strncmp(tail, "给我", strlen("给我")) == 0) return true;
+    }
+    return false;
+}
 static inline bool tg_request_intent(const char *text)
 {
     if (!text || strlen(text)>768 || strstr(text,"不要") || strstr(text,"别帮") ||
@@ -70,6 +86,6 @@ static inline bool tg_request_intent(const char *text)
         strstr(text,"分成3步") || strstr(text,"分成三步") ||
         strstr(text,"分为3步") || strstr(text,"分为三步") ||
         strstr(text,"拆成3步") || strstr(text,"拆成三步");
-    return three && (strstr(text,"帮我") || strstr(text,"请") || strstr(text,"提醒我") ||
+    return (three || tg_asr_task_split(text)) && (strstr(text,"帮我") || strstr(text,"请") || strstr(text,"提醒我") ||
         strstr(text,"怎么做") || strstr(text,"屏幕") || strstr(text,"任务"));
 }

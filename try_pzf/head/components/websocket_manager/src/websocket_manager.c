@@ -6,6 +6,9 @@
  */
 
 #include "websocket_manager.h"
+#if CAMERA_TCP_TRACE
+#include "camera_trace_server.h"
+#endif
 
 #if (WS_MANAGER_ENABLE == 1)
 
@@ -366,6 +369,9 @@ static void camera_client_set_fd(int fd)
     s_camera_last_pong_us = -1;
     uint32_t session_id = s_camera_state.session_id;
     portEXIT_CRITICAL(&s_camera_state_lock);
+#if CAMERA_TCP_TRACE
+    camera_trace_peer(fd, session_id);
+#endif
     ws_camera_lease_start(&s_camera_lease, session_id, now_us);
 }
 
@@ -867,6 +873,9 @@ esp_err_t ws_manager_server_start(void)
     /* HTTPD counts all sessions. The separate WS admission limit above leaves
      * room for two HTTP/control sessions; this is not a separate HTTP pool. */
     config.max_open_sockets = WS_MANAGER_SERVER_MAX_CONN + 2;
+#if CAMERA_TCP_TRACE
+    config.max_uri_handlers += 3;
+#endif
     config.lru_purge_enable = true;
     config.close_fn         = ws_session_close_cb;
     config.open_fn          = ws_session_open_cb;
@@ -884,6 +893,14 @@ esp_err_t ws_manager_server_start(void)
     httpd_register_uri_handler(s_server, &ws_uri_mcp);
     httpd_register_uri_handler(s_server, &ws_uri_algo);
     httpd_register_uri_handler(s_server, &root_uri);
+#if CAMERA_TCP_TRACE
+    err = camera_trace_register(s_server);
+    if (err != ESP_OK) {
+        httpd_stop(s_server);
+        s_server = NULL;
+        return err;
+    }
+#endif
     s_server_running = true;
     s_client_count   = 0;
     memset(s_client_fds, 0, sizeof(s_client_fds));

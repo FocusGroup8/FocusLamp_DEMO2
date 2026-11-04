@@ -28,6 +28,9 @@ if (CONFIG_EXAMPLE_ENABLE_DISPLAY)
                            "display/lvgl_display.c"
                            "display/expressive_eyes_display.cpp"
                            "display/task_guide.cpp"
+                           "display/task_guide_view.cpp"
+                           "display/fola_gfx.cpp"
+                           "display/fola_eyes.cpp"
                            "display/cjk_font_16.c")
 endif()
 

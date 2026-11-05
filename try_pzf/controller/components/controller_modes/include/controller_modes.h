@@ -29,6 +29,28 @@ typedef struct {
     uint32_t held_waiting_ms, held_distracted_ms, held_invalid_ms, held_stale_ms, held_voice_ms;
 } controller_modes_status_t;
 
+/* End-of-session facts, independent of the short completion UI and live clock.
+ * Unacknowledged reports survive subsequent starts, but not a device reboot. */
+#define CONTROLLER_FOCUS_REPORT_CAPACITY 8
+typedef enum {
+    CONTROLLER_FOCUS_END_COMPLETED,
+    CONTROLLER_FOCUS_END_MANUAL_STOP,
+    CONTROLLER_FOCUS_END_STOP,
+    CONTROLLER_FOCUS_END_MODE_SWITCH,
+} controller_focus_end_reason_t;
+typedef struct {
+    uint32_t controller_boot_id, session_id, duration_ms, remaining_ms;
+    uint64_t started_uptime_ms, ended_uptime_ms, effective_ms, elapsed_ms;
+    uint64_t full_ms, normal_ms, held_ms;
+    uint64_t waiting_ms, distracted_ms, invalid_ms, data_stale_ms, voice_ms;
+    controller_focus_end_reason_t end_reason;
+    bool completed;
+} controller_focus_report_t;
+typedef struct {
+    uint32_t count, dropped_reports;
+    controller_focus_report_t pending[CONTROLLER_FOCUS_REPORT_CAPACITY];
+} controller_focus_reports_t;
+
 esp_err_t controller_modes_init(void);
 /* Minutes must be 1..180. Repeated running start does not reset a session.
  * Completion is shown briefly (2 s), then automatically returns to idle. */
@@ -44,6 +66,10 @@ esp_err_t controller_modes_stop(void);
 void controller_modes_set_voice_active(bool active);
 bool controller_modes_voice_active(void);
 esp_err_t controller_modes_get_status(controller_modes_status_t *out);
+esp_err_t controller_modes_get_focus_reports(controller_focus_reports_t *out);
+/* Idempotent for an absent session in this boot; a different boot is rejected. */
+esp_err_t controller_modes_ack_focus_report(uint32_t boot, uint32_t session);
+const char *controller_modes_focus_end_name(controller_focus_end_reason_t reason);
 const char *controller_modes_pause_name(unsigned reason);
 esp_err_t controller_modes_engagement(uint32_t boot, uint32_t session, uint32_t token,
     bool bind, uint32_t sample, uint32_t inference, uint32_t age_ms, uint32_t sample_age_ms,

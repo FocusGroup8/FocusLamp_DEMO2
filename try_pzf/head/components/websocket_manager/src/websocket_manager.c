@@ -9,6 +9,9 @@
 #if CAMERA_TCP_TRACE
 #include "camera_trace_server.h"
 #endif
+#if CAMERA_TCP_STATE
+#include "camera_tcp_state.h"
+#endif
 
 #if (WS_MANAGER_ENABLE == 1)
 
@@ -371,6 +374,9 @@ static void camera_client_set_fd(int fd)
     portEXIT_CRITICAL(&s_camera_state_lock);
 #if CAMERA_TCP_TRACE
     camera_trace_peer(fd, session_id);
+#endif
+#if CAMERA_TCP_STATE
+    camera_tcp_state_peer(fd, session_id);
 #endif
     ws_camera_lease_start(&s_camera_lease, session_id, now_us);
 }
@@ -876,6 +882,9 @@ esp_err_t ws_manager_server_start(void)
 #if CAMERA_TCP_TRACE
     config.max_uri_handlers += 3;
 #endif
+#if CAMERA_TCP_STATE
+    config.max_uri_handlers += 3;
+#endif
     config.lru_purge_enable = true;
     config.close_fn         = ws_session_close_cb;
     config.open_fn          = ws_session_open_cb;
@@ -895,6 +904,14 @@ esp_err_t ws_manager_server_start(void)
     httpd_register_uri_handler(s_server, &root_uri);
 #if CAMERA_TCP_TRACE
     err = camera_trace_register(s_server);
+    if (err != ESP_OK) {
+        httpd_stop(s_server);
+        s_server = NULL;
+        return err;
+    }
+#endif
+#if CAMERA_TCP_STATE
+    err = camera_tcp_state_register(s_server);
     if (err != ESP_OK) {
         httpd_stop(s_server);
         s_server = NULL;
@@ -1004,6 +1021,20 @@ static int camera_socket_select_writable(int fd)
     return select(fd + 1, NULL, &wfds, NULL, &tv);
 }
 #endif
+
+void ws_manager_server_observe_camera_send(uint32_t session, uint32_t frame_seq,
+                                           uint32_t jpeg_bytes, esp_err_t ret,
+                                           const ws_camera_send_result_t *result)
+{
+#if CAMERA_TCP_STATE
+    uint32_t outcome = ret == ESP_OK ? 0 : result->preflight_drop ? 1 :
+                       result->budget_timeout ? (result->wire_bytes ? 3 : 2) : 4;
+    camera_tcp_state_observe(session, frame_seq, jpeg_bytes, outcome,
+                             result->network_us, result->wire_bytes, result->socket_errno);
+#else
+    (void)session; (void)frame_seq; (void)jpeg_bytes; (void)ret; (void)result;
+#endif
+}
 
 /* Per-call nonblocking writes preserve HTTPD's socket mode. The caller shares
  * one deadline across metadata and JPEG. Count progress even on failure. */

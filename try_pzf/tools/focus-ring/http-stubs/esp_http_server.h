@@ -9,7 +9,7 @@ typedef struct httpd_req {
     size_t content_len;
     const char *input;
     size_t input_size, consumed, receive_chunk;
-    char response[2048], content_type[48], status[48];
+    char response[8192], content_type[48], status[48];
     size_t response_size;
     int close_header;
     int fd, nodelay_at_first_send;

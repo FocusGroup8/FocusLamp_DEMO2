@@ -20,7 +20,7 @@
 #include "task_guide.h"
 
 int64_t fake_now;
-static httpd_uri_t routes[4];
+static httpd_uri_t routes[5];
 static unsigned route_count;
 static size_t largest_compact, full_size;
 static esp_err_t guide_report_result=ESP_OK;
@@ -57,7 +57,7 @@ esp_err_t task_guide_report(const cJSON *report)
 
 esp_err_t ws_manager_server_register_uri(const httpd_uri_t *uri)
 {
-    assert(route_count < 4); routes[route_count++]=*uri; return ESP_OK;
+    assert(route_count < 5); routes[route_count++]=*uri; return ESP_OK;
 }
 void demo_behaviors_get_status(demo_behaviors_status_t *out)
 {
@@ -227,7 +227,7 @@ int main(void)
 {
     rate_contract();
     assert(controller_modes_init()==ESP_OK);
-    assert(mode_http_api_register()==ESP_OK && route_count==4);
+    assert(mode_http_api_register()==ESP_OK && route_count==5);
     /* Longest uptime and boot/token identities; max configurable duration. */
     fake_now=(int64_t)UINT32_MAX*1000;
     httpd_req_t r=call(HTTP_POST,"/api/mode","{\"mode\":\"focus\",\"duration\":180}");
@@ -348,8 +348,42 @@ int main(void)
     snprintf(body,sizeof(body),"{\"bind\":true,\"controller_boot_id\":%lu,\"session_id\":%lu}",
         (unsigned long)boot,(unsigned long)session);
     nodelay_contract(body);
-    printf("PASS: actual HTTP handlers + controller_modes + cJSON; compact max=%zu/512, full=%zu/2048; "
+    /* Finalized facts outlive idle/reset, and ACK cannot cross a boot. */
+    assert(controller_modes_stop()==ESP_OK);
+    r=call(HTTP_GET,"/api/mode",NULL);assert(status(&r)==200);j=json(&r);
+    cJSON *reports=cJSON_GetObjectItemCaseSensitive(j,"focus_reports");
+    assert(cJSON_IsObject(reports) && u32(reports,"schema_version")==1);
+    cJSON *pending=cJSON_GetObjectItemCaseSensitive(reports,"pending");
+    assert(cJSON_GetArraySize(pending)==1);
+    cJSON *report=cJSON_GetArrayItem(pending,0);
+    assert(u32(report,"session_id")==session && u32(report,"duration_ms")==10800000);
+    assert(!strcmp(cJSON_GetObjectItemCaseSensitive(report,"end_reason")->valuestring,"stop"));
+    assert(!cJSON_HasObjectItem(cJSON_GetObjectItemCaseSensitive(report,"timing_totals"),"half_ms"));
+    cJSON_Delete(j);
+    snprintf(body,sizeof(body),"{\"controller_boot_id\":%lu,\"session_id\":%lu}",
+        (unsigned long)(boot-1),(unsigned long)session);
+    r=call(HTTP_POST,"/api/focus/reports/ack",body);assert(status(&r)==409);
+    r=call(HTTP_POST,"/api/focus/reports/ack","{}");assert(status(&r)==400);
+    r=call_raw(HTTP_POST,"/api/focus/reports/ack","{",1,20);assert(status(&r)==400 && r.close_header);
+    snprintf(body,sizeof(body),"{\"controller_boot_id\":%lu,\"session_id\":%lu}",
+        (unsigned long)boot,(unsigned long)session);
+    r=call(HTTP_POST,"/api/focus/reports/ack",body);assert(status(&r)==200);
+    r=call(HTTP_POST,"/api/focus/reports/ack",body);assert(status(&r)==200); /* ACK retry. */
+    r=call(HTTP_GET,"/api/mode",NULL);j=json(&r);
+    assert(cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(j,"focus_reports"),"pending"))==0);
+    cJSON_Delete(j);
+    /* A full eight-report queue must still serialize as complete valid JSON. */
+    for(unsigned i=0;i<CONTROLLER_FOCUS_REPORT_CAPACITY+1;i++){
+        assert(controller_modes_focus_start(1)==ESP_OK);fake_now+=1000000;
+        assert(controller_modes_focus_stop()==ESP_OK);
+    }
+    r=call(HTTP_GET,"/api/mode",NULL);j=json(&r);
+    reports=cJSON_GetObjectItemCaseSensitive(j,"focus_reports");
+    assert(cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(reports,"pending"))==CONTROLLER_FOCUS_REPORT_CAPACITY);
+    assert(u32(reports,"dropped_reports")==1);cJSON_Delete(j);
+    printf("PASS: actual HTTP handlers + controller_modes + cJSON; compact max=%zu/512, initial full=%zu; "
            "bind/sample authority, residence subtraction, invalid hold400, GET diagnostics, uint32 wrap, stale session409, malformed/truncated/oversized/NUL400; "
-           "NODELAY before both normal responses, invalid fd skip, option failure preserves response, error-to-normal socket reuse\n",
+           "NODELAY before both normal responses, invalid fd skip, option failure preserves response, error-to-normal socket reuse; "
+           "final report retained, 8-entry JSON queue, overflow counter, idempotent ACK, wrong boot409, malformed ACK400\n",
            largest_compact,full_size);
 }

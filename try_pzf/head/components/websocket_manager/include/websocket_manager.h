@@ -190,6 +190,12 @@ typedef struct {
     int socket_errno;
 } ws_camera_send_result_t;
 
+/* Optional asynchronous TCP snapshot after a camera attempt. No waiting or
+ * socket writes; recording stays disabled until its diagnostic start API. */
+void ws_manager_server_observe_camera_send(uint32_t session, uint32_t frame_seq,
+                                           uint32_t jpeg_bytes, esp_err_t ret,
+                                           const ws_camera_send_result_t *result);
+
 /**
  * @brief Send a frame_header text frame + JPEG binary frame to the /camera
  *        client as one atomic batch under its dedicated send/lifetime mutex.

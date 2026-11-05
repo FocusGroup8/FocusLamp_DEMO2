@@ -27,6 +27,51 @@ static bool s_completed;
 static int64_t s_completed_at_us;
 static uint32_t s_revision;
 static esp_timer_handle_t s_timer;
+static controller_focus_reports_t s_focus_reports;
+static bool s_focus_reported;
+
+const char *controller_modes_focus_end_name(controller_focus_end_reason_t reason)
+{
+    static const char *names[] = {"completed", "manual_stop", "stop", "mode_switch"};
+    return (unsigned)reason < sizeof(names)/sizeof(names[0]) ? names[reason] : "stop";
+}
+
+/* Called after settle and BEFORE a clear/reset. No allocation or I/O in lock. */
+static void finalize_focus_locked(controller_focus_end_reason_t reason)
+{
+    if (!s_focus.active || !s_focus.session || s_focus_reported) return;
+    int64_t held_us = 0;
+    for (unsigned i = 0; i < FOCUS_DONE; ++i) held_us += s_focus.held_us[i];
+    int64_t elapsed_us = s_focus.full_us + s_focus.normal_us + held_us;
+    uint64_t effective_ms = (uint64_t)(s_focus.full_us * 4 + s_focus.normal_us * 3) / 4000;
+    uint32_t duration_ms = s_duration_sec * 1000;
+    if (effective_ms > duration_ms) effective_ms = duration_ms;
+    controller_focus_report_t report = {
+        .controller_boot_id=s_boot_id, .session_id=s_focus.session,
+        .duration_ms=duration_ms, .remaining_ms=(uint32_t)((s_focus.remaining_us+999)/1000),
+        .started_uptime_ms=(uint64_t)s_focus.started_us/1000,
+        /* A late completion check must not include the unconsumed tail. */
+        .ended_uptime_ms=(uint64_t)(s_focus.started_us+elapsed_us)/1000,
+        .elapsed_ms=(uint64_t)elapsed_us/1000, .effective_ms=effective_ms,
+        .full_ms=(uint64_t)s_focus.full_us/1000, .normal_ms=(uint64_t)s_focus.normal_us/1000,
+        .held_ms=(uint64_t)held_us/1000,
+        .waiting_ms=(uint64_t)s_focus.held_us[FOCUS_WAIT]/1000,
+        .distracted_ms=(uint64_t)s_focus.held_us[FOCUS_DISTRACTED]/1000,
+        .invalid_ms=(uint64_t)s_focus.held_us[FOCUS_INVALID]/1000,
+        .data_stale_ms=(uint64_t)s_focus.held_us[FOCUS_STALE]/1000,
+        .voice_ms=(uint64_t)s_focus.held_us[FOCUS_VOICE]/1000,
+        .end_reason=s_focus.completed ? CONTROLLER_FOCUS_END_COMPLETED : reason,
+        .completed=s_focus.completed,
+    };
+    if (s_focus_reports.count == CONTROLLER_FOCUS_REPORT_CAPACITY) {
+        memmove(s_focus_reports.pending,s_focus_reports.pending+1,
+                (CONTROLLER_FOCUS_REPORT_CAPACITY-1)*sizeof(report));
+        --s_focus_reports.count;
+        ++s_focus_reports.dropped_reports;
+    }
+    s_focus_reports.pending[s_focus_reports.count++] = report;
+    s_focus_reported = true;
+}
 
 /* These setters take only the short device_state critical section. Mirror
  * writes stay inside s_lock so concurrent commands cannot reorder them.
@@ -57,6 +102,7 @@ static bool advance_locked(int64_t now_us)
     s_completed = s_focus.completed;
     bool just_completed = !was_completed && s_completed;
     if (just_completed) {
+        finalize_focus_locked(CONTROLLER_FOCUS_END_COMPLETED);
         s_completed_at_us = now_us;
         ++s_revision;
     } else if (s_mode == APP_STATE_FOCUS && s_completed &&
@@ -238,6 +284,7 @@ esp_err_t controller_modes_focus_start(uint32_t minutes)
         ++s_revision;
         s_duration_sec = minutes * 60;
         focus_clock_start(&s_focus, s_duration_sec, s_last_us);
+        s_focus_reported = false;
         s_input_token = 0;
         s_completed = false;
         s_completed_at_us = 0;
@@ -267,6 +314,7 @@ esp_err_t controller_modes_companion_start(void)
     previous_duration = s_duration_sec;
     changed = s_mode != APP_STATE_COMPANION;
     if (changed) {
+        if (s_mode == APP_STATE_FOCUS) finalize_focus_locked(CONTROLLER_FOCUS_END_MODE_SWITCH);
         s_mode = APP_STATE_COMPANION;
         ++s_revision;
         s_duration_sec = 0;
@@ -299,6 +347,8 @@ static esp_err_t stop_mode(app_state_t expected, bool any_mode)
     previous_mode = s_mode;
     changed = any_mode || s_mode == expected;
     if (changed) {
+        if (s_mode == APP_STATE_FOCUS) finalize_focus_locked(any_mode ?
+            CONTROLLER_FOCUS_END_STOP : CONTROLLER_FOCUS_END_MANUAL_STOP);
         if (s_mode != APP_STATE_IDLE || s_completed) ++s_revision;
         s_mode = APP_STATE_IDLE;
         s_duration_sec = 0;
@@ -376,6 +426,35 @@ esp_err_t controller_modes_get_status(controller_modes_status_t *out)
     snapshot_locked(out);
     portEXIT_CRITICAL(&s_lock);
     log_completed(completed, out->duration_sec);
+    return ESP_OK;
+}
+
+esp_err_t controller_modes_get_focus_reports(controller_focus_reports_t *out)
+{
+    if (!out) return ESP_ERR_INVALID_ARG;
+    portENTER_CRITICAL(&s_lock);
+    if (!s_initialized) {
+        portEXIT_CRITICAL(&s_lock); return ESP_ERR_INVALID_STATE;
+    }
+    *out = s_focus_reports;
+    portEXIT_CRITICAL(&s_lock);
+    return ESP_OK;
+}
+
+esp_err_t controller_modes_ack_focus_report(uint32_t boot, uint32_t session)
+{
+    portENTER_CRITICAL(&s_lock);
+    if (!s_initialized || boot != s_boot_id) {
+        portEXIT_CRITICAL(&s_lock); return ESP_ERR_INVALID_STATE;
+    }
+    for (uint32_t i=0; i<s_focus_reports.count; ++i) {
+        if (s_focus_reports.pending[i].session_id != session) continue;
+        memmove(s_focus_reports.pending+i,s_focus_reports.pending+i+1,
+                (s_focus_reports.count-i-1)*sizeof(s_focus_reports.pending[0]));
+        --s_focus_reports.count;
+        break;
+    }
+    portEXIT_CRITICAL(&s_lock);
     return ESP_OK;
 }
 

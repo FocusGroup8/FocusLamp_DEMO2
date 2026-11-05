@@ -556,6 +556,7 @@ static void send_pending_frame(void)
     bool valid = n > 0 && (size_t)n < sizeof(header);
     esp_err_t ret = valid ? ws_manager_server_send_camera_pair(f.session, header, n,
                                (const char *)slot->jpeg, f.length, &wire) : ESP_ERR_INVALID_SIZE;
+    if (valid) ws_manager_server_observe_camera_send(f.session, f.seq, f.length, ret, &wire);
     d.lock_wait_us = wire.lock_wait_us;
     d.network_us = wire.network_us;
     d.wire_bytes = wire.wire_bytes;

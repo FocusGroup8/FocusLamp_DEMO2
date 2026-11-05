@@ -57,6 +57,44 @@ static cJSON *engagement_diagnostics(void)
     return j;
 }
 
+/* Reports are copied under the modes lock; all JSON allocation happens here. */
+static char *focus_reports_json(void)
+{
+    controller_focus_reports_t *reports=malloc(sizeof(*reports));
+    if(!reports)return NULL;
+    if(controller_modes_get_focus_reports(reports)!=ESP_OK){free(reports);return NULL;}
+    cJSON *root=cJSON_CreateObject(),*pending=NULL;
+    if(!root)goto fail;
+    if(!cJSON_AddNumberToObject(root,"schema_version",1) ||
+       !cJSON_AddNumberToObject(root,"dropped_reports",reports->dropped_reports))goto fail;
+    pending=cJSON_AddArrayToObject(root,"pending");
+    if(!pending)goto fail;
+    for(uint32_t i=0;i<reports->count;++i){
+        const controller_focus_report_t *r=&reports->pending[i];
+        cJSON *j=cJSON_CreateObject();
+        if(!j)goto fail;
+        if(!cJSON_AddItemToArray(pending,j)){cJSON_Delete(j);goto fail;}
+#define ADD_REPORT(field) if(!cJSON_AddNumberToObject(j,#field,(double)r->field))goto fail
+        if(!cJSON_AddNumberToObject(j,"schema_version",1))goto fail;
+        ADD_REPORT(controller_boot_id);ADD_REPORT(session_id);ADD_REPORT(duration_ms);ADD_REPORT(remaining_ms);
+        ADD_REPORT(started_uptime_ms);ADD_REPORT(ended_uptime_ms);ADD_REPORT(effective_ms);ADD_REPORT(elapsed_ms);
+        if(!cJSON_AddBoolToObject(j,"completed",r->completed) ||
+           !cJSON_AddStringToObject(j,"end_reason",controller_modes_focus_end_name(r->end_reason)))goto fail;
+        cJSON *totals=cJSON_AddObjectToObject(j,"timing_totals");
+        if(!totals)goto fail;
+#undef ADD_REPORT
+#define ADD_TOTAL(field) if(!cJSON_AddNumberToObject(totals,#field,(double)r->field))goto fail
+        ADD_TOTAL(full_ms);ADD_TOTAL(normal_ms);ADD_TOTAL(held_ms);ADD_TOTAL(waiting_ms);
+        ADD_TOTAL(distracted_ms);ADD_TOTAL(invalid_ms);ADD_TOTAL(data_stale_ms);ADD_TOTAL(voice_ms);
+#undef ADD_TOTAL
+    }
+    char *result=cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);free(reports);
+    return result;
+fail:
+    cJSON_Delete(root);free(reports);return NULL;
+}
+
 static esp_err_t mode_status_response(httpd_req_t *req)
 {
 #ifdef FOCUS_SAMPLED_DEMO
@@ -114,6 +152,11 @@ static esp_err_t mode_status_response(httpd_req_t *req)
     char *guide_json=guide?cJSON_PrintUnformatted(guide):NULL;
     cJSON_Delete(guide);
     if (!guide_json) return httpd_resp_send_err(req,HTTPD_500_INTERNAL_SERVER_ERROR,"guide snapshot unavailable");
+    char *reports_json=focus_reports_json();
+    if(!reports_json){
+        free(guide_json);
+        return httpd_resp_send_err(req,HTTPD_500_INTERNAL_SERVER_ERROR,"focus reports unavailable");
+    }
     /* Stream the extension without doubling the HTTP task's stack footprint. */
     size_t length=strlen(response);
     nodelay_on(req, "mode_status_response");
@@ -134,6 +177,9 @@ static esp_err_t mode_status_response(httpd_req_t *req)
     if(sent==ESP_OK)sent=httpd_resp_sendstr_chunk(req,",\"task_guide\":");
     if(sent==ESP_OK)sent=httpd_resp_sendstr_chunk(req,guide_json);
     free(guide_json);
+    if(sent==ESP_OK)sent=httpd_resp_sendstr_chunk(req,",\"focus_reports\":");
+    if(sent==ESP_OK)sent=httpd_resp_sendstr_chunk(req,reports_json);
+    free(reports_json);
     cJSON *diagnostics=engagement_diagnostics();
     char *diag_json=diagnostics?cJSON_PrintUnformatted(diagnostics):NULL;cJSON_Delete(diagnostics);
     if(sent==ESP_OK && diag_json)sent=httpd_resp_sendstr_chunk(req,",\"engagement_diagnostics\":");
@@ -229,6 +275,37 @@ static bool json_u32(const cJSON *root, const char *key, uint32_t *out)
     if (!cJSON_IsNumber(v) || !isfinite(v->valuedouble) || v->valuedouble < 0 ||
         v->valuedouble > UINT32_MAX || floor(v->valuedouble) != v->valuedouble) return false;
     *out = (uint32_t)v->valuedouble; return true;
+}
+
+static esp_err_t focus_report_ack_handler(httpd_req_t *req)
+{
+    char body[193];size_t got=0;
+    httpd_resp_set_type(req,"application/json");
+    if(!req->content_len || req->content_len>=sizeof(body))goto bad;
+    while(got<req->content_len){
+        int n=httpd_req_recv(req,body+got,req->content_len-got);
+        if(n<=0)goto bad;
+        got+=(size_t)n;
+    }
+    body[got]=0;
+    if(memchr(body,0,got))goto bad;
+    cJSON *root=cJSON_ParseWithOpts(body,NULL,true);
+    uint32_t boot=0,session=0;
+    bool valid=cJSON_IsObject(root) && json_u32(root,"controller_boot_id",&boot) &&
+        json_u32(root,"session_id",&session) && session>0;
+    cJSON_Delete(root);
+    if(!valid)goto bad;
+    if(controller_modes_ack_focus_report(boot,session)!=ESP_OK){
+        httpd_resp_set_status(req,"409 Conflict");
+        return httpd_resp_sendstr(req,"{\"ok\":false,\"error\":\"controller_boot_changed\"}");
+    }
+    nodelay_on(req,"focus_report_ack");
+    return httpd_resp_sendstr(req,"{\"ok\":true}");
+bad:
+    httpd_resp_set_status(req,"400 Bad Request");
+    httpd_resp_set_hdr(req,"Connection","close");
+    httpd_resp_sendstr(req,"{\"ok\":false,\"error\":\"invalid focus report acknowledgement\"}");
+    return ESP_FAIL;
 }
 /* Compact reply keeps the clock and task guide consumed by the head,
  * while omitting the full diagnostic payload. */
@@ -384,6 +461,9 @@ esp_err_t mode_http_api_register(void)
     }
     const httpd_uri_t guide_uri={.uri="/api/mode/task_guide",.method=HTTP_POST,.handler=task_guide_handler};
     ret=ws_manager_server_register_uri(&guide_uri);
+    if(ret!=ESP_OK)return ret;
+    const httpd_uri_t report_ack_uri={.uri="/api/focus/reports/ack",.method=HTTP_POST,.handler=focus_report_ack_handler};
+    ret=ws_manager_server_register_uri(&report_ack_uri);
     if(ret!=ESP_OK)return ret;
     ESP_LOGI(TAG, "Mode and engagement APIs registered");
     return ESP_OK;

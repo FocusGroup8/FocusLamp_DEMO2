@@ -460,6 +460,7 @@ static esp_err_t rest_api_camera_image_handler(httpd_req_t *req)
     cJSON *exposure = cJSON_GetObjectItemCaseSensitive(root, "exposure_target");
     cJSON *gamma = cJSON_GetObjectItemCaseSensitive(root, "shadow_gamma");
     cJSON *gamma_level = cJSON_GetObjectItemCaseSensitive(root, "gamma_level");
+    cJSON *jpeg_width = cJSON_GetObjectItemCaseSensitive(root, "jpeg_width");
     camera_handles_t *camera = system_manager_get_camera_handles();
     esp_err_t err = ESP_ERR_INVALID_ARG;
     if (cJSON_IsObject(root) && cJSON_GetArraySize(root) == 1) {
@@ -469,6 +470,8 @@ static esp_err_t rest_api_camera_image_handler(httpd_req_t *req)
             err = camera_set_shadow_gamma(camera, cJSON_IsTrue(gamma));
         } else if (cJSON_IsNumber(gamma_level) && gamma_level->valuedouble == gamma_level->valueint) {
             err = camera_set_gamma_level(camera, gamma_level->valueint);
+        } else if (cJSON_IsNumber(jpeg_width) && jpeg_width->valuedouble == jpeg_width->valueint) {
+            err = camera_set_jpeg_width(camera, jpeg_width->valueint);
         }
     }
     cJSON_Delete(root);
@@ -660,6 +663,9 @@ static esp_err_t rest_api_status_handler(httpd_req_t *req)
     cJSON_AddBoolToObject(data, "camera_fixed_diag", camera_stream_is_fixed_diag());
     cJSON_AddNumberToObject(data, "camera_width", BOARD_CAM_H_RES);
     cJSON_AddNumberToObject(data, "camera_height", BOARD_CAM_V_RES);
+    const camera_handles_t *camera_handles = system_manager_get_camera_handles();
+    cJSON_AddNumberToObject(data, "jpeg_width_requested", camera_get_jpeg_width(camera_handles, false));
+    cJSON_AddNumberToObject(data, "jpeg_width_encoded", camera_get_jpeg_width(camera_handles, true));
     cJSON_AddBoolToObject(data, "camera_control_busy", control_busy);
     cJSON_AddNumberToObject(data, "camera_control_result", control_result);
     camera_handles_t *handles = system_manager_get_camera_handles();

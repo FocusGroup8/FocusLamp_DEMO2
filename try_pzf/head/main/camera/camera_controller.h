@@ -43,6 +43,11 @@ typedef struct {
     jpeg_encoder_handle_t jpeg_encoder;  /*!< JPEG hardware encoder handle */
     uint8_t *jpeg_out_buf;               /*!< JPEG output buffer in PSRAM */
     size_t jpeg_out_buf_size;            /*!< JPEG output buffer capacity in bytes */
+    struct ppa_client_t *jpeg_scaler;
+    void *jpeg_scale_input;
+    void *jpeg_scale_output;
+    int jpeg_width_requested;
+    int jpeg_width_encoded;
     bool is_initialized;                 /*!< Initialization state flag */
     int exposure_target;                 /*!< Last successfully programmed sensor AE target */
     bool shadow_gamma;                   /*!< Hardware shadow-lift curve enabled */
@@ -134,6 +139,8 @@ esp_err_t camera_capture_frame(camera_handles_t *handles);
  * @return ESP_OK on success, error code otherwise
  */
 esp_err_t camera_encode_jpeg(camera_handles_t *handles, int quality, uint32_t *out_size);
+esp_err_t camera_set_jpeg_width(camera_handles_t *handles, int width);
+int camera_get_jpeg_width(const camera_handles_t *handles, bool encoded);
 
 /**
  * @brief Get the JPEG output buffer pointer

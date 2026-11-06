@@ -16,6 +16,7 @@
 #include "driver/isp_ae.h"
 #include "driver/isp_hist.h"
 #include "driver/isp_wbg.h"
+#include "driver/ppa.h"
 #include "esp_cache.h"
 #include "esp_cam_ctlr.h"
 #include "esp_cam_ctlr_csi.h"
@@ -35,6 +36,22 @@
 
 static portMUX_TYPE s_capture_waiter_lock = portMUX_INITIALIZER_UNLOCKED;
 static const char *TAG = "CAMERA_CTLR";
+
+#define SMALL_JPEG_WIDTH  (BOARD_CAM_H_RES * 3 / 4)
+#define SMALL_JPEG_HEIGHT (BOARD_CAM_V_RES * 3 / 4)
+#define SMALL_JPEG_BYTES  (SMALL_JPEG_WIDTH * SMALL_JPEG_HEIGHT * BOARD_CAM_RGB565_BPP)
+
+static void release_jpeg_scaler(camera_handles_t *handles)
+{
+    if (handles->jpeg_scaler) {
+        ppa_unregister_client(handles->jpeg_scaler);
+        handles->jpeg_scaler = NULL;
+    }
+    heap_caps_free(handles->jpeg_scale_input);
+    heap_caps_free(handles->jpeg_scale_output);
+    handles->jpeg_scale_input = NULL;
+    handles->jpeg_scale_output = NULL;
+}
 
 /* MIPI CSI PHY LDO — ESP32-P4 shares LDO channel 3 (2.5V) between DSI and CSI PHYs.
  * If the display system already acquired this channel, esp_ldo_acquire_channel
@@ -615,6 +632,7 @@ esp_err_t camera_controller_deinit(camera_handles_t *handles)
     }
 
     /* Delete JPEG encoder and free output buffer */
+    release_jpeg_scaler(handles);
     if (handles->jpeg_encoder) {
         jpeg_del_encoder_engine(handles->jpeg_encoder);
         handles->jpeg_encoder = NULL;
@@ -793,6 +811,66 @@ esp_err_t camera_set_shadow_gamma(camera_handles_t *handles, bool enabled)
     return camera_set_gamma_level(handles, enabled ? 1 : 0);
 }
 
+esp_err_t camera_set_jpeg_width(camera_handles_t *handles, int width)
+{
+    if (!handles || !handles->is_initialized) return ESP_ERR_INVALID_STATE;
+    if (width != BOARD_CAM_H_RES && width != SMALL_JPEG_WIDTH) return ESP_ERR_INVALID_ARG;
+    __atomic_store_n(&handles->jpeg_width_requested, width, __ATOMIC_RELAXED);
+    return ESP_OK;
+}
+
+int camera_get_jpeg_width(const camera_handles_t *handles, bool encoded)
+{
+    if (!handles) return 0;
+    int width = __atomic_load_n(encoded ? &handles->jpeg_width_encoded : &handles->jpeg_width_requested,
+                                __ATOMIC_RELAXED);
+    return encoded || width ? width : BOARD_CAM_H_RES;
+}
+
+/* Run only on the encoder path. Stage the CSI buffer as the local preview
+ * does, so the PPA and JPEG engines use separate DMA buffers. */
+static esp_err_t scale_network_jpeg(camera_handles_t *handles)
+{
+    if (!handles->jpeg_scaler) {
+        const uint32_t caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA;
+        size_t align = 0;
+        esp_err_t ret = esp_cache_get_alignment(caps, &align);
+        if (ret != ESP_OK) return ret;
+        handles->jpeg_scale_input = heap_caps_aligned_alloc(align, handles->frame_buffer_size, caps);
+        handles->jpeg_scale_output = heap_caps_aligned_alloc(align, SMALL_JPEG_BYTES, caps);
+        if (!handles->jpeg_scale_input || !handles->jpeg_scale_output) {
+            release_jpeg_scaler(handles);
+            return ESP_ERR_NO_MEM;
+        }
+        const ppa_client_config_t client = {.oper_type = PPA_OPERATION_SRM};
+        ret = ppa_register_client(&client, &handles->jpeg_scaler);
+        if (ret != ESP_OK) {
+            release_jpeg_scaler(handles);
+            return ret;
+        }
+    }
+
+    memcpy(handles->jpeg_scale_input, handles->frame_buffer, handles->frame_buffer_size);
+    /* PPA writes back its input window before DMA, as required for this copy. */
+    const ppa_srm_oper_config_t scale = {
+        .in = {
+            .buffer = handles->jpeg_scale_input,
+            .pic_w = BOARD_CAM_H_RES, .pic_h = BOARD_CAM_V_RES,
+            .block_w = BOARD_CAM_H_RES, .block_h = BOARD_CAM_V_RES,
+            .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
+        },
+        .out = {
+            .buffer = handles->jpeg_scale_output,
+            .buffer_size = SMALL_JPEG_BYTES,
+            .pic_w = SMALL_JPEG_WIDTH, .pic_h = SMALL_JPEG_HEIGHT,
+            .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
+        },
+        .scale_x = 0.75f, .scale_y = 0.75f,
+        .mode = PPA_TRANS_MODE_BLOCKING,
+    };
+    return ppa_do_scale_rotate_mirror(handles->jpeg_scaler, &scale);
+}
+
 esp_err_t camera_encode_jpeg(camera_handles_t *handles, int quality, uint32_t *out_size)
 {
     if (!handles || !handles->is_initialized || !handles->jpeg_encoder || !handles->jpeg_out_buf) {
@@ -815,6 +893,8 @@ esp_err_t camera_encode_jpeg(camera_handles_t *handles, int quality, uint32_t *o
         ESP_LOGW(TAG, "JPEG input cache msync failed: %s", esp_err_to_name(ret));
     }
 
+    const void *input = handles->frame_buffer;
+    size_t input_size = handles->frame_buffer_size;
     jpeg_encode_cfg_t encode_cfg = {
         .height        = BOARD_CAM_V_RES,
         .width         = BOARD_CAM_H_RES,
@@ -823,8 +903,19 @@ esp_err_t camera_encode_jpeg(camera_handles_t *handles, int quality, uint32_t *o
         .image_quality = quality,
     };
 
-    ret = jpeg_encoder_process(handles->jpeg_encoder, &encode_cfg, (const uint8_t *)handles->frame_buffer,
-                               (uint32_t)handles->frame_buffer_size, handles->jpeg_out_buf,
+    if (camera_get_jpeg_width(handles, false) == SMALL_JPEG_WIDTH) {
+        ret = scale_network_jpeg(handles);
+        if (ret != ESP_OK) return ret;
+        input = handles->jpeg_scale_output;
+        input_size = SMALL_JPEG_BYTES;
+        encode_cfg.width = SMALL_JPEG_WIDTH;
+        encode_cfg.height = SMALL_JPEG_HEIGHT;
+    } else if (handles->jpeg_scaler) {
+        release_jpeg_scaler(handles);
+    }
+
+    ret = jpeg_encoder_process(handles->jpeg_encoder, &encode_cfg, input,
+                               (uint32_t)input_size, handles->jpeg_out_buf,
                                (uint32_t)handles->jpeg_out_buf_size, out_size);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "JPEG encode failed: %s", esp_err_to_name(ret));
@@ -832,6 +923,7 @@ esp_err_t camera_encode_jpeg(camera_handles_t *handles, int quality, uint32_t *o
     }
 
     /* High-frequency log: downgrade to DEBUG to avoid flooding serial console */
+    __atomic_store_n(&handles->jpeg_width_encoded, encode_cfg.width, __ATOMIC_RELAXED);
     ESP_LOGD(TAG, "JPEG encoded: %lu bytes (quality=%d, subsample=YUV422)", (unsigned long)*out_size, quality);
     return ESP_OK;
 }

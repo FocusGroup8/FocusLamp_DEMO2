@@ -156,6 +156,26 @@ static int64_t s_last_queue_dwell_ms = -1;
 static speak_cycle_t s_speak_cycle;
 static bool s_normal_tts_active;
 static bool s_normal_dialogue_active;
+/* Diagnostic only. These fields never authorize a broadcast or movement. */
+static uint32_t s_emotion_probe_token;
+static int64_t s_emotion_probe_turns_us[3];
+static const char *s_emotion_probe_phrase;
+static const char *s_emotion_reply_opening;
+static const char *s_emotion_episode_opening;
+static int64_t s_emotion_last_reply_us;
+#define EMOTION_PROBE_CONTEXT_US (120LL * 1000000)
+#define EMOTION_PROBE_CALLBACK_US (15LL * 1000000)
+#define EMOTION_REPLY_COOLDOWN_US (60LL * 1000000)
+
+static bool emotion_opening_matches(const char *sentence, const char *opening)
+{
+  size_t length = strlen(opening);
+  if (!sentence || strncmp(sentence, opening, length)) return false;
+  const char *suffix = sentence + length;
+  return !*suffix || *suffix == '!' || *suffix == '.' ||
+      !strncmp(suffix, "。", sizeof("。") - 1) ||
+      !strncmp(suffix, "！", sizeof("！") - 1);
+}
 static bool s_transport_fresh;
 static uint32_t s_transport_boundary_generation;
 static bool s_speak_reset_pending, s_speak_reset_running;
@@ -1357,7 +1377,11 @@ static void xiaozhi_event_process(esp_xiaozhi_chat_event_t event,
           uplink_clear_locked();
           /* Only local cleanup: never send listen/start before closing. */
           if (finished) s_mic_paused_for_tts = false;
-        } else if (normal) s_normal_tts_active = false;
+        } else if (normal) {
+          s_normal_tts_active = false;
+          s_emotion_probe_token = 0;
+          s_emotion_reply_opening = NULL;
+        }
         portEXIT_CRITICAL(&s_uplink_lock);
         if (!finished && !normal) {
           ESP_LOGD(TAG, "Ignoring unmatched/late TTS STOP");
@@ -1387,12 +1411,44 @@ static void xiaozhi_event_process(esp_xiaozhi_chat_event_t event,
                                 (void *)(injection ? "idle" : "listening"));
         break;
       }
-      case ESP_XIAOZHI_CHAT_TTS_STATE_SENTENCE_START:
+      case ESP_XIAOZHI_CHAT_TTS_STATE_SENTENCE_START: {
         portENTER_CRITICAL(&s_uplink_lock);
         bool active_tts = s_speak_cycle.phase == SPEAK_PLAYING ||
             (s_speak_cycle.phase == SPEAK_IDLE && s_normal_tts_active);
+        const char *probe_phrase = s_speak_cycle.phase == SPEAK_PLAYING ?
+            s_emotion_probe_phrase : NULL;
+        uint32_t probe_generation = s_speak_cycle.generation;
+        const char *reply_opening = NULL;
+        int64_t reply_age_ms = 0;
+        bool probe_unanswered = false;
+        if (s_speak_cycle.phase == SPEAK_IDLE && s_normal_tts_active) {
+          int64_t age_us = esp_timer_get_time() - s_emotion_probe_turns_us[2];
+          if (age_us <= EMOTION_PROBE_CALLBACK_US) reply_opening = s_emotion_reply_opening;
+          probe_unanswered = s_emotion_probe_token &&
+              s_emotion_probe_turns_us[0] > 0 &&
+              s_emotion_probe_turns_us[2] - s_emotion_probe_turns_us[0] <= EMOTION_PROBE_CONTEXT_US;
+          s_emotion_probe_token = 0;
+          s_emotion_reply_opening = NULL;
+          reply_age_ms = age_us / 1000;
+        }
         portEXIT_CRITICAL(&s_uplink_lock);
         if (!active_tts) break;
+        if (reply_opening) {
+          ESP_LOGI("EMOTION_PROBE", "normal_reply opening_match=%d stt_to_sentence_ms=%lld",
+                   emotion_opening_matches(tts_state->text, reply_opening), (long long)reply_age_ms);
+        } else if (probe_unanswered) {
+          ESP_LOGI("EMOTION_PROBE", "first sentence closed unanswered window stt_to_sentence_ms=%lld",
+                   (long long)reply_age_ms);
+        }
+        if (probe_phrase) {
+          const char *sentence = tts_state->text;
+          size_t length = strlen(probe_phrase);
+          bool matches = sentence && !strncmp(sentence, probe_phrase, length) &&
+              (sentence[length] == '\0' || !strcmp(sentence + length, "。") ||
+               !strcmp(sentence + length, "！") || !strcmp(sentence + length, "!"));
+          ESP_LOGI("EMOTION_PROBE", "short_tts cycle=%lu body_match=%d",
+                   (unsigned long)probe_generation, matches);
+        }
         if (s_config.event_cb) {
           s_config.event_cb(XIAOZHI_MANAGER_EVENT_TTS_SENTENCE,
                             (void *)tts_state->text, s_config.event_cb_ctx);
@@ -1401,6 +1457,7 @@ static void xiaozhi_event_process(esp_xiaozhi_chat_event_t event,
                                (void *)tts_state->text);
         break;
       }
+      }
     }
     break;
   }
@@ -1408,6 +1465,26 @@ static void xiaozhi_event_process(esp_xiaozhi_chat_event_t event,
     esp_xiaozhi_chat_text_data_t *text_data =
         (esp_xiaozhi_chat_text_data_t *)event_data;
     if (text_data && text_data->role == ESP_XIAOZHI_CHAT_TEXT_ROLE_USER) {
+      if (text_data->text && *text_data->text) {
+        uint32_t token;
+        do { token = esp_random(); } while (!token);
+        bool eligible = false;
+        portENTER_CRITICAL(&s_uplink_lock);
+        if (s_normal_dialogue_active && !s_normal_tts_active && !s_chat_retiring &&
+            !s_chat_rebuilding && s_state == XIAOZHI_MANAGER_STATE_LISTENING &&
+            !speak_cycle_busy(&s_speak_cycle)) {
+          int64_t now = esp_timer_get_time();
+          s_emotion_probe_turns_us[0] = s_emotion_probe_turns_us[1];
+          s_emotion_probe_turns_us[1] = s_emotion_probe_turns_us[2];
+          s_emotion_probe_turns_us[2] = now;
+          s_emotion_probe_token = token;
+          s_emotion_reply_opening = NULL;
+          eligible = s_emotion_probe_turns_us[0] > 0 &&
+              now - s_emotion_probe_turns_us[0] <= EMOTION_PROBE_CONTEXT_US;
+        }
+        portEXIT_CRITICAL(&s_uplink_lock);
+        if (eligible) ESP_LOGI("EMOTION_PROBE", "reply window opened");
+      }
       if (s_config.event_cb) {
         s_config.event_cb(XIAOZHI_MANAGER_EVENT_STT_TEXT,
                           (void *)text_data->text, s_config.event_cb_ctx);
@@ -1740,13 +1817,107 @@ mcp_tool_test_echo(const esp_mcp_property_list_t *properties) {
 /*---------------------------------------------------------------
  * Internal: Register all MCP tools
  *-------------------------------------------------------------*/
+/* Caller holds s_uplink_lock. TTS START may precede generation of the first sentence. */
+static bool emotion_probe_window_open(int64_t now)
+{
+  return s_emotion_probe_token && s_normal_dialogue_active &&
+      !s_chat_retiring && !s_chat_rebuilding && !speak_cycle_busy(&s_speak_cycle) &&
+      (s_state == XIAOZHI_MANAGER_STATE_LISTENING ||
+       (s_state == XIAOZHI_MANAGER_STATE_SPEAKING && s_normal_tts_active)) &&
+      s_emotion_probe_turns_us[0] > 0 &&
+      now - s_emotion_probe_turns_us[0] <= EMOTION_PROBE_CONTEXT_US &&
+      now - s_emotion_probe_turns_us[2] <= EMOTION_PROBE_CALLBACK_US;
+}
+
+static esp_mcp_value_t emotion_probe_pending(const esp_mcp_property_list_t *properties)
+{
+  (void)properties;
+  portENTER_CRITICAL(&s_uplink_lock);
+  uint32_t token = emotion_probe_window_open(esp_timer_get_time()) ?
+      s_emotion_probe_token : 0;
+  bool tts_started = s_normal_tts_active;
+  portEXIT_CRITICAL(&s_uplink_lock);
+  ESP_LOGI("EMOTION_PROBE", "pending available=%d tts_started=%d", token != 0, tts_started);
+  if (!token) return esp_mcp_value_create_bool(false);
+  char text[9];
+  snprintf(text, sizeof(text), "%08lx", (unsigned long)token);
+  return esp_mcp_value_create_string(text);
+}
+
+static esp_mcp_value_t emotion_probe_report(const esp_mcp_property_list_t *properties)
+{
+  const char *token = esp_mcp_property_list_get_property_string(properties, "turn_token");
+  const char *emotion = esp_mcp_property_list_get_property_string(properties, "emotion");
+  if (!token || !emotion ||
+      (strcmp(emotion, "happy") && strcmp(emotion, "sad") && strcmp(emotion, "uncertain"))) {
+    ESP_LOGI("EMOTION_PROBE", "report rejected: invalid arguments");
+    return esp_mcp_value_create_bool(false);
+  }
+  char expected[9];
+  const char *opening = !strcmp(emotion, "happy") ? "替你开心" :
+      !strcmp(emotion, "sad") ? "我在这儿呢" : NULL;
+  const char *reply = NULL;
+  portENTER_CRITICAL(&s_uplink_lock);
+  int64_t now = esp_timer_get_time();
+  snprintf(expected, sizeof(expected), "%08lx", (unsigned long)s_emotion_probe_token);
+  bool accepted = emotion_probe_window_open(now) && !strcmp(expected, token);
+  bool tts_started = s_normal_tts_active;
+  if (accepted) {
+    s_emotion_probe_token = 0;
+    if (!opening) {
+      s_emotion_episode_opening = NULL;
+    } else if ((!s_emotion_episode_opening || strcmp(opening, s_emotion_episode_opening)) &&
+               (!s_emotion_last_reply_us || now - s_emotion_last_reply_us >= EMOTION_REPLY_COOLDOWN_US)) {
+      s_emotion_episode_opening = opening;
+      s_emotion_last_reply_us = now;
+      s_emotion_reply_opening = opening;
+      reply = opening;
+    }
+  }
+  portEXIT_CRITICAL(&s_uplink_lock);
+  if (accepted) ESP_LOGI("EMOTION_PROBE", "report accepted: emotion=%s opening=%d tts_started=%d",
+                         emotion, reply != NULL, tts_started);
+  else ESP_LOGI("EMOTION_PROBE", "report rejected: stale, duplicate or outside reply window");
+  return reply ? esp_mcp_value_create_string(reply) : esp_mcp_value_create_bool(false);
+}
+
+static esp_err_t register_emotion_probe(esp_mcp_t *engine)
+{
+  esp_mcp_tool_t *pending = esp_mcp_tool_create("self.emotion_probe.pending",
+      "仅在角色明确开启情绪联调时使用。回复前读取当前用户轮次令牌；返回 false 时跳过。", emotion_probe_pending);
+  if (!pending) return ESP_ERR_NO_MEM;
+  esp_err_t ret = esp_mcp_add_tool(engine, pending);
+  if (ret != ESP_OK) {
+    esp_mcp_tool_destroy(pending);
+    return ret;
+  }
+  esp_mcp_tool_t *report = esp_mcp_tool_create("self.emotion_probe.report",
+      "仅用于情绪联调。在正常回复前原样传 turn_token；结合最近三轮用户发言，emotion 填 happy、sad 或 uncertain。"
+      "判断用户本人的情绪，排除转述、故事请求和含糊表达。若返回字符串，原样作为本轮正常语音回复的独立第一句，"
+      "然后继续回答；若返回 false，直接正常回答。不要使用主动播报工具，不要念出标签或工具信息。",
+      emotion_probe_report);
+  if (!report) return ESP_ERR_NO_MEM;
+  const char *const names[] = {"turn_token", "emotion"};
+  for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+    esp_mcp_property_t *prop = esp_mcp_property_create(names[i], ESP_MCP_PROPERTY_TYPE_STRING);
+    ret = prop ? esp_mcp_tool_add_property(report, prop) : ESP_ERR_NO_MEM;
+    if (ret != ESP_OK) {
+      if (prop) esp_mcp_property_destroy(prop);
+      esp_mcp_tool_destroy(report);
+      return ret;
+    }
+  }
+  ret = esp_mcp_add_tool(engine, report);
+  if (ret != ESP_OK) esp_mcp_tool_destroy(report);
+  return ret;
+}
+
 static esp_err_t register_mcp_tools(void) {
   esp_err_t ret = ESP_OK;
   ret = task_guide_register_mcp_tools(s_mcp_engine);
   if (ret != ESP_OK) return ret;
   ret = mcp_probe_register_tool(s_mcp_engine);
   if (ret != ESP_OK) return ret;
-
   /* notification.speak - proactive TTS injection */
   esp_mcp_tool_t *speak_tool = esp_mcp_tool_create(
       "self.notification.speak", "主动向用户播报信息，支持不同优先级",
@@ -1848,6 +2019,10 @@ static esp_err_t register_mcp_tools(void) {
     ESP_LOGE(TAG, "Failed to register focuslamp_bridge MCP tools");
     return ret;
   }
+
+  /* The SDK prepends tools, so register these last to advertise them on page one. */
+  ret = register_emotion_probe(s_mcp_engine);
+  if (ret != ESP_OK) return ret;
 
   ESP_LOGI(TAG, "All MCP tools registered successfully");
   return ESP_OK;
@@ -2393,7 +2568,15 @@ esp_err_t xiaozhi_manager_open_audio_channel(void) {
     return ESP_ERR_INVALID_STATE;
   portENTER_CRITICAL(&s_uplink_lock);
   s_transport_fresh = false;
-  if (!injection_owner) s_normal_dialogue_active = true;
+  if (!injection_owner) {
+    if (!s_normal_dialogue_active) {
+      s_emotion_probe_token = 0;
+      memset(s_emotion_probe_turns_us, 0, sizeof(s_emotion_probe_turns_us));
+      s_emotion_reply_opening = NULL;
+      s_emotion_episode_opening = NULL;
+    }
+    s_normal_dialogue_active = true;
+  }
   portEXIT_CRITICAL(&s_uplink_lock);
   uplink_suspend(false);
   esp_err_t ret = esp_xiaozhi_chat_open_audio_channel(opening_handle, NULL, NULL, 0);
@@ -2526,6 +2709,8 @@ static esp_err_t speak_process_request(const speak_request_t *req) {
     if (reserved) {
       tracked_phase_locked("opening");
       fresh = s_transport_fresh;
+      s_emotion_probe_phrase = !strcmp(req->text, "请只朗读：替你开心") ? "替你开心" :
+          !strcmp(req->text, "请只朗读：我在这儿呢") ? "我在这儿呢" : NULL;
       s_uplink_accepting = false;
       uplink_clear_locked();
     }

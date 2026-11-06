@@ -36,7 +36,7 @@ typedef enum {
     DISPLAY_MODE_TOUCH_GUI,           /*!< Touch GUI demo (button test) */
     DISPLAY_MODE_DATA_COLLECTOR,      /*!< Gesture data collector for calibration */
     DISPLAY_MODE_LVGL,                /*!< LVGL framework mode (esp_lvgl_port) */
-    DISPLAY_MODE_EXPRESSIVE_EYES,     /*!< Animated expressive eyes (espp/expressive_eyes) */
+    DISPLAY_MODE_EXPRESSIVE_EYES,     /*!< FOLA default and pixel-role animated faces */
 } display_mode_t;
 
 /**

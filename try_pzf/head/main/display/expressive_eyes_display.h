@@ -15,18 +15,12 @@ extern "C" {
 
 /**
  * @file expressive_eyes_display.h
- * @brief Expressive Eyes display module (C bridge for espp::ExpressiveEyes)
- *
- * Provides animated expressive eyes on the MIPI DSI display using the
- * espp/expressive_eyes C++ component. This module acts as a C/C++ bridge,
- * wrapping the C++ implementation behind a C interface for integration
- * with the existing display_system module.
- *
- * Uses Monochrome Blue drawer style (electric blue eyes on black background).
+ * @brief Shared robot-face display: FOLA default and eight pixel roles.
+ * Owns one RGB565 canvas and the focus/task/default display priority.
  */
 
 /**
- * @brief Expressive eyes expression types (mirrors espp::ExpressiveEyes::Expression)
+ * @brief Stable nine-value expression protocol used by existing controllers.
  */
 typedef enum {
     EXPRESSIVE_EYES_NEUTRAL,
@@ -57,9 +51,8 @@ typedef struct {
 /**
  * @brief Initialize expressive eyes display
  *
- * Creates LVGL canvas, allocates PSRAM buffer, initializes the
- * espp::ExpressiveEyes C++ object with Monochrome Blue drawer,
- * and starts the animation FreeRTOS task.
+ * Creates the shared LVGL canvas and starts the animation FreeRTOS task.
+ * Restores the saved role/style before enabling the panel backlight.
  *
  * @param cfg  Configuration (must provide disp, screen_width, screen_height)
  * @return ESP_OK on success
@@ -69,7 +62,7 @@ esp_err_t expressive_eyes_display_init(const expressive_eyes_cfg_t *cfg);
 /**
  * @brief Deinitialize expressive eyes display
  *
- * Stops the animation task, releases the C++ object and PSRAM canvas buffer.
+ * Stops the animation task and releases renderer caches and the PSRAM canvas.
  *
  * @return ESP_OK on success
  */
@@ -82,15 +75,19 @@ esp_err_t expressive_eyes_display_deinit(void);
  */
 void expressive_eyes_set_expression(expressive_eyes_expression_t expr);
 
-/** Select legacy (default blue eyes), yoyo, diggy, dilly,
+/** Select fola (muted teal default), yoyo, diggy, dilly,
  * dash, scout, phew, chacha or tock. Persist with expressive_eyes_save_selection();
- * without a saved selection the face starts as legacy. */
+ * without a saved selection the face starts as FOLA. legacy remains an input alias. */
 esp_err_t expressive_eyes_set_role(const char *role);
 const char *expressive_eyes_get_role(void);
-/** Optional visual renderer; legacy role always uses the original blue eyes. */
+/** Optional pixel-role renderer; FOLA uses its own renderer with style original. */
 esp_err_t expressive_eyes_set_style(const char *style);
 const char *expressive_eyes_get_style(void);
 esp_err_t expressive_eyes_save_selection(void);
+/** FOLA's nine expressions plus thinking/confused/listening/speaking.
+ * Pixel roles retain their nine shapes through explicit fallback mappings. */
+esp_err_t expressive_eyes_set_fola_label(const char *label);
+const char *expressive_eyes_get_fola_label(void);
 
 /**
  * @brief Set look direction

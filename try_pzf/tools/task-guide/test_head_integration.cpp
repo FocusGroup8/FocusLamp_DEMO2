@@ -7,6 +7,7 @@
 static int64_t clock_ms=1000;
 extern "C" int64_t esp_timer_get_time(void) {return clock_ms*1000;}
 static std::vector<uint8_t> pixels(480*480*2);
+static const char *preview_directory = "tools/task-guide/previews";
 static bool draw() {return task_guide_draw(pixels.data(),480,480,960,clock_ms);}
 static void feed(unsigned request,const char *state,const char *mode="idle") {
     cJSON *o=cJSON_CreateObject(),*g=cJSON_CreateObject();
@@ -30,7 +31,7 @@ static void expect(const char *state,int step,int remaining) {
     assert(cJSON_GetObjectItem(j,"remaining_ms")->valueint==remaining);cJSON_Delete(j);
 }
 static void save(const char *name) {
-    char path[180];std::snprintf(path,sizeof(path),"tools/task-guide/previews/%s.ppm",name);
+    char path[512];std::snprintf(path,sizeof(path),"%s/%s.ppm",preview_directory,name);
     FILE *f=std::fopen(path,"wb");if(!f)return; // previews are optional
     std::fprintf(f,"P6\n480 480\n255\n");
     for(size_t i=0;i<pixels.size();i+=2) {
@@ -50,7 +51,8 @@ static void expect_track(uint32_t remaining) {
     if(remaining) assert(g>150 && g>r+40 && g>b+40);
     else assert(g<120);
 }
-int main() {
+int main(int argc, char **argv) {
+    if (argc > 1) preview_directory = argv[1];
     task_guide_set_touch_available(true);
     feed(0,"idle");feed(1,"waiting");feed(1,"ready");
     assert(draw());save("preview");expect("preview",0,180000);
@@ -70,8 +72,12 @@ int main() {
     task_guide_touch_pressed();task_guide_touch_released();expect("running",0,180000);
     // No observations/network for the complete nine minutes: local clock remains authoritative.
     clock_ms+=360000;assert(draw());save("step3");expect("running",2,180000);
-    clock_ms+=180000;assert(draw());save("done");expect("done",2,0);
-    clock_ms+=2000;assert(!draw());feed(2,"ready");assert(!draw());
+    clock_ms+=180000;assert(draw());expect("done",2,0);
+    const auto first_done_frame = pixels;
+    clock_ms+=420;assert(draw());assert(pixels!=first_done_frame);save("done");
+    const auto settled_done_frame = pixels;
+    clock_ms+=1000;assert(draw());assert(pixels==settled_done_frame);
+    clock_ms+=580;assert(!draw());feed(2,"ready");assert(!draw());
     task_guide_set_touch_available(false);feed(3,"waiting");feed(3,"ready");assert(!draw());expect("dismissed",0,0);
     task_guide_set_touch_available(true);feed(4,"waiting");feed(4,"ready");assert(draw());
     feed(4,"ready","focus");assert(!draw());expect("dismissed",0,0);

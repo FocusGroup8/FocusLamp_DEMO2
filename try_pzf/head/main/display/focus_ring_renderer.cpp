@@ -7,10 +7,13 @@
 namespace focus_ring {
 namespace {
 using namespace fola;
-enum State { High, Normal, Distracted, Waiting, Voice, Done, Stale, Disconnected, Invalid };
+enum State { High, Normal, Distracted, Waiting, Voice, Done, Stale, Disconnected, Invalid, ReminderEyes, ReminderText };
 const char *const labels[]={"高度专注","普通专注","分心暂停","等待专注数据","语音暂停",
                            "已完成","数据过期","连接中断","数据无效"};
 constexpr Rgb kText=hex(0xf3f8f9),kMuted=hex(0xcbd6d8),kHint=hex(0x7d8b8e);
+constexpr int64_t kReminderDelayMs = 5000;
+constexpr int64_t kReminderStageMs = 2000;
+#include "gentle_reminder_art.inc"
 const Palette kAmber={hex(0x985b14),hex(0xe39b35),hex(0xf2b95c),
     {hex(0xe9c99b),hex(0xc68c4c),hex(0x90501c)},hex(0xf7d69e),
     {hex(0xffefce),hex(0xf9d9a4),hex(0xf0c582),hex(0xe5b064)},hex(0xfff8e8)};
@@ -25,8 +28,8 @@ const TrackStyle kRedTrack={hex(0x263139),.86f,hex(0xae3e53),hex(0xdc6474),hex(0
 const TrackStyle kGreyTrack={hex(0x263139),.86f,hex(0x667985),hex(0x8a9fa9),hex(0xb6c7ce),hex(0x8a9fa9),hex(0xe1eaef)};
 const TrackStyle kVoiceTrack={hex(0x263139),.86f,hex(0x3b8bb0),hex(0x69bbdc),hex(0xa3deed),hex(0x69bbdc),hex(0xd5f4ff)};
 State state_for(const focus_view_t &v) {
-    if(v.completed)return Done;
     if(!v.fresh)return Disconnected;
+    if(v.completed)return Done;
     if(!std::strcmp(v.reason,"voice"))return Voice;
     if(!std::strcmp(v.reason,"data_stale"))return Stale;
     if(!std::strcmp(v.reason,"invalid"))return Invalid;
@@ -37,15 +40,38 @@ const TrackStyle &style_for(State s) {
     return s==High?kGreenTrack:s==Normal?kAmberTrack:s==Distracted?kRedTrack:s==Voice?kVoiceTrack:kGreyTrack;
 }
 EyeLayout layout_for(State s) {
-    if(s==Done)return {&kLavender,.85f,240,196};
     return {s==High?&kGreen:s==Normal?&kAmber:s==Distracted?&kRed:s==Voice?&kTeal:&kGrey,
             .70f,240,168,true};
 }
 EyePose pose_for(State s) {
     EyePose p;
-    if(s==Done)p.left.happy=p.right.happy=true;
-    else if(s==Distracted){p.left.lid=p.right.lid=.08f;p.left.tilt=p.right.tilt=-.12f;}
+    if(s==Distracted){p.left.lid=p.right.lid=.08f;p.left.tilt=p.right.tilt=-.12f;}
     return p;
+}
+
+void draw_reminder(const Canvas &canvas, State state)
+{
+    canvas.background(canvas.bounds());
+    if (state == ReminderText) {
+        text_centered(canvas, 240, 221, "回来一下", 2.45f, {231, 203, 199});
+        return;
+    }
+    const float unit = canvas.unit();
+    if (unit <= 0) return;
+    const uint8_t *indices = kEyeIndices;
+    for (int left : kEyeLefts) {
+        const auto rect = canvas.to_pixels(left, kEyeTop, kEyeWidth, kEyeHeight);
+        for (int y = rect.y0; y < rect.y1; ++y) {
+            const int sy = std::clamp(int((y + .5f) / unit) - kEyeTop, 0, kEyeHeight - 1);
+            const auto *row = indices + sy * kEyeWidth;
+            auto *dst = canvas.row(y);
+            for (int x = rect.x0; x < rect.x1; ++x) {
+                const int sx = std::clamp(int((x + .5f) / unit) - left, 0, kEyeWidth - 1);
+                dst[x] = kEyeColours[row[sx]];
+            }
+        }
+        indices += kEyeWidth * kEyeHeight;
+    }
 }
 }
 void Renderer::release() {
@@ -66,21 +92,48 @@ void Renderer::draw(pixel_design::Surface surface,const focus_view_t &v,int64_t 
         shown=std::min(shown,from+(target-from)*t);
     }
     if(v.completed)shown=0;
-    const State state=state_for(v);
+    State state=state_for(v);
+    if (new_session || state == High || state == Normal) reminder_played_ = false;
+    if (new_session || state != Distracted) {
+        distracted_since_ms_ = -1;
+        reminder_started_ms_ = -1;
+    }
+    if (state == Distracted) {
+        if (distracted_since_ms_ < 0) distracted_since_ms_ = now;
+        if (!reminder_played_ && now - distracted_since_ms_ >= kReminderDelayMs) {
+            reminder_played_ = true;
+            reminder_started_ms_ = now;
+        }
+        if (reminder_started_ms_ >= 0) {
+            const int64_t elapsed = now - reminder_started_ms_;
+            if (elapsed < kReminderStageMs) state = ReminderEyes;
+            else if (elapsed < 2 * kReminderStageMs) state = ReminderText;
+        }
+    }
     const fola::Canvas c(surface.bytes,surface.width,surface.height,surface.stride);
-    const bool full=new_session||!continuing||state_!=state;
+    const bool entering = new_session || state_ != state;
+    const bool full = entering || !continuing;
+    if (entering) scene_started_ms_ = now;
     if(full){
-        state_=state;track_level_=-1;seconds_=~0u;scene_started_ms_=now;
+        state_=state;track_level_=-1;seconds_=~0u;
+    }
+    if (state == Done) {
+        celebration_.draw(c, now - scene_started_ms_, full);
+        return;
+    }
+    if (state == ReminderEyes || state == ReminderText) {
+        if (full) draw_reminder(c, state);
+        return;
+    }
+    if(full){
         c.background(c.bounds());
         eyes_.reset(pose_for(state),now);eyes_.glances=state==High||state==Normal;
-        fola::text_centered(c,240,state==Done?342:292,labels[state],state==Done?1.5f:2.f,kText);
-        if(state!=Done)fola::text_centered(c,240,348,"剩余时间",1.f,kHint);
+        fola::text_centered(c,240,292,labels[state],2.f,kText);
+        fola::text_centered(c,240,348,"剩余时间",1.f,kHint);
     }
-    if(state!=Done){
-        const float fraction=v.duration_ms?std::max(0.f,std::min(1.f,shown/v.duration_ms)):0.f;
-        const int level=int(fraction*2048);
-        if(full||track_level_!=level){track_level_=level;track_.draw(c,fraction,style_for(state));}
-    }
+    const float fraction=v.duration_ms?std::max(0.f,std::min(1.f,shown/v.duration_ms)):0.f;
+    const int level=int(fraction*2048);
+    if(full||track_level_!=level){track_level_=level;track_.draw(c,fraction,style_for(state));}
     const unsigned seconds=(v.remaining_ms+999)/1000;
     if(full||seconds_!=seconds){
         seconds_=seconds;
@@ -88,16 +141,6 @@ void Renderer::draw(pixel_design::Surface surface,const focus_view_t &v,int64_t 
         char time[20];std::snprintf(time,sizeof(time),"%u:%02u",seconds/60,seconds%60);
         fola::text_centered(c,240,374,time,1.5f,kMuted,.85f);
     }
-    auto pose=eyes_.pose(now);
-    if(state==Done){
-        const float t=float(now-scene_started_ms_);
-        if(t<700)pose.lift=-fola::kMaxLift*std::fabs(std::sin(t/350.f*3.1415927f));
-    }
-    fola::draw_eyes(c,layout_for(state),pose);
-    if(state==Done){
-        const float twinkle=.55f+.45f*std::sin(float(now-scene_started_ms_)/260.f);
-        fola::sparkle(c,88,150,16,fola::hex(0xe6dbef),twinkle);
-        fola::sparkle(c,396,236,12,fola::hex(0xe6dbef),1.1f-twinkle);
-    }
+    fola::draw_eyes(c,layout_for(state),eyes_.pose(now));
 }
 }

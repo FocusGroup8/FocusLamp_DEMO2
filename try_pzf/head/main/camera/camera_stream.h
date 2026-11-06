@@ -12,7 +12,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* Diagnostic builds hold the producer at a runtime-selected 5 or 8 FPS,
+/* Diagnostic builds hold the producer at a runtime-selected 5, 8, 10 or 15 FPS,
  * fixed Q15, including through disconnects. Normal builds retain BBA/PI. */
 #ifndef CAMERA_FIXED_DIAG
 #define CAMERA_FIXED_DIAG 0
@@ -122,7 +122,7 @@ esp_err_t camera_stream_set_quality(int quality);
  * CAMERA_TRIAL_HIGH_FPS=8 build permits an 8 FPS HIGH level for comparison.
  * A ceiling of 1 or 2 also enables fixed-Q15 low-load mode. This is a runtime
  * setting, not a persistent firmware configuration.
- * CAMERA_FIXED_DIAG instead accepts only 5 or 8 and uses that fixed producer
+ * CAMERA_FIXED_DIAG instead accepts 5, 8, 10 or 15 and uses that fixed producer
  * target without adaptive downgrade. This does not guarantee received FPS.
  *
  * @param fps  Target FPS (1-30)

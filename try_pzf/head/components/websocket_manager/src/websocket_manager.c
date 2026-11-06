@@ -50,6 +50,9 @@ static const char *TAG = "ws_mgr";
 #ifndef CAMERA_PREFLIGHT_WAIT_US
 #define CAMERA_PREFLIGHT_WAIT_US 0
 #endif
+#ifndef CAMERA_PAIR_VECTORED
+#define CAMERA_PAIR_VECTORED 1
+#endif
 
 typedef enum {
     WS_SEND_COMPLETE = 0,
@@ -1006,9 +1009,9 @@ esp_err_t ws_manager_server_send_text(int client_fd, const char *data, int len)
 }
 
 /* Before the FIRST byte of a camera pair is written, test whether the socket
- * is immediately writable. A full send buffer here means the group cannot be
- * delivered without blocking; dropping it with zero bytes keeps the WS frame
- * boundary intact and the connection alive.
+ * is currently writable under lwIP's send-space low-water thresholds. This is
+ * not a claim that the buffer is full or the peer window is zero. A zero-byte
+ * drop preserves the WS boundary; readiness does not reserve a whole pair.
  * Returns >0 writable, 0 not writable (drop group), <0 select error (fall
  * through to the normal send path so a real connection fault is surfaced). */
 #if CAMERA_PREFLIGHT_ENABLED
@@ -1088,15 +1091,10 @@ static ws_send_reason_t ws_raw_send_all(int fd, const uint8_t *data, size_t len,
     return WS_SEND_COMPLETE;
 }
 
-/* Build a server-side WebSocket frame (FIN + opcode + length, server side
- * needs no masking) and send it with full partial-write handling.
- * Returns ESP_OK on success, ESP_FAIL on connection error / pair deadline. */
-static esp_err_t ws_send_ws_frame(int client_fd, uint8_t opcode, const uint8_t *data, size_t len,
-                                  int64_t send_start_us, ws_send_progress_t *group)
+/* Server frames are unmasked. Share the exact wire encoding between single
+ * frames and the camera pair's scatter/gather write. */
+static size_t ws_frame_header(uint8_t ws_hdr[10], uint8_t opcode, size_t len)
 {
-    ws_send_progress_t local = {0};
-    ws_send_progress_t *progress = group ? group : &local;
-    uint8_t ws_hdr[10];
     size_t ws_hdr_len;
     ws_hdr[0] = 0x80 | opcode; /* FIN bit + opcode */
     if (len <= 125) {
@@ -1115,6 +1113,88 @@ static esp_err_t ws_send_ws_frame(int client_fd, uint8_t opcode, const uint8_t *
         }
         ws_hdr_len = 10;
     }
+    return ws_hdr_len;
+}
+
+#if CAMERA_PAIR_VECTORED
+/* Queue both WS frames before lwIP's output pass. No extra JPEG copy/pool:
+ * sendmsg copies accepted bytes into lwIP, just like the previous send calls.
+ * A short write may cross any vector boundary; retain the same group deadline
+ * and byte accounting until the caller decides whether the socket can live. */
+static ws_send_reason_t ws_send_camera_vectors(int fd, const char *text, size_t text_len,
+                                               const char *bin, size_t bin_len,
+                                               int64_t send_start_us, ws_send_progress_t *progress)
+{
+    uint8_t text_header[10], binary_header[10];
+    struct iovec vectors[4] = {
+        {.iov_base = text_header, .iov_len = ws_frame_header(text_header, HTTPD_WS_TYPE_TEXT, text_len)},
+        {.iov_base = (void *)text, .iov_len = text_len},
+        {.iov_base = binary_header, .iov_len = ws_frame_header(binary_header, HTTPD_WS_TYPE_BINARY, bin_len)},
+        {.iov_base = (void *)bin, .iov_len = bin_len},
+    };
+    struct msghdr msg = {.msg_iov = vectors, .msg_iovlen = 4};
+    while (msg.msg_iovlen) {
+        int64_t remaining_us = CAMERA_SEND_BUDGET_US - (esp_timer_get_time() - send_start_us);
+        if (remaining_us <= 0) {
+            errno = EAGAIN;
+            return WS_SEND_BUDGET_TIMEOUT;
+        }
+        /* lwIP sendmsg accepts DONTWAIT/MORE, but rejects MSG_NOSIGNAL. */
+        int n = sendmsg(fd, &msg, MSG_DONTWAIT);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                remaining_us = CAMERA_SEND_BUDGET_US - (esp_timer_get_time() - send_start_us);
+                if (remaining_us <= 0) {
+                    errno = EAGAIN;
+                    return WS_SEND_BUDGET_TIMEOUT;
+                }
+                fd_set writable;
+                FD_ZERO(&writable);
+                FD_SET(fd, &writable);
+                struct timeval timeout = {
+                    .tv_sec = remaining_us / 1000000,
+                    .tv_usec = remaining_us % 1000000,
+                };
+                int ready = select(fd + 1, NULL, &writable, NULL, &timeout);
+                if (ready == 0) {
+                    errno = EAGAIN;
+                    return WS_SEND_BUDGET_TIMEOUT;
+                }
+                if (ready < 0 && errno != EINTR) return WS_SEND_CONN_ERROR;
+                continue;
+            }
+            return WS_SEND_CONN_ERROR;
+        }
+        if (n == 0) {
+            errno = ECONNRESET;
+            return WS_SEND_CONN_ERROR;
+        }
+        progress->bytes += (size_t)n;
+        size_t advanced = (size_t)n;
+        while (msg.msg_iovlen && advanced >= msg.msg_iov[0].iov_len) {
+            advanced -= msg.msg_iov[0].iov_len;
+            ++msg.msg_iov;
+            --msg.msg_iovlen;
+        }
+        if (advanced) {
+            msg.msg_iov[0].iov_base = (uint8_t *)msg.msg_iov[0].iov_base + advanced;
+            msg.msg_iov[0].iov_len -= advanced;
+        }
+    }
+    return WS_SEND_COMPLETE;
+}
+#endif
+
+/* Build a server-side WebSocket frame and send it with full partial-write
+ * handling. Non-pair callers retain their original two-write path. */
+static esp_err_t ws_send_ws_frame(int client_fd, uint8_t opcode, const uint8_t *data, size_t len,
+                                  int64_t send_start_us, ws_send_progress_t *group)
+{
+    ws_send_progress_t local = {0};
+    ws_send_progress_t *progress = group ? group : &local;
+    uint8_t ws_hdr[10];
+    size_t ws_hdr_len = ws_frame_header(ws_hdr, opcode, len);
     progress->reason = ws_raw_send_all(client_fd, ws_hdr, ws_hdr_len, send_start_us, progress);
     if (progress->reason == WS_SEND_COMPLETE) {
         progress->reason = ws_raw_send_all(client_fd, data, len, send_start_us, progress);
@@ -1372,10 +1452,16 @@ esp_err_t ws_manager_server_send_camera_pair(uint32_t session, const char *text,
 #endif
 
     ws_send_progress_t group = {0};
+#if CAMERA_PAIR_VECTORED
+    group.reason = ws_send_camera_vectors(client_fd, text, (size_t)text_len, bin,
+                                          (size_t)bin_len, send_start_us, &group);
+    bool ok = group.reason == WS_SEND_COMPLETE;
+#else
     bool ok               = (ws_send_ws_frame(client_fd, HTTPD_WS_TYPE_TEXT, (const uint8_t *)text,
                                       (size_t)text_len, send_start_us, &group) == ESP_OK) &&
                             (ws_send_ws_frame(client_fd, HTTPD_WS_TYPE_BINARY, (const uint8_t *)bin,
                                       (size_t)bin_len, send_start_us, &group) == ESP_OK);
+#endif
 
     int saved_errno = ok ? 0 : errno;
     int64_t dur_us = esp_timer_get_time() - send_start_us;
@@ -1455,6 +1541,7 @@ static esp_err_t snapshot_stats(ws_send_stats_t *stats, bool take)
     stats->camera_preflight_drops = atomic_load(&s_camera_preflight_drops_total);
     stats->camera_preflight_wait_us = CAMERA_PREFLIGHT_ENABLED ? CAMERA_PREFLIGHT_WAIT_US : 0;
     stats->camera_preflight_enabled = CAMERA_PREFLIGHT_ENABLED != 0;
+    stats->camera_pair_vectored = CAMERA_PAIR_VECTORED != 0;
     if (take) {
         memset(&s_send_stats, 0, sizeof(s_send_stats));
         memset(&s_pair_stats, 0, sizeof(s_pair_stats));

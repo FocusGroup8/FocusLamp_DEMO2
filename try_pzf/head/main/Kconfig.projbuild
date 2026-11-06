@@ -171,9 +171,8 @@ menu "Example Configuration"
         config EXAMPLE_DEMO_EXPRESSIVE_EYES
             bool "Expressive Eyes (animated eye display)"
             help
-                Display animated expressive eyes using the espp/expressive_eyes component.
-                Shows electric blue monochrome eyes on black background with blinking,
-                look direction, and expression changes. Perfect for robot face display.
+                Display the muted teal FOLA face or a selected pixel role, with blinking,
+                look direction, and expression changes on the shared RGB565 canvas.
         config EXAMPLE_DEMO_TOUCH_GAME
             bool "Touch Game (gesture-controlled ball)"
             select EXAMPLE_ENABLE_TOUCH_GAME

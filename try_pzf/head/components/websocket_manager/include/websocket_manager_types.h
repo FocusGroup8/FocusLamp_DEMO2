@@ -95,6 +95,7 @@ typedef struct {
     uint32_t camera_preflight_drops; /*!< Boot cumulative zero-byte admission drops; NOT reset per window */
     uint32_t camera_preflight_wait_us;
     bool camera_preflight_enabled;  /*!< Build identity for the controlled ON/OFF comparison */
+    bool camera_pair_vectored;      /*!< Metadata and JPEG submitted together using sendmsg */
 } ws_send_stats_t;
 
 #ifdef __cplusplus

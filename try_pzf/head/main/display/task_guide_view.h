@@ -4,6 +4,7 @@
 // task_guide_model.h / task_guide.cpp. Layout notes in controller/docs/task-guide-ui.md.
 
 #include "fola_eyes.h"
+#include "celebration_renderer.h"
 #include "fola_gfx.h"
 #include "task_guide_model.h"
 
@@ -36,7 +37,6 @@ private:
 
     void draw_full(const fola::Canvas &c, Scene scene, const Frame &frame, int64_t now_ms);
     void draw_running_time(const fola::Canvas &c, uint32_t remaining_ms, bool repaint);
-    void draw_done_eyes(const fola::Canvas &c, int64_t now_ms);
 
     Scene scene_ = Scene::None;
     uint32_t boot_ = 0, request_ = 0;
@@ -45,6 +45,7 @@ private:
     unsigned seconds_ = ~0u;
     int64_t scene_started_ms_ = 0;
     fola::EyeMotion eyes_;
+    fola::Celebration celebration_;
 };
 
 } // namespace task_guide

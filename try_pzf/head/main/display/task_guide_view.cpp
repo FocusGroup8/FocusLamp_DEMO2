@@ -1,7 +1,6 @@
 #include "task_guide_view.h"
 
 #include <algorithm>
-#include <cmath>
 #include <cstdio>
 
 using namespace fola;
@@ -21,7 +20,6 @@ constexpr Rgb kQueuedFill = hex(0xc7d7da);
 constexpr Rgb kIslandTop = hex(0xb6f5f6), kIslandBottom = hex(0x4ec3cf), kIslandStroke = hex(0xb8f5f6);
 constexpr Rgb kIslandSpill = hex(0x56cdd7), kNodeSpill = hex(0x69d5de);
 constexpr Rgb kPill = hex(0x6cc0c7), kPillGlow = hex(0x8ee0e6); // TASK START light well
-constexpr Rgb kDoneText = hex(0xe6dbef);
 
 // ---- Layout, design px (480 space). Figma boxes are converted with fig_*(). --------
 // Preview: one lit "focus island" for the first step, two quiet queued islands.
@@ -38,7 +36,6 @@ const EyeLayout kRunningEyes = {&kGreen, 0.70f, 240, 168, true};
 constexpr float kRunTextY1 = 292, kRunTextY2[2] = {282, 320}, kRunTextWidth = 300;
 constexpr float kPillsY = 362, kTimeY = 374, kHintY = 404;
 
-const EyeLayout kDoneEyes = {&kLavender, 0.85f, 240, 196};
 const EyeLayout kNoticeEyes = {&kTeal, 0.80f, 240, 180};
 
 constexpr float kTextScale = 2.0f, kSmallScale = 1.5f;
@@ -133,19 +130,11 @@ EyePose worried_pose()
     return p;
 }
 
-EyePose happy_pose()
-{
-    EyePose p;
-    p.left.happy = p.right.happy = true;
-    return p;
-}
-
 } // namespace
 
 void Screen::prepare(const Canvas &canvas)
 {
     prepare_eyes(canvas, kRunningEyes);
-    prepare_eyes(canvas, kDoneEyes, true);
     prepare_eyes(canvas, kNoticeEyes);
     track().prepare(canvas);
 }
@@ -177,10 +166,9 @@ void Screen::draw(const Canvas &c, const Frame &frame, int64_t now_ms, bool cont
         return;
     }
     const View &v = frame.view;
-    const bool same = continuing && scene == scene_ && v.controller_boot_id == boot_ && v.request_id == request_ &&
-        v.step == step_;
-    if (!same) {
-        if (scene != scene_ || !continuing) scene_started_ms_ = now_ms;
+    const bool entering = scene != scene_ || v.controller_boot_id != boot_ || v.request_id != request_ || v.step != step_;
+    if (entering || !continuing) {
+        if (entering) scene_started_ms_ = now_ms;
         scene_ = scene;
         boot_ = v.controller_boot_id;
         request_ = v.request_id;
@@ -208,7 +196,7 @@ void Screen::draw(const Canvas &c, const Frame &frame, int64_t now_ms, bool cont
         }
         break;
     }
-    case Scene::Done: draw_done_eyes(c, now_ms); break;
+    case Scene::Done: celebration_.draw(c, now_ms - scene_started_ms_, false); break;
     case Scene::Notice: draw_eyes(c, kNoticeEyes, eyes_.pose(now_ms)); break;
     default: break;
     }
@@ -217,6 +205,10 @@ void Screen::draw(const Canvas &c, const Frame &frame, int64_t now_ms, bool cont
 void Screen::draw_full(const Canvas &c, Scene scene, const Frame &frame, int64_t now_ms)
 {
     const View &v = frame.view;
+    if (scene == Scene::Done) {
+        celebration_.draw(c, now_ms - scene_started_ms_, true);
+        return;
+    }
     c.background(c.bounds());
     track_level_ = -1;
     seconds_ = ~0u;
@@ -242,12 +234,7 @@ void Screen::draw_full(const Canvas &c, Scene scene, const Frame &frame, int64_t
         text_centered(c, 240, kHintY, "点击退出", 1.0f, kHint);
         break;
     }
-    case Scene::Done:
-        eyes_.reset(happy_pose(), now_ms);
-        eyes_.glances = false;
-        draw_done_eyes(c, now_ms);
-        text_centered(c, 240, 342, "本轮引导结束", kSmallScale, kDoneText);
-        break;
+    case Scene::Done: break;
     case Scene::Notice:
         eyes_.reset(worried_pose(), now_ms);
         eyes_.glances = false;
@@ -268,18 +255,6 @@ void Screen::draw_running_time(const Canvas &c, uint32_t remaining_ms, bool repa
     std::snprintf(label, sizeof(label), "%u:%02u", seconds / 60, seconds % 60);
     if (!repaint) c.background(c.to_pixels(180, kTimeY, 120, 16 * kSmallScale));
     text_centered(c, 240, kTimeY, label, kSmallScale, kQueuedText, 0.85f);
-}
-
-void Screen::draw_done_eyes(const Canvas &c, int64_t now_ms)
-{
-    // A small double hop, then rest, like Figma's completion (5:815).
-    const float t = float(now_ms - scene_started_ms_);
-    EyePose pose = eyes_.pose(now_ms);
-    if (t < 700) pose.lift = -kMaxLift * std::fabs(std::sin(t / 350.0f * 3.1415927f));
-    draw_eyes(c, kDoneEyes, pose);
-    const float twinkle = 0.55f + 0.45f * std::sin(t / 260.0f);
-    sparkle(c, 88, 150, 16, kDoneText, twinkle);
-    sparkle(c, 396, 236, 12, kDoneText, 1.1f - twinkle);
 }
 
 } // namespace task_guide

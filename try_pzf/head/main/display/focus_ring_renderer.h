@@ -2,6 +2,7 @@
 #include "focus_sync.h"
 #include "pixel_design_renderer.h"
 #include "fola_eyes.h"
+#include "celebration_renderer.h"
 namespace focus_ring {
 struct Renderer {
     uint32_t boot=0,session=0,seq=0;
@@ -16,8 +17,12 @@ struct Renderer {
 private:
     fola::Track track_;
     fola::EyeMotion eyes_;
+    fola::Celebration celebration_;
     int state_=-1,track_level_=-1;
     unsigned seconds_=~0u;
     int64_t scene_started_ms_=0;
+    int64_t distracted_since_ms_=-1;
+    int64_t reminder_started_ms_=-1;
+    bool reminder_played_=false;
 };
 }

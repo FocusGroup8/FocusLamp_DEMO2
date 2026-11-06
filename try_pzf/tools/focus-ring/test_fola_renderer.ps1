@@ -12,7 +12,7 @@ $env:ZIG_GLOBAL_CACHE_DIR=Join-Path $PSScriptRoot 'zig-cache-host'
 $json='C:/esp/v5.5.4/esp-idf/components/json/cJSON'
 & $zig cc -std=c11 -O1 -Wall -Wextra -Werror -c head/main/display/cjk_font_16.c -o "$output/font.o"
 if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
-& $zig c++ -std=c++17 -O1 -UNDEBUG -Wall -Wextra -Werror "-I$json" -Itools/task-guide/host-stubs -Itools/focus-ring/test-stubs -Ihead/main/display -Ihead/main/algo tools/focus-ring/test_renderer.cpp head/main/display/focus_ring_renderer.cpp head/main/display/fola_eyes.cpp head/main/display/fola_gfx.cpp "$output/font.o" -o "$output/test_renderer.exe"
+& $zig c++ -std=c++17 -O1 -UNDEBUG -Wall -Wextra -Werror "-I$json" -Itools/task-guide/host-stubs -Itools/focus-ring/test-stubs -Ihead/main/display -Ihead/main/algo tools/focus-ring/test_renderer.cpp head/main/display/focus_ring_renderer.cpp head/main/display/celebration_renderer.cpp head/main/display/fola_eyes.cpp head/main/display/fola_gfx.cpp "$output/font.o" -o "$output/test_renderer.exe"
 if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
 & "$output/test_renderer.exe" $previews
 exit $LASTEXITCODE

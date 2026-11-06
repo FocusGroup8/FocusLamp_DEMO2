@@ -41,7 +41,9 @@
 
 static const char *TAG = "net_mgr";
 
-#define MCP_RESPONSE_BUF_SIZE 4096
+#define MCP_REQUEST_BUF_SIZE 4096
+/* The 18-tool list includes the independent FOLA label schema (4155 bytes). */
+#define MCP_RESPONSE_BUF_SIZE 4608
 #define WIFI_CONNECT_TIMEOUT_MS 30000
 
 static bool s_initialized                     = false;
@@ -119,14 +121,14 @@ static void ws_data_handler(ws_manager_event_t event, void *data)
      * plus ws_server_handler's stack usage could overflow the thread stack,
      * causing silent corruption (no Guru Meditation Error) that prevents the
      * ESP_LOGI below from executing. */
-    char *request_buf = calloc(1, MCP_RESPONSE_BUF_SIZE);
+    char *request_buf = calloc(1, MCP_REQUEST_BUF_SIZE);
     if (request_buf == NULL) {
         ESP_LOGE(TAG, "ws_data_handler: failed to allocate request_buf");
         return;
     }
     int copy_len = msg->data_len;
-    if (copy_len >= MCP_RESPONSE_BUF_SIZE) {
-        copy_len = MCP_RESPONSE_BUF_SIZE - 1;
+    if (copy_len >= MCP_REQUEST_BUF_SIZE) {
+        copy_len = MCP_REQUEST_BUF_SIZE - 1;
     }
     memcpy(request_buf, msg->data, copy_len);
     request_buf[copy_len] = '\0';
@@ -614,6 +616,7 @@ static void add_pipeline_stats(cJSON *data)
     if (ws_manager_server_get_send_stats(&send_stats) == ESP_OK) {
         cJSON_AddNumberToObject(obj, "preflight_wait_us", send_stats.camera_preflight_wait_us);
         cJSON_AddBoolToObject(obj, "preflight_enabled", send_stats.camera_preflight_enabled);
+        cJSON_AddBoolToObject(obj, "pair_vectored", send_stats.camera_pair_vectored);
         cJSON_AddNumberToObject(obj, "preflight_drops_total", send_stats.camera_preflight_drops);
     }
     cJSON_AddNumberToObject(obj, "jpeg_bytes", stats.jpeg_bytes);
@@ -1036,31 +1039,58 @@ static int expression_from_string(const char *str)
     return -1;
 }
 
+static bool fola_label_valid(const char *label)
+{
+    if (expression_from_string(label) >= 0) return true;
+    return !strcmp(label, "thinking") || !strcmp(label, "confused") ||
+           !strcmp(label, "listening") || !strcmp(label, "speaking");
+}
+
+static const char *current_expression_name(void)
+{
+    int idx = (int)expressive_eyes_get_expression();
+    return idx >= 0 && idx < (int)(sizeof(s_expression_names) / sizeof(s_expression_names[0]))
+               ? s_expression_names[idx] : "unknown";
+}
+
 static esp_err_t mcp_cb_eyes_set_expression(const void *args_json, char *response_buf, int response_buf_size)
 {
     const cJSON *root = (const cJSON *)args_json;
-    if (!root) {
+    if (!cJSON_IsObject(root)) {
         snprintf(response_buf, response_buf_size, "{\"ok\":false,\"error\":\"missing arguments\"}");
         return ESP_ERR_INVALID_ARG;
     }
 
     const cJSON *expr_item = cJSON_GetObjectItem(root, "expression");
-    if (!cJSON_IsString(expr_item) || !expr_item->valuestring) {
-        snprintf(response_buf, response_buf_size, "{\"ok\":false,\"error\":\"missing expression\"}");
+    const cJSON *label_item = cJSON_GetObjectItem(root, "label");
+    if (!expr_item && !label_item) {
+        snprintf(response_buf, response_buf_size, "{\"ok\":false,\"error\":\"missing expression or label\"}");
+        return ESP_ERR_INVALID_ARG;
+    }
+    int expr = -1;
+    if (expr_item && (!cJSON_IsString(expr_item) || !expr_item->valuestring ||
+                     (expr = expression_from_string(expr_item->valuestring)) < 0)) {
+        snprintf(response_buf, response_buf_size, "{\"ok\":false,\"error\":\"unknown expression\"}");
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (label_item && (!cJSON_IsString(label_item) || !label_item->valuestring ||
+                      !fola_label_valid(label_item->valuestring))) {
+        snprintf(response_buf, response_buf_size, "{\"ok\":false,\"error\":\"unknown FOLA label\"}");
         return ESP_ERR_INVALID_ARG;
     }
 
-    int expr = expression_from_string(expr_item->valuestring);
-    if (expr < 0) {
-        snprintf(response_buf, response_buf_size, "{\"ok\":false,\"error\":\"unknown expression: %s\"}",
-                 expr_item->valuestring);
-        return ESP_ERR_INVALID_ARG;
+    if (expr >= 0) expressive_eyes_set_expression((expressive_eyes_expression_t)expr);
+    if (label_item) {
+        esp_err_t err = expressive_eyes_set_fola_label(label_item->valuestring);
+        if (err != ESP_OK) {
+            snprintf(response_buf, response_buf_size, "{\"ok\":false,\"error\":\"FOLA label unavailable\"}");
+            return err;
+        }
     }
-
     algo_result_expression_hold(0);
-    expressive_eyes_set_expression((expressive_eyes_expression_t)expr);
-    ESP_LOGI(TAG, "MCP: Eyes set_expression -> %s", expr_item->valuestring);
-    snprintf(response_buf, response_buf_size, "{\"ok\":true,\"expression\":\"%s\"}", expr_item->valuestring);
+    ESP_LOGI(TAG, "MCP: Eyes expression=%s label=%s", current_expression_name(), expressive_eyes_get_fola_label());
+    snprintf(response_buf, response_buf_size, "{\"ok\":true,\"expression\":\"%s\",\"label\":\"%s\"}",
+             current_expression_name(), expressive_eyes_get_fola_label());
     return ESP_OK;
 }
 
@@ -1106,12 +1136,8 @@ static esp_err_t mcp_cb_eyes_blink(const void *args_json, char *response_buf, in
 static esp_err_t mcp_cb_eyes_get_expression(const void *args_json, char *response_buf, int response_buf_size)
 {
     (void)args_json;
-    expressive_eyes_expression_t expr = expressive_eyes_get_expression();
-    int idx                           = (int)expr;
-    const char *name = (idx >= 0 && idx < (int)(sizeof(s_expression_names) / sizeof(s_expression_names[0])))
-                           ? s_expression_names[idx]
-                           : "unknown";
-    snprintf(response_buf, response_buf_size, "{\"ok\":true,\"expression\":\"%s\"}", name);
+    snprintf(response_buf, response_buf_size, "{\"ok\":true,\"expression\":\"%s\",\"label\":\"%s\"}",
+             current_expression_name(), expressive_eyes_get_fola_label());
     return ESP_OK;
 }
 
@@ -1250,44 +1276,57 @@ const algo_result_state_t *network_manager_get_algo_result_state(void)
  *-------------------------------------------------------------*/
 static esp_err_t rest_api_eyes_set_expression_handler(httpd_req_t *req)
 {
-    char buf[64] = {0};
-    int ret      = httpd_req_recv(req, buf, sizeof(buf) - 1);
-    if (ret <= 0) {
-        httpd_resp_send_500(req);
-        return ESP_FAIL;
+    char buf[256];
+    if (req->content_len == 0 || req->content_len >= sizeof(buf)) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Expression request must be 1-255 bytes");
     }
-
-    cJSON *root = cJSON_Parse(buf);
-    if (!root) {
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"code\":1,\"message\":\"invalid json\",\"data\":{}}");
-        return ESP_FAIL;
+    size_t used = 0;
+    while (used < req->content_len) {
+        int received = httpd_req_recv(req, buf + used, req->content_len - used);
+        if (received <= 0) return ESP_FAIL;
+        used += received;
     }
-
-    cJSON *expr_item = cJSON_GetObjectItem(root, "expression");
-    if (!cJSON_IsString(expr_item) || !expr_item->valuestring) {
+    buf[used] = '\0';
+    cJSON *root = cJSON_ParseWithOpts(buf, NULL, true);
+    if (!cJSON_IsObject(root)) {
         cJSON_Delete(root);
         httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"code\":1,\"message\":\"missing expression\",\"data\":{}}");
-        return ESP_ERR_INVALID_ARG;
+        return httpd_resp_sendstr(req, "{\"code\":1,\"message\":\"invalid json\",\"data\":{}}");
+    }
+
+    const cJSON *expr_item = cJSON_GetObjectItem(root, "expression");
+    const cJSON *label_item = cJSON_GetObjectItem(root, "label");
+    if (!expr_item && !label_item) {
+        cJSON_Delete(root);
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"code\":1,\"message\":\"missing expression or label\",\"data\":{}}");
     }
 
 #if CONFIG_EXAMPLE_DEMO_EXPRESSIVE_EYES
-    int expr = expression_from_string(expr_item->valuestring);
-    if (expr < 0) {
+    int expr = -1;
+    if (expr_item && (!cJSON_IsString(expr_item) || !expr_item->valuestring ||
+                     (expr = expression_from_string(expr_item->valuestring)) < 0)) {
         cJSON_Delete(root);
-        char resp[128];
-        snprintf(resp, sizeof(resp), "{\"code\":1,\"message\":\"unknown expression: %s\",\"data\":{}}",
-                 expr_item->valuestring);
         httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, resp);
-        return ESP_ERR_INVALID_ARG;
+        return httpd_resp_sendstr(req, "{\"code\":1,\"message\":\"unknown expression\",\"data\":{}}");
+    }
+    if (label_item && (!cJSON_IsString(label_item) || !label_item->valuestring ||
+                      !fola_label_valid(label_item->valuestring))) {
+        cJSON_Delete(root);
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"code\":1,\"message\":\"unknown FOLA label\",\"data\":{}}");
     }
     cJSON *style_item = cJSON_GetObjectItem(root, "style");
     if(style_item && (!cJSON_IsString(style_item) ||
        (strcmp(style_item->valuestring,"original") && strcmp(style_item->valuestring,"optimized")))) {
         cJSON_Delete(root);httpd_resp_set_type(req,"application/json");
         httpd_resp_sendstr(req,"{\"code\":1,\"message\":\"unknown style\",\"data\":{}}");return ESP_OK;
+    }
+    const cJSON *hold=cJSON_GetObjectItemCaseSensitive(root,"hold_ms");
+    if (hold && (!cJSON_IsNumber(hold) || hold->valuedouble<0 || hold->valuedouble>15000 ||
+                 hold->valuedouble!=hold->valueint)) {
+        cJSON_Delete(root); httpd_resp_set_type(req,"application/json");
+        return httpd_resp_sendstr(req,"{\"code\":1,\"message\":\"invalid hold_ms\"}");
     }
     cJSON *role_item = cJSON_GetObjectItem(root, "role");
     if (role_item && (!cJSON_IsString(role_item) ||
@@ -1302,18 +1341,16 @@ static esp_err_t rest_api_eyes_set_expression_handler(httpd_req_t *req)
         cJSON_Delete(root);httpd_resp_set_type(req,"application/json");
         httpd_resp_sendstr(req,"{\"code\":1,\"message\":\"role changed but boot persistence failed\",\"data\":{}}");return ESP_OK;
     }
-    const cJSON *hold=cJSON_GetObjectItemCaseSensitive(root,"hold_ms");
-    if (hold && (!cJSON_IsNumber(hold) || hold->valuedouble<0 || hold->valuedouble>15000 ||
-                 hold->valuedouble!=hold->valueint)) {
+    if (expr >= 0) expressive_eyes_set_expression((expressive_eyes_expression_t)expr);
+    if (label_item && expressive_eyes_set_fola_label(label_item->valuestring) != ESP_OK) {
         cJSON_Delete(root); httpd_resp_set_type(req,"application/json");
-        return httpd_resp_sendstr(req,"{\"code\":1,\"message\":\"invalid hold_ms\"}");
+        return httpd_resp_sendstr(req,"{\"code\":1,\"message\":\"FOLA label unavailable\",\"data\":{}}");
     }
     algo_result_expression_hold(hold ? (unsigned)hold->valueint : 0);
-    expressive_eyes_set_expression((expressive_eyes_expression_t)expr);
-    ESP_LOGI(TAG, "REST: Eyes set_expression -> %s", expr_item->valuestring);
-    char resp[192];
-    snprintf(resp, sizeof(resp), "{\"code\":0,\"message\":\"success\",\"data\":{\"expression\":\"%s\",\"role\":\"%s\",\"style\":\"%s\"}}",
-             expr_item->valuestring, expressive_eyes_get_role(), expressive_eyes_get_style());
+    ESP_LOGI(TAG, "REST: Eyes expression=%s label=%s", current_expression_name(), expressive_eyes_get_fola_label());
+    char resp[256];
+    snprintf(resp, sizeof(resp), "{\"code\":0,\"message\":\"success\",\"data\":{\"expression\":\"%s\",\"label\":\"%s\",\"role\":\"%s\",\"style\":\"%s\"}}",
+             current_expression_name(), expressive_eyes_get_fola_label(), expressive_eyes_get_role(), expressive_eyes_get_style());
 #else
     char resp[96];
     snprintf(resp, sizeof(resp), "{\"code\":1,\"message\":\"expressive eyes not enabled\",\"data\":{}}");
@@ -1385,13 +1422,9 @@ static esp_err_t rest_api_eyes_blink_handler(httpd_req_t *req)
 static esp_err_t rest_api_eyes_get_expression_handler(httpd_req_t *req)
 {
 #if CONFIG_EXAMPLE_DEMO_EXPRESSIVE_EYES
-    expressive_eyes_expression_t expr = expressive_eyes_get_expression();
-    int idx                           = (int)expr;
-    const char *name = (idx >= 0 && idx < (int)(sizeof(s_expression_names) / sizeof(s_expression_names[0])))
-                           ? s_expression_names[idx]
-                           : "unknown";
-    char resp[192];
-    snprintf(resp, sizeof(resp), "{\"code\":0,\"data\":{\"expression\":\"%s\",\"role\":\"%s\",\"style\":\"%s\",\"held\":%s}}", name,
+    char resp[256];
+    snprintf(resp, sizeof(resp), "{\"code\":0,\"data\":{\"expression\":\"%s\",\"label\":\"%s\",\"role\":\"%s\",\"style\":\"%s\",\"held\":%s}}",
+             current_expression_name(),expressive_eyes_get_fola_label(),
              expressive_eyes_get_role(),expressive_eyes_get_style(),algo_result_expression_held() ? "true" : "false");
 #else
     const char *resp = "{\"code\":1,\"message\":\"expressive eyes not enabled\",\"data\":{}}";

@@ -10,6 +10,7 @@
 #include "esp_log.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const char *TAG = "mcp_tools";
@@ -62,6 +63,10 @@ static const tool_meta_t s_tool_meta[] = {
      "Set expressive eyes expression (neutral/happy/sad/angry/surprised/sleepy/bored/wink_left/wink_right)",
      "{\"type\":\"object\",\"properties\":{\"expression\":{\"type\":\"string\",\"enum\":[\"neutral\",\"happy\",\"sad\","
      "\"angry\",\"surprised\",\"sleepy\",\"bored\",\"wink_left\",\"wink_right\"]}},\"required\":[\"expression\"]}"},
+    {"eyes.set_fola_label", "Set a FOLA face label; listening and speaking are visual states, not audio controls",
+     "{\"type\":\"object\",\"properties\":{\"label\":{\"type\":\"string\",\"enum\":[\"neutral\",\"happy\",\"sad\","
+     "\"angry\",\"surprised\",\"sleepy\",\"bored\",\"wink_left\",\"wink_right\",\"thinking\",\"confused\","
+     "\"listening\",\"speaking\"]}},\"required\":[\"label\"],\"additionalProperties\":false}"},
     {"eyes.look_at", "Set eyes look direction",
      "{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"number\",\"minimum\":-1,\"maximum\":1},"
      "\"y\":{\"type\":\"number\",\"minimum\":-1,\"maximum\":1}},\"required\":[\"x\",\"y\"]}"},
@@ -134,6 +139,9 @@ static mcp_tool_cb_t find_tool_callback(const char *name)
     if (strcmp(name, "led.set_color_temp") == 0)
         return s_callbacks.led_set_color_temp;
     if (strcmp(name, "eyes.set_expression") == 0)
+        return s_callbacks.eyes_set_expression;
+    /* Label and legacy expression requests share validation and dispatch. */
+    if (strcmp(name, "eyes.set_fola_label") == 0)
         return s_callbacks.eyes_set_expression;
     if (strcmp(name, "eyes.look_at") == 0)
         return s_callbacks.eyes_look_at;

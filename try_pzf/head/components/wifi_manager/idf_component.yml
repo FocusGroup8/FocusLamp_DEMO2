@@ -1,10 +1,12 @@
 ## WiFi Manager component dependencies
 dependencies:
   espressif/esp_wifi_remote:
-    version: ">=0.10,<2.0"
+    version: "1.6.2"
     rules:
       - if: "target in [esp32p4, esp32h2]"
   espressif/esp_hosted:
-    version: "~2"
+    # Keep the host RPC/SDIO implementation matched to this board's C5 firmware.
+    # A dependency re-resolve must not silently upgrade the network transport.
+    version: "2.12.13"
     rules:
       - if: "target in [esp32p4, esp32h2]"

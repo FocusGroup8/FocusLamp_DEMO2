@@ -28,10 +28,12 @@ if (CONFIG_EXAMPLE_ENABLE_DISPLAY)
                            "display/lvgl_display.c"
                            "display/expressive_eyes_display.cpp"
                            "display/focus_ring_renderer.cpp"
+                           "display/celebration_renderer.cpp"
                            "display/task_guide.cpp"
                            "display/task_guide_view.cpp"
                            "display/fola_gfx.cpp"
                            "display/fola_eyes.cpp"
+                           "display/fola_face.cpp"
                            "display/cjk_font_16.c")
 endif()
 
@@ -114,7 +116,6 @@ endif()
 
 if (CONFIG_EXAMPLE_ENABLE_DISPLAY)
     list(APPEND COMP_PRIV_REQUIRES "espressif__esp_lvgl_port")
-    list(APPEND COMP_REQUIRES "espp__expressive_eyes")
 endif()
 
 idf_component_register(SRCS ${COMP_SRCS}
@@ -134,5 +135,5 @@ if(NOT CAMERA_TRIAL_HIGH_FPS MATCHES "^(5|8)$")
 endif()
 target_compile_definitions(${COMPONENT_LIB} PRIVATE CAMERA_TRIAL_HIGH_FPS=${CAMERA_TRIAL_HIGH_FPS})
 
-option(CAMERA_FIXED_DIAG "Fixed camera load: runtime 5/8 FPS, Q15, no BBA or PI" OFF)
+option(CAMERA_FIXED_DIAG "Fixed camera load: runtime 5/8/10/15 FPS, Q15, no BBA or PI" OFF)
 target_compile_definitions(${COMPONENT_LIB} PRIVATE CAMERA_FIXED_DIAG=$<BOOL:${CAMERA_FIXED_DIAG}>)

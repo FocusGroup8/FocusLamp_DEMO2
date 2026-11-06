@@ -1,7 +1,8 @@
 param([ValidateSet('head','controller')][string]$Board,[switch]$SampledDemo,
       [switch]$CameraBaseline,[ValidateSet(5,8)][int]$CameraHighFps=5,
       [switch]$CameraFixedDiag,[string]$BuildDirectory,
-      [ValidateSet(0,15000)][int]$CameraPreflightWaitUs=0,[switch]$CameraTcpTrace)
+      [ValidateSet(0,15000)][int]$CameraPreflightWaitUs=0,[switch]$CameraTcpTrace,
+      [switch]$CameraSplitWrites)
 $ErrorActionPreference='Stop'
 $root=Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $env:ESP_IDF_VERSION='5.5'
@@ -18,8 +19,10 @@ if($Board -eq 'head') {
   $preflight=if($CameraBaseline){'OFF'}else{'ON'}
   $fixedDiag=if($CameraFixedDiag){'ON'}else{'OFF'}
   $trace=if($CameraTcpTrace){'ON'}else{'OFF'}
+  $vectored=if($CameraSplitWrites){'OFF'}else{'ON'}
   $buildArgs=@('-D',"FOCUS_SAMPLED_DEMO=$profile",'-D',"CAMERA_PREFLIGHT_ENABLED=$preflight",
                '-D',"CAMERA_PREFLIGHT_WAIT_US=$CameraPreflightWaitUs",'-D',"CAMERA_TCP_TRACE=$trace",
+               '-D',"CAMERA_PAIR_VECTORED=$vectored",
                '-D',"CAMERA_TRIAL_HIGH_FPS=$CameraHighFps",'-D',"CAMERA_FIXED_DIAG=$fixedDiag",'build')
   $env:FOCUS_HEAD_LOCKED_BUILD='1'
   $env:PYTHONPATH=Join-Path $PSScriptRoot 'build-context'

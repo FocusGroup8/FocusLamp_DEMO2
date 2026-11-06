@@ -31,6 +31,7 @@ static uint32_t s_frame_seq = 0;
 #define STREAM_TASK_STACK_DEFAULT 8192
 #define STREAM_TASK_PRIORITY_DEFAULT 5
 #define STATS_WINDOW_FRAMES 30
+#define FIXED_DIAG_MAX_FPS 15
 
 /* Minimum FPS when no camera client is connected (throttle to avoid flooding) */
 #define ADAPTIVE_FPS_MIN 2
@@ -607,6 +608,19 @@ static void camera_sender_task(void *arg)
     vTaskDelete(NULL);
 }
 
+static TickType_t frame_period_ticks(int fps, uint32_t *tick_remainder)
+{
+    if (CAMERA_FIXED_DIAG && fps == 15) {
+        /* Carry fractional ticks so a 100 Hz scheduler averages 15 FPS.
+         * Keep the existing cadence for the lower comparison settings. */
+        uint32_t ticks = configTICK_RATE_HZ + *tick_remainder;
+        *tick_remainder = ticks % fps;
+        return ticks / fps;
+    }
+    *tick_remainder = 0;
+    return pdMS_TO_TICKS(1000 / fps);
+}
+
 static void wait_frame_period(TickType_t start, TickType_t period)
 {
     TickType_t elapsed = xTaskGetTickCount() - start;
@@ -657,7 +671,7 @@ static void camera_stream_task(void *arg)
                           MIN(s_bba_levels[bba.current_level].fps, applied_fps_limit);
 
     if (CAMERA_FIXED_DIAG) {
-        ESP_LOGI(TAG, "CAMERA_FIXED_DIAG=1 Q=15 runtime_fps=5|8; target_fps=%d; BBA/PI disabled; failures do not change cadence",
+        ESP_LOGI(TAG, "CAMERA_FIXED_DIAG=1 Q=15 runtime_fps=5|8|10|15; target_fps=%d; BBA/PI disabled; failures do not change cadence",
                  applied_fps_limit);
     } else {
         ESP_LOGI(TAG, "Streaming task started (BBA: level=%d, Q=%d, fps=%d, PI: target=%lu B/s, motion: enabled)",
@@ -672,6 +686,7 @@ static void camera_stream_task(void *arg)
     int64_t last_stats_log = esp_timer_get_time();
     int64_t diag_last_loop_us = 0, diag_loop_gap_us = 0;
     int64_t diag_capture_us = 0, diag_encode_us = 0;
+    uint32_t tick_remainder = 0;
     bool was_throttled     = false; /* Track throttle state for logging */
 
     while (s_state.running) {
@@ -777,8 +792,6 @@ static void camera_stream_task(void *arg)
             was_throttled = false;
         }
 
-        TickType_t frame_period = pdMS_TO_TICKS(1000 / effective_fps);
-
         /* Capture frame */
         int64_t diag_stage_start_us = esp_timer_get_time();
         esp_err_t ret = camera_capture_frame(s_state.config.camera);
@@ -788,7 +801,7 @@ static void camera_stream_task(void *arg)
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "Frame capture failed: %s", esp_err_to_name(ret));
             s_state.frames_failed++;
-            wait_frame_period(tick_start, frame_period);
+            wait_frame_period(tick_start, frame_period_ticks(effective_fps, &tick_remainder));
             continue;
         }
 
@@ -827,7 +840,7 @@ static void camera_stream_task(void *arg)
             s_state.current_fps = frame_fps_limit;
             s_state.current_quality = 15;
         }
-        frame_period = pdMS_TO_TICKS(1000 / effective_fps);
+        TickType_t frame_period = frame_period_ticks(effective_fps, &tick_remainder);
         diag_stage_start_us = esp_timer_get_time();
         ret = camera_encode_jpeg(s_state.config.camera, frame_quality, &jpeg_size);
         uint32_t encode_cost = esp_timer_get_time() - diag_stage_start_us;
@@ -1280,7 +1293,8 @@ esp_err_t camera_stream_set_quality(int quality)
 
 esp_err_t camera_stream_set_fps(int fps)
 {
-    if (fps < 1 || fps > 30 || (CAMERA_FIXED_DIAG && fps != 5 && fps != 8)) {
+    if (fps < 1 || fps > 30 ||
+        (CAMERA_FIXED_DIAG && fps != 5 && fps != 8 && fps != 10 && fps != FIXED_DIAG_MAX_FPS)) {
         return ESP_ERR_INVALID_ARG;
     }
     if (atomic_flag_test_and_set(&s_lifecycle)) return ESP_ERR_INVALID_STATE;
@@ -1336,7 +1350,7 @@ bool camera_stream_is_fixed_diag(void)
 
 int camera_stream_get_max_fps(void)
 {
-    return CAMERA_FIXED_DIAG ? 8 : CAMERA_TRIAL_HIGH_FPS;
+    return CAMERA_FIXED_DIAG ? FIXED_DIAG_MAX_FPS : CAMERA_TRIAL_HIGH_FPS;
 }
 
 void camera_stream_get_stats(uint32_t *frames_sent, uint32_t *frames_failed, uint32_t *avg_frame_size,

@@ -1,5 +1,9 @@
 # try_PZF 集成代码快照
 
+## 2026-11-07 更新
+
+- 补齐庆祝和轻提醒画面资源，下载源码后可完整编译显示模块。
+
 这是 `try_PZF` 中 controller/head 当前集成代码的独立副本，位于
 `feature/try-pzf-demo-integration` 分支。仓库原有根工程保持不变；不要在
 仓库根目录构建这两个工程。本地 controller 没有 Git 历史，因此这里交付
